@@ -88,6 +88,38 @@ Two laws that fell out of Peter's review of the first cut:
   limit is unreachable); listeners fetch ops from `doc_ops`, which is the
   event log AND the audit trail (`by_user`, `at`).
 
+## Db-first, properly (Peter's challenge, 2026-07-28 night)
+
+The first cut wasn't db-first enough. Three gaps, closed:
+
+- **Migrations.** `db/NNN-*.sql`, applied in order by `migrate(sql)`, recorded
+  by name AND content hash in a `migrations` table. **Forward-only**: editing
+  an applied file is refused — write the next number. One transaction per
+  file (file + ledger row commit together), advisory-locked so concurrent
+  boots can't double-apply. Files are yours, git-tracked, nothing hidden in
+  a package. `bun run test:migrate` pins all of it.
+- **Auth is a SQL contract** (`db/002-auth.sql`): `register` / `login` /
+  `session_start` / `session_get` / `session_end`, hashing with pgcrypto
+  bcrypt (cost 12) where the data lives, uniform timing on unknown emails.
+  `pgAuth` is now only a wire adapter — override the functions in a later
+  migration and the runtime doesn't change.
+- **Users own things.** `boards.owner_id`, `cards.created_by`, and
+  `board_may(board, user)` enforced INSIDE `board_open` (returns NULL) and
+  `board_apply` (RAISEs "not found" — no existence oracle). `owner_id NULL`
+  = shared, which is how the demo board stays open.
+
+Known limit: the hosted server copy of a doc is shared, so per-identity doc
+scoping applies at the WRITE boundary and at direct `doc_open(doc, user)`
+reads. Per-subscriber composed docs (delta's recompute pattern) are future
+work.
+
+Bun quirks found the hard way (all pinned by tests):
+`expect(p).rejects.toThrow()` never settles against a Bun SQL rejection —
+use try/catch. A multi-statement `unsafe()` inside `conn.begin()` leaks
+failures as unhandled rejections — use explicit BEGIN/COMMIT on a reserved
+connection. `pg_advisory_lock` is session-scoped, so the whole migration run
+must hold ONE reserved connection.
+
 ## Open items
 
 - Generalize the relational pattern (multiple collections, scoped docs, RLS)

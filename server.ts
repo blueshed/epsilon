@@ -11,6 +11,8 @@ import type { Board } from "./types";
 export interface StartOpts {
   port?: number;
   pgUrl?: string;
+  /** Migration directory (tests point this at the repo's db/). */
+  dbDir?: string;
 }
 
 export async function startServer(opts: StartOpts = {}) {
@@ -20,13 +22,12 @@ export async function startServer(opts: StartOpts = {}) {
 
   if (pgUrl) {
     const { SQL } = await import("bun");
-    const { ensureSchema, applySql, pgDoc, pgSync, pgAuth } = await import("./epsilon/pg");
+    const { migrate, pgDoc, pgSync, pgAuth } = await import("./epsilon/pg");
     sql = new SQL(pgUrl);
-    await ensureSchema(sql);                                      // docs, users, sessions
-    await applySql(sql, new URL("./board.sql", import.meta.url)); // YOUR tables + functions
-    await pgAuth(host, sql);                                      // register/login/authenticate
+    await migrate(sql, { dir: opts.dbDir ?? "db" });   // db/*.sql, in order, hash-recorded
+    await pgAuth(host, sql);                           // wire adapter over the SQL contract
     await pgDoc<Board>(host, sql, "board:1", null as unknown as Board, { apply: "board_apply" });
-    await pgSync(host, sql, { url: pgUrl });                      // cross-process fan-out
+    await pgSync(host, sql, { url: pgUrl });           // cross-process fan-out
   } else {
     host.doc<Board>("board:1", { name: "main", cards: {} });
   }

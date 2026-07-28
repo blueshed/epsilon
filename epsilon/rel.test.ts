@@ -4,12 +4,12 @@
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { SQL } from "bun";
 import { createHost, connect, type Host, type Remote } from "./doc";
-import { ensureSchema, applySql, pgDoc, pgSync, pgAuth } from "./pg";
+import { migrate, pgDoc, pgSync, pgAuth } from "./pg";
 import type { Card, Board } from "../types";
 
 const ADMIN_URL = "postgres://epsilon:epsilon@localhost:5599/epsilon";
-const PG_URL = process.env.EPSILON_TEST_PG_URL ?? "postgres://epsilon:epsilon@localhost:5599/epsilon_test";
-const BOARD_SQL = new URL("../board.sql", import.meta.url);
+const PG_URL = process.env.EPSILON_TEST_PG_URL ?? "postgres://epsilon:epsilon@localhost:5599/epsilon_test_rel";
+const DB_DIR = new URL("../db", import.meta.url).pathname;
 
 let sql: SQL;
 const servers: ReturnType<typeof Bun.serve>[] = [];
@@ -35,7 +35,7 @@ function client(url: string) {
 }
 
 function freshSql() {
-  const s = new SQL(PG_URL);
+  const s = new SQL(PG_URL, { max: 3 });   // small pools: many suites, one server
   sqls.push(s);
   return s;
 }
@@ -51,16 +51,15 @@ const until = async (cond: () => boolean | Promise<boolean>, ms = 2000) => {
 beforeAll(async () => {
   if (!process.env.EPSILON_TEST_PG_URL) {
     const admin = new SQL(ADMIN_URL);
-    const [exists] = await admin`SELECT 1 FROM pg_database WHERE datname = 'epsilon_test'`;
-    if (!exists) await admin.unsafe("CREATE DATABASE epsilon_test");
+    const [exists] = await admin`SELECT 1 FROM pg_database WHERE datname = 'epsilon_test_rel'`;
+    if (!exists) await admin.unsafe("CREATE DATABASE epsilon_test_rel");
     await admin.end();
   }
   sql = freshSql();
-  await ensureSchema(sql);
-  await applySql(sql, BOARD_SQL);
-  await sql.unsafe("TRUNCATE docs, doc_ops, sessions, boards, cards RESTART IDENTITY CASCADE");
+  await migrate(sql, { dir: DB_DIR });
+  await sql.unsafe("TRUNCATE docs, doc_ops, sessions, boards, cards, migrations RESTART IDENTITY CASCADE");
   await sql.unsafe("TRUNCATE users RESTART IDENTITY CASCADE");
-  await applySql(sql, BOARD_SQL);   // re-seed board 1 + its docs row
+  await migrate(sql, { dir: DB_DIR });   // re-seed board 1 + its docs row
 });
 
 afterAll(async () => {
@@ -165,5 +164,47 @@ describe("relational tier — the tables are the truth", () => {
     const texts = Object.values(ca.peek()!.cards).map((c) => c.text).sort();
     expect(texts).toContain("from A");
     expect(texts).toContain("from B");
+  });
+});
+
+describe("ownership — users mean something", () => {
+  test("a private board: the owner writes, a stranger is refused by the FUNCTION", async () => {
+    // Two real users via the SQL auth contract.
+    const [o] = await sql`SELECT register('Owner', 'owner@own.test', 'pw') AS u`;
+    const [s] = await sql`SELECT register('Stranger', 'stranger@own.test', 'pw') AS u`;
+    const owner = Number(o.u.id);
+    const stranger = Number(s.u.id);
+
+    const [b] = await sql`INSERT INTO boards (name, owner_id) VALUES ('private', ${owner}) RETURNING id`;
+    const doc = `board:${b.id}`;
+    await sql`INSERT INTO docs (name, v, data, open_fn) VALUES (${doc}, 0, NULL, 'board_open')`;
+
+    // Owner may compose and write.
+    const [asOwner] = await sql`SELECT doc_open(${doc}, ${owner}) AS d`;
+    expect(asOwner.d.name).toBe("private");
+    const ops = [{ op: "add", path: "/cards/-", value: { text: "mine" } }];
+    const [w] = await sql.unsafe(`SELECT board_apply($1, $2, $3) AS r`, [doc, ops as unknown, owner]);
+    expect(w.r.ops[0].path).toMatch(/^\/cards\/\d+$/);
+
+    // Stranger: composition returns NULL, writes RAISE — same message a
+    // missing board gives, so ids can't be probed.
+    const [asStranger] = await sql`SELECT doc_open(${doc}, ${stranger}) AS d`;
+    expect(asStranger.d).toBeNull();
+    let refused = "";
+    try {
+      await sql.unsafe(`SELECT board_apply($1, $2, $3) AS r`, [doc, ops as unknown, stranger]);
+    } catch (err) {
+      refused = String(err);
+    }
+    expect(refused).toMatch(/not found/);
+
+    // And the card that did land is attributed to its author.
+    const [card] = await sql`SELECT created_by FROM cards WHERE board_id = ${b.id}`;
+    expect(Number(card.created_by)).toBe(owner);
+  });
+
+  test("the shared demo board (owner_id NULL) stays open to everyone", async () => {
+    const [row] = await sql`SELECT doc_open(${"board:1"}, ${999999}) AS d`;
+    expect(row.d).not.toBeNull();
   });
 });

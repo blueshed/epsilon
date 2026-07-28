@@ -3,19 +3,20 @@
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { SQL } from "bun";
 import { createHost, connect, type Host, type Remote } from "./doc";
-import { ensureSchema, pgDoc, pgSync, pgAuth } from "./pg";
+import { migrate, pgDoc, pgSync, pgAuth } from "./pg";
 
 // Tests own a SEPARATE database (created on demand) — the suite TRUNCATEs,
 // and it must never share the app's DB. Point EPSILON_TEST_PG_URL elsewhere
 // to override; it deliberately does NOT read EPSILON_PG_URL.
 const ADMIN_URL = "postgres://epsilon:epsilon@localhost:5599/epsilon";
-const PG_URL = process.env.EPSILON_TEST_PG_URL ?? "postgres://epsilon:epsilon@localhost:5599/epsilon_test";
+const PG_URL = process.env.EPSILON_TEST_PG_URL ?? "postgres://epsilon:epsilon@localhost:5599/epsilon_test_pg";
+const DB_DIR = new URL("../db", import.meta.url).pathname;
 
 async function ensureTestDb(): Promise<void> {
   if (process.env.EPSILON_TEST_PG_URL) return;   // caller owns that DB
   const admin = new SQL(ADMIN_URL);
-  const [exists] = await admin`SELECT 1 FROM pg_database WHERE datname = 'epsilon_test'`;
-  if (!exists) await admin.unsafe("CREATE DATABASE epsilon_test");
+  const [exists] = await admin`SELECT 1 FROM pg_database WHERE datname = 'epsilon_test_pg'`;
+  if (!exists) await admin.unsafe("CREATE DATABASE epsilon_test_pg");
   await admin.end();
 }
 
@@ -46,7 +47,7 @@ function client(url: string, onError?: (d: string, e: string) => void) {
 }
 
 function freshSql() {
-  const s = new SQL(PG_URL);
+  const s = new SQL(PG_URL, { max: 3 });   // small pools: many suites, one server
   sqls.push(s);
   return s;
 }
@@ -69,10 +70,12 @@ const untilDbV = (name: string, v: number) =>
 beforeAll(async () => {
   await ensureTestDb();
   sql = freshSql();
-  await ensureSchema(sql);
-  await ensureSchema(sql); // idempotent
-  await sql.unsafe("TRUNCATE docs, doc_ops, sessions RESTART IDENTITY CASCADE");
+  await migrate(sql, { dir: DB_DIR });
+  expect(await migrate(sql, { dir: DB_DIR })).toEqual([]);   // idempotent: nothing re-runs
+  // Wipe data AND the ledger, then re-migrate — the suite starts from seeds.
+  await sql.unsafe("TRUNCATE docs, doc_ops, sessions, boards, cards, migrations RESTART IDENTITY CASCADE");
   await sql.unsafe("TRUNCATE users RESTART IDENTITY CASCADE");
+  await migrate(sql, { dir: DB_DIR });
 });
 
 afterAll(async () => {
@@ -85,32 +88,32 @@ afterAll(async () => {
 describe("durability", () => {
   test("a wire write lands in docs and doc_ops with contiguous versions", async () => {
     const host = createHost();
-    const board = await pgDoc<Board>(host, sql, "board:1", structuredClone(empty));
+    const board = await pgDoc<Board>(host, sql, "blob:1", structuredClone(empty));
     const url = serve(host);
-    const remote = client(url).doc<Board>("board:1");
+    const remote = client(url).doc<Board>("blob:1");
     await remote.ready;
 
     remote.apply([{ op: "add", path: "/cards/1", value: { id: 1, title: "persisted" } }]);
     await until(() => board.peek().cards["1"] !== undefined);
-    await untilDbV("board:1", 1);
+    await untilDbV("blob:1", 1);
 
-    const [doc] = await sql`SELECT v, data FROM docs WHERE name = ${"board:1"}`;
+    const [doc] = await sql`SELECT v, data FROM docs WHERE name = ${"blob:1"}`;
     expect(Number(doc.v)).toBe(1);
     expect(doc.data.cards["1"].title).toBe("persisted");
-    const opsRows = await sql`SELECT v, ops FROM doc_ops WHERE name = ${"board:1"} ORDER BY v`;
+    const opsRows = await sql`SELECT v, ops FROM doc_ops WHERE name = ${"blob:1"} ORDER BY v`;
     expect(opsRows.length).toBe(1);
     expect(opsRows[0].ops[0].path).toBe("/cards/1");
   });
 
   test("restart: a new host hydrates state AND version, then keeps writing", async () => {
     const host2 = createHost();
-    const board2 = await pgDoc<Board>(host2, sql, "board:1", structuredClone(empty));
+    const board2 = await pgDoc<Board>(host2, sql, "blob:1", structuredClone(empty));
     expect(board2.peek().cards["1"]!.title).toBe("persisted");   // hydrated
-    expect(host2.v("board:1")).toBe(1);                          // version carried
+    expect(host2.v("blob:1")).toBe(1);                          // version carried
 
     board2.apply([{ op: "replace", path: "/cards/1/title", value: "after-restart" }]);
-    await untilDbV("board:1", 2);
-    const [doc] = await sql`SELECT v, data FROM docs WHERE name = ${"board:1"}`;
+    await untilDbV("blob:1", 2);
+    const [doc] = await sql`SELECT v, data FROM docs WHERE name = ${"blob:1"}`;
     expect(Number(doc.v)).toBe(2);                               // optimistic guard passed
     expect(doc.data.cards["1"].title).toBe("after-restart");
   });
@@ -123,8 +126,8 @@ describe("cross-process fan-out (LISTEN/NOTIFY)", () => {
     const b = createHost();
     const sqlA = freshSql();
     const sqlB = freshSql();
-    const boardA = await pgDoc<Board>(a, sqlA, "board:x", structuredClone(empty));
-    const boardB = await pgDoc<Board>(b, sqlB, "board:x", structuredClone(empty));
+    const boardA = await pgDoc<Board>(a, sqlA, "blob:x", structuredClone(empty));
+    const boardB = await pgDoc<Board>(b, sqlB, "blob:x", structuredClone(empty));
     const syncA = await pgSync(a, sqlA, { url: PG_URL });
     const syncB = await pgSync(b, sqlB, { url: PG_URL });
     stops.push(syncA.stop, syncB.stop);
@@ -132,14 +135,14 @@ describe("cross-process fan-out (LISTEN/NOTIFY)", () => {
     expect(syncA.mode).toBe("listen");
     expect(syncB.mode).toBe("listen");
     const urlB = serve(b);
-    const browserB = client(urlB).doc<Board>("board:x");
+    const browserB = client(urlB).doc<Board>("blob:x");
     await browserB.ready;
 
     boardA.apply([{ op: "add", path: "/cards/9", value: { id: 9, title: "cross" } }]);
 
     await until(() => boardB.peek().cards["9"] !== undefined);          // B's authority
     await until(() => browserB.peek()!.cards["9"] !== undefined);       // B's browser
-    expect(b.v("board:x")).toBe(a.v("board:x"));
+    expect(b.v("blob:x")).toBe(a.v("blob:x"));
   });
 });
 

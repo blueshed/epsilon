@@ -39,18 +39,40 @@ cards.apply([{ op: "add", path: "/-", value: { text } }]);         // server min
 await remote.call("login" | "register" | "authenticate", params);  // then re-ask: remote.doc("board:1")
 ```
 
+## Schema — migrations, always
+
+`db/NNN-name.sql`, applied in order by `migrate(sql)` at boot, recorded by
+name + content hash. **Forward-only: never edit an applied file** — the
+runner refuses it; write the next number. One transaction per file. Add a
+table? New migration. Change a stored function? New migration with
+`CREATE OR REPLACE`.
+
+## Auth — a SQL contract, not TypeScript
+
+`db/002-auth.sql` owns `register` / `login` / `session_start` /
+`session_get` / `session_end` (pgcrypto bcrypt, cost 12). `pgAuth` is only
+the wire adapter. To change auth policy, write a migration that replaces the
+function — no runtime change.
+
+## Ownership — users mean something
+
+`board_may(board, user)` gates BOTH `board_open` (NULL for outsiders) and
+`board_apply` (RAISE "not found" — never confirm a doc exists). Follow that
+shape for every doc type: one predicate, both directions, checked inside the
+stored function with the identity the socket authenticated.
+
 ## Server — two tiers, one wire
 
 - **In-memory** (default): `host.doc(name, empty)` — host mints uuids, open
   access, state dies with the process.
-- **Relational** (set `EPSILON_PG_URL`): `board.sql` is the pattern — YOUR
+- **Relational** (set `EPSILON_PG_URL`): `db/003-board.sql` is the pattern — YOUR
   tables are the truth; `board_apply(name, ops, user)` applies + mints from
   sequences + logs + notifies in ONE transaction (`FOR UPDATE` serializes
   writers); `board_open(name)` composes the doc at open only. Glue:
   `pgDoc(host, sql, "board:1", null, { apply: "board_apply" })`. Auth comes
   on with it: `createHost({ requireAuth: true })` + `pgAuth(host, sql)`.
 - To add a doc type: write its tables + `<x>_open` + `<x>_apply` in SQL
-  (copy board.sql's shape), seed its `docs` row with `open_fn`, one `pgDoc`
+  (copy 003-board.sql's shape), seed its `docs` row with `open_fn`, one `pgDoc`
   line. Composition and multi-table writes belong IN the stored function —
   that's what SQL is optimal at.
 
@@ -67,8 +89,10 @@ await remote.call("login" | "register" | "authenticate", params);  // then re-as
   rows from `doc.data`.
 - **Auth before docs** on `requireAuth` hosts; store the session token; a
   refused doc handle re-opens when asked again.
-- **Tests own `epsilon_test`** — never point them at the app's database (the
-  suite TRUNCATEs).
+- **Each test file owns its OWN database** (`epsilon_test_pg`, `_rel`,
+  `_app`, `epsilon_migrate_test`) — they TRUNCATE, and sharing one deadlocks
+  against the migration advisory lock.
+- **Never edit an applied migration.** Add the next number.
 
 ## Sharp edges
 
@@ -79,5 +103,10 @@ await remote.call("login" | "register" | "authenticate", params);  // then re-as
   double-encodes into a scalar and `jsonb_array_elements` explodes.
 - Effects through a lens re-run on ANY root change (correct, not minimal) —
   precision lives in the ops channel, which `list()` uses.
+- `expect(p).rejects.toThrow()` NEVER settles against a Bun SQL rejection —
+  use try/catch and assert on the message (verified, Bun 1.3.14).
+- A multi-statement `unsafe()` inside `conn.begin()` leaks failures as
+  unhandled rejections — use explicit BEGIN/COMMIT on a reserved connection
+  (see `migrate.ts`).
 - `epsilon/` is yours to edit — run `bun test` after; the tests ARE the
   contract you're editing against.

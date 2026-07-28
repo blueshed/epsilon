@@ -8,11 +8,12 @@
     "dev": "bun --hot server.ts",
     "check": "bunx tsc --noEmit",
     "test": "bun test epsilon/signal.test.ts epsilon/doc.test.ts epsilon/ui.test.ts",
+    "test:migrate": "bun test epsilon/migrate.test.ts",
     "test:pg": "bun test epsilon/pg.test.ts epsilon/rel.test.ts",
     "test:app": "bun test app.test.ts",
     "db:up": "docker compose up -d --wait",
     "db:down": "docker compose down -v",
-    "ci": "bun run db:up && bun run check && bun test; code=$?; bun run db:down; exit $code"
+    "ci": "bun run db:up && bun run check && bun run test && bun run test:migrate && bun run test:pg && bun run test:app; code=$?; bun run db:down; exit $code"
   },
   "devDependencies": {
     "@happy-dom/global-registrator": "^20.11.1",

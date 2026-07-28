@@ -4,7 +4,9 @@
 import { describe, test, expect } from "bun:test";
 import { SQL } from "bun";
 import { startServer } from "./server";
-import { ensureSchema, applySql } from "./epsilon/pg";
+import { migrate } from "./epsilon/pg";
+
+const DB_DIR = new URL("./db", import.meta.url).pathname;
 
 const waitFor = async <T>(fn: () => Promise<T>, pred: (v: T) => boolean, ms = 4000): Promise<T> => {
   const start = Date.now();
@@ -34,21 +36,20 @@ describe("the app, end to end", () => {
 
   test("postgres: auth gate → register → card in the TABLE, write in the audit log", async () => {
     const ADMIN_URL = "postgres://epsilon:epsilon@localhost:5599/epsilon";
-    const PG_URL = process.env.EPSILON_TEST_PG_URL ?? "postgres://epsilon:epsilon@localhost:5599/epsilon_test";
+    const PG_URL = process.env.EPSILON_TEST_PG_URL ?? "postgres://epsilon:epsilon@localhost:5599/epsilon_test_app";
     if (!process.env.EPSILON_TEST_PG_URL) {
       const admin = new SQL(ADMIN_URL);
-      const [exists] = await admin`SELECT 1 FROM pg_database WHERE datname = 'epsilon_test'`;
-      if (!exists) await admin.unsafe("CREATE DATABASE epsilon_test");
+      const [exists] = await admin`SELECT 1 FROM pg_database WHERE datname = 'epsilon_test_app'`;
+      if (!exists) await admin.unsafe("CREATE DATABASE epsilon_test_app");
       await admin.end();
     }
-    const db = new SQL(PG_URL);
-    await ensureSchema(db);
-    await applySql(db, new URL("./board.sql", import.meta.url));
-    await db.unsafe("TRUNCATE docs, doc_ops, sessions, boards, cards RESTART IDENTITY CASCADE");
+    const db = new SQL(PG_URL, { max: 3 });
+    await migrate(db, { dir: DB_DIR });
+    await db.unsafe("TRUNCATE docs, doc_ops, sessions, boards, cards, migrations RESTART IDENTITY CASCADE");
     await db.unsafe("TRUNCATE users RESTART IDENTITY CASCADE");
-    await applySql(db, new URL("./board.sql", import.meta.url));   // re-seed board:1
 
-    const { server, sql } = await startServer({ port: 0, pgUrl: PG_URL });
+    // startServer runs the migrations itself — that IS the boot path.
+    const { server, sql } = await startServer({ port: 0, pgUrl: PG_URL, dbDir: DB_DIR });
     await using view = new Bun.WebView({ width: 800, height: 600 });
     await view.navigate(server.url.href);
 

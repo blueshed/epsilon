@@ -32,10 +32,7 @@ export async function applySql(sql: SQL, file: URL | string): Promise<void> {
   await sql.unsafe(await Bun.file(file).text());
 }
 
-/** Apply schema.sql — plain DDL, idempotent. */
-export async function ensureSchema(sql: SQL): Promise<void> {
-  await applySql(sql, new URL("./schema.sql", import.meta.url));
-}
+export { migrate, migrationStatus, migrationFiles } from "./migrate";
 
 /**
  * Host a doc backed by Postgres.
@@ -246,75 +243,65 @@ export async function pgSync(
 }
 
 // ---------------------------------------------------------------------------
-// Users — schema-native auth (DESIGN.md decision 3). Sessions, not JWT:
-// a random token in a table, Bun.password for hashing, zero dependencies.
+// Users — schema-native auth. The CONTRACT is SQL (db/002-auth.sql):
+// register / login / session_start / session_user / session_end. Hashing is
+// pgcrypto bcrypt, where the data lives. This module is only the wire
+// adapter — swap the functions in a later migration and nothing here changes.
 // ---------------------------------------------------------------------------
 
 export interface User { id: number; name: string; email: string }
 
-const SESSION_DAYS = 7;
+function asUser(row: any): User {
+  return { id: Number(row.id), name: row.name, email: row.email };
+}
 
 export async function pgAuth(host: Host, sql: SQL): Promise<void> {
   async function startSession(ws: any, user: User): Promise<{ token: string; user: User }> {
-    const token = crypto.randomUUID();
-    await sql`INSERT INTO sessions (token, user_id, expires_at)
-              VALUES (${token}, ${user.id}, now() + ${`${SESSION_DAYS} days`}::interval)`;
+    const [row] = await sql`SELECT session_start(${user.id}) AS token`;
     ws.data ??= {};
     ws.data.user = user;
-    return { token, user };
+    return { token: row.token as string, user };
   }
 
   host.method("register", async (params: { name?: string; email?: string; password?: string }, ws) => {
     const { name, email, password } = params ?? {};
     if (!name || !email || !password) throw new Error("name, email, and password required");
-    const hash = await Bun.password.hash(password);
     let rows;
     try {
-      rows = await sql`INSERT INTO users (email, name, password_hash)
-                       VALUES (${email}, ${name}, ${hash})
-                       RETURNING id, name, email`;
+      rows = await sql`SELECT register(${name}, ${email}, ${password}) AS u`;
     } catch (err) {
       // Bun's PostgresError puts ERR_POSTGRES_SERVER_ERROR in .code; match the
       // constraint violation by message rather than chasing the SQLSTATE.
       if (String(err).includes("duplicate key")) throw new Error("email already registered");
       throw err;
     }
-    const u = rows[0]!;
-    return startSession(ws, { id: Number(u.id), name: u.name, email: u.email });
+    return startSession(ws, asUser(rows[0]!.u));
   });
 
   host.method("login", async (params: { email?: string; password?: string }, ws) => {
     const { email, password } = params ?? {};
     if (!email || !password) throw new Error("email and password required");
-    const [u] = await sql`SELECT id, name, email, password_hash FROM users WHERE email = ${email}`;
-    // Verify against a constant dummy hash when the user is missing, so the
-    // response time doesn't reveal which emails exist.
-    const ok = await Bun.password.verify(password, u?.password_hash ?? DUMMY_HASH);
-    if (!u || !ok) throw new Error("invalid credentials");
-    return startSession(ws, { id: Number(u.id), name: u.name, email: u.email });
+    // login() returns NULL for unknown email AND wrong password alike, with
+    // uniform timing — the distinction never reaches the wire.
+    const [row] = await sql`SELECT login(${email}, ${password}) AS u`;
+    if (!row?.u) throw new Error("invalid credentials");
+    return startSession(ws, asUser(row.u));
   });
 
   host.method("authenticate", async (params: { token?: string }, ws) => {
     const { token } = params ?? {};
     if (!token) throw new Error("token required");
-    const [row] = await sql`
-      SELECT u.id, u.name, u.email FROM sessions s
-      JOIN users u ON u.id = s.user_id
-      WHERE s.token = ${token} AND s.expires_at > now()`;
-    if (!row) throw new Error("invalid or expired session");
-    const user: User = { id: Number(row.id), name: row.name, email: row.email };
+    const [row] = await sql`SELECT session_get(${token}) AS u`;
+    if (!row?.u) throw new Error("invalid or expired session");
+    const user = asUser(row.u);
     ws.data ??= {};
     ws.data.user = user;
     return user;
   });
 
   host.method("logout", async (params: { token?: string }, ws) => {
-    if (params?.token) await sql`DELETE FROM sessions WHERE token = ${params.token}`;
+    if (params?.token) await sql`SELECT session_end(${params.token})`;
     if (ws.data) delete ws.data.user;
     return { ok: true };
   });
 }
-
-// A real argon2 hash of an unguessable throwaway value — computed once at
-// startup so login timing is uniform for unknown emails.
-const DUMMY_HASH = await Bun.password.hash(crypto.randomUUID());
