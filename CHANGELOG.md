@@ -9,7 +9,21 @@ will ship.
 
 ### Added
 
+- `connect(url, { onConnect })` — a hook awaited on every socket open (first
+  connect and each reconnect), after queued calls flush and before docs
+  (re)open. The template re-authenticates there with the stored token, so a
+  dropped socket recovers a logged-in session by itself instead of stranding
+  it at the auth dialog.
 - This changelog.
+
+### Fixed
+
+- The client websocket URL follows the page protocol (`wss:` on HTTPS) —
+  the hardcoded `ws://` was blocked as mixed content behind TLS.
+- A refused doc open (`unknown doc`, `unauthenticated`) now REJECTS
+  `doc.ready` instead of hanging forever; re-asking after a refusal re-arms
+  it. Refusals still report through `onError`, never as unhandled
+  rejections.
 
 ## [0.1.0] — 2026-07-28
 

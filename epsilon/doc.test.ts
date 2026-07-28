@@ -97,6 +97,20 @@ describe("the wire", () => {
     expect(nope.peek()).toBeNull();
   });
 
+  test("a refused open REJECTS ready; a later successful open re-arms it", async () => {
+    const r = client();
+    const late = r.doc<Board>("late");
+    let err: Error | undefined;
+    try { await late.ready; } catch (e) { err = e as Error; }
+    expect(err?.message).toContain("unknown doc");
+
+    host.doc("late", { cards: {} } satisfies Board);   // now it exists
+    const again = r.doc<Board>("late");                // same handle, re-asks
+    expect(again).toBe(late);
+    await again.ready;                                 // fresh promise — resolves
+    expect(again.peek()).toEqual({ cards: {} });
+  });
+
   test("a bad op is rejected by the authority and pollutes nothing", async () => {
     const errors: string[] = [];
     const board = client((_doc, err) => errors.push(err)).doc<Board>("board");
@@ -121,6 +135,37 @@ describe("decision 1: the server mints ids", () => {
     expect(id).not.toBe("-");
     expect(id.length).toBe(36);                          // uuid — not client-invented
     expect(b.peek()!.cards[id]!.title).toBe("minted");   // same id everywhere
+  });
+});
+
+describe("reconnect — onConnect re-authenticates before docs re-open", () => {
+  test("a dropped socket recovers its auth and its docs on its own", async () => {
+    const h = createHost({ requireAuth: true });
+    h.doc<Board>("secret", structuredClone(empty));
+    let becomes = 0;
+    h.method("become", (_p, ws) => { ws.data ??= {}; ws.data.user = { id: 7 }; becomes++; return { id: 7 }; });
+    h.method("kick", (_p, ws) => { ws.close(); });
+    const srv = Bun.serve({
+      port: 0,
+      fetch: (req, s) => h.fetch(req, s) ?? new Response("", { status: 404 }),
+      websocket: h.websocket,
+    });
+    h.setServer(srv);
+
+    const r = connect(`ws://localhost:${srv.port}${h.path}`, {
+      onConnect: async (remote) => { await remote.call("become"); },
+    });
+    remotes.push(r);
+
+    const doc = r.doc<Board>("secret");
+    await doc.ready;                          // the hook authed the first connect
+    expect(doc.peek()!.cards["1"]!.title).toBe("one");
+
+    r.call("kick").catch(() => {});           // server drops the socket
+    await until(() => becomes >= 2, 3000);    // hook ran again on the NEW socket
+    doc.at("/cards/1/done").set(true);        // write through the new socket
+    await until(() => doc.peek()!.cards["1"]!.done === true, 3000);
+    srv.stop(true);
   });
 });
 

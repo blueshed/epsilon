@@ -31,8 +31,12 @@ in `Bun.WebView`.
 ## Client (index.ts is the reference)
 
 ```ts
-const remote = connect(`ws://${location.host}/ws`, { onError });   // "unauthenticated" → show auth dialog
+const remote = connect(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`, {
+  onConnect: (r) => reauth(r),   // EVERY (re)connect, awaited BEFORE docs re-open — re-auth here
+  onError,                       // "unauthenticated" → show auth dialog
+});
 const board = remote.doc<Board>("board:1");
+await board.ready;               // REJECTS if the open is refused (also reported via onError)
 const cards = board.at<Record<string, Card>>("/cards");
 list(cards, (card) => { ...text(card.map(c => c?.text))... });
 cards.apply([{ op: "add", path: "/-", value: { text } }]);         // server mints; echo renders
@@ -88,7 +92,8 @@ stored function with the identity the socket authenticated.
 - **`list()` for collections, lenses for content.** No effects that rebuild
   rows from `doc.data`.
 - **Auth before docs** on `requireAuth` hosts; store the session token; a
-  refused doc handle re-opens when asked again.
+  refused doc handle re-opens when asked again. Re-auth belongs in
+  `onConnect` — it runs on every reconnect, before docs re-open.
 - **Each test file owns its OWN database** (`epsilon_test_pg`, `_rel`,
   `_app`, `epsilon_migrate_test`) — they TRUNCATE, and sharing one deadlocks
   against the migration advisory lock.

@@ -295,19 +295,39 @@ export function createHost(opts?: {
 
 /** A synced doc: a Signal whose apply() SENDS. The echo mutates. */
 class RemoteDoc<T> extends Signal<T | null> {
-  ready: Promise<void>;
+  /** Settles when the first snapshot lands; REJECTS when the server refuses
+   *  the open (unknown doc, unauthenticated). Re-asking after a refusal
+   *  re-arms it — read `.ready` fresh rather than caching the promise. */
+  ready!: Promise<void>;
   private resolveReady!: () => void;
+  private rejectReady!: (e: Error) => void;
+  private state: "pending" | "open" | "refused" = "pending";
   /** Last server version applied; 0 = no snapshot yet. */
   v = 0;
 
   constructor(private send: (ops: Op[]) => void) {
     super(null);
-    this.ready = new Promise((r) => { this.resolveReady = r; });
+    this.arm();
+  }
+
+  private arm(): void {
+    this.state = "pending";
+    this.ready = new Promise<void>((res, rej) => {
+      this.resolveReady = res;
+      this.rejectReady = rej;
+    });
+    // A refusal also reports through onError — never an unhandled rejection.
+    this.ready.catch(() => {});
   }
 
   /** Location transparency: writes go to the authority, never local. */
   override apply(ops: Op[]): void {
     this.send(ops);
+  }
+
+  /** Fresh pending `ready` after a refusal — called before a re-ask. @internal */
+  reopen(): void {
+    if (this.state === "refused") this.arm();
   }
 
   /** The echo path — the only place local state actually changes. @internal */
@@ -321,8 +341,18 @@ class RemoteDoc<T> extends Signal<T | null> {
       this.v = v;
     }
     super.apply(ops);
+    this.reopen();          // a reconnect can succeed without a re-ask
+    this.state = "open";
     this.resolveReady();
     return "ok";
+  }
+
+  /** Server refused this doc before any snapshot landed: settle ready so
+   *  awaiting callers don't hang. Later write errors don't touch it. @internal */
+  refuse(error: string): void {
+    if (this.state !== "pending") return;
+    this.state = "refused";
+    this.rejectReady(new Error(error));
   }
 }
 
@@ -335,7 +365,13 @@ export interface Remote {
 
 export function connect(
   url: string,
-  opts?: { onError?: (doc: string, error: string) => void },
+  opts?: {
+    onError?: (doc: string, error: string) => void;
+    /** Awaited on EVERY socket open — first connect and each reconnect —
+     *  after queued calls flush and BEFORE docs (re)open. Authenticate here
+     *  and a requireAuth host serves the re-opens that follow. */
+    onConnect?: (remote: Remote) => void | Promise<void>;
+  },
 ): Remote {
   const docs = new Map<string, RemoteDoc<any>>();
   const pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
@@ -349,46 +385,7 @@ export function connect(
     if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
   };
 
-  function wire() {
-    ws = new WebSocket(url);
-    ws.onopen = () => {
-      backoff = 100;
-      // Queued calls first (authenticate before opens, so requireAuth hosts
-      // serve the snapshots), then (re)open every doc — the snapshot-as-op
-      // resets each baseline.
-      for (const msg of queued.splice(0)) ws.send(JSON.stringify(msg));
-      for (const name of docs.keys()) send({ action: "open", doc: name });
-    };
-    ws.onmessage = (ev) => {
-      const msg = JSON.parse(String(ev.data)) as ServerMsg;
-      if ("id" in msg) {
-        const p = pending.get(msg.id);
-        if (!p) return;
-        pending.delete(msg.id);
-        if (msg.error != null) p.reject(new Error(msg.error));
-        else p.resolve(msg.result);
-        return;
-      }
-      if ("error" in msg) {
-        opts?.onError?.(msg.doc, msg.error);
-        return;
-      }
-      const doc = docs.get(msg.doc);
-      if (!doc) return;
-      if (doc.receive(msg.v, msg.ops) === "gap") send({ action: "open", doc: msg.doc });
-    };
-    ws.onclose = () => {
-      // Fail fast rather than hang — a retried call after reconnect is the
-      // caller's decision (it may not be idempotent, e.g. register).
-      for (const [, p] of pending) p.reject(new Error("disconnected"));
-      pending.clear();
-      if (closed) return;
-      setTimeout(wire, (backoff = Math.min(backoff * 2, 10_000)));
-    };
-  }
-  wire();
-
-  return {
+  const remote: Remote = {
     doc<T>(name: string) {
       let doc = docs.get(name) as RemoteDoc<T> | undefined;
       if (!doc) {
@@ -398,6 +395,7 @@ export function connect(
       } else if (doc.v === 0) {
         // Asked again before any snapshot landed — the first open may have
         // been refused (e.g. pre-auth on a requireAuth host). Ask again.
+        doc.reopen();
         send({ action: "open", doc: name });
       }
       return doc;
@@ -419,4 +417,52 @@ export function connect(
       try { ws.close(); } catch { /* already closed */ }
     },
   };
+
+  function wire() {
+    ws = new WebSocket(url);
+    ws.onopen = async () => {
+      backoff = 100;
+      // Queued calls first, then the connect hook — authenticate there and a
+      // requireAuth host serves the re-opens — then (re)open every doc; the
+      // snapshot-as-op resets each baseline.
+      for (const msg of queued.splice(0)) ws.send(JSON.stringify(msg));
+      try {
+        await opts?.onConnect?.(remote);
+      } catch (err) {
+        // Opens proceed regardless — refusals surface through onError.
+        console.error("[epsilon/doc] onConnect hook failed:", err);
+      }
+      for (const name of docs.keys()) send({ action: "open", doc: name });
+    };
+    ws.onmessage = (ev) => {
+      const msg = JSON.parse(String(ev.data)) as ServerMsg;
+      if ("id" in msg) {
+        const p = pending.get(msg.id);
+        if (!p) return;
+        pending.delete(msg.id);
+        if (msg.error != null) p.reject(new Error(msg.error));
+        else p.resolve(msg.result);
+        return;
+      }
+      if ("error" in msg) {
+        docs.get(msg.doc)?.refuse(msg.error);
+        opts?.onError?.(msg.doc, msg.error);
+        return;
+      }
+      const doc = docs.get(msg.doc);
+      if (!doc) return;
+      if (doc.receive(msg.v, msg.ops) === "gap") send({ action: "open", doc: msg.doc });
+    };
+    ws.onclose = () => {
+      // Fail fast rather than hang — a retried call after reconnect is the
+      // caller's decision (it may not be idempotent, e.g. register).
+      for (const [, p] of pending) p.reject(new Error("disconnected"));
+      pending.clear();
+      if (closed) return;
+      setTimeout(wire, (backoff = Math.min(backoff * 2, 10_000)));
+    };
+  }
+  wire();
+
+  return remote;
 }

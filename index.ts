@@ -15,13 +15,28 @@ const mineSection = document.getElementById("mine")!;
 const boardName = document.getElementById("board-name")!;
 const log = document.getElementById("log")!;
 
-const remote = connect(`ws://${location.host}/ws`, {
-  onError(_doc, error) {
-    // A requireAuth host refuses docs until an auth method vouches for us.
-    if (error === "unauthenticated") authDialog.showModal();
-    else console.error("[app]", error);
+const remote = connect(
+  // wss on https — a hardcoded ws:// is blocked as mixed content behind TLS.
+  `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`,
+  {
+    // Runs on EVERY (re)connect before docs re-open: a dropped socket
+    // re-authenticates itself instead of stranding us at the auth dialog.
+    async onConnect(r) {
+      const token = localStorage.getItem("epsilon-token");
+      if (!token) return;
+      try {
+        afterAuth(await r.call<{ id: number }>("authenticate", { token }));
+      } catch {
+        localStorage.removeItem("epsilon-token");
+      }
+    },
+    onError(_doc, error) {
+      // A requireAuth host refuses docs until an auth method vouches for us.
+      if (error === "unauthenticated") authDialog.showModal();
+      else console.error("[app]", error);
+    },
   },
-});
+);
 
 // --- the board on screen ---------------------------------------------------
 
@@ -94,17 +109,13 @@ function showMine(userId: number | string): void {
 
 // --- auth ------------------------------------------------------------------
 
+let mineFor: number | string | null = null;
+
 function afterAuth(user: { id: number | string }): void {
   authDialog.close();
+  if (mineFor === user.id) return;  // reconnect — the docs re-open themselves
+  mineFor = user.id;
   showMine(user.id);
-}
-
-const token = localStorage.getItem("epsilon-token");
-if (token) {
-  // call() queues until the socket opens — this beats the queued doc opens.
-  remote.call<{ id: number }>("authenticate", { token })
-    .then(afterAuth)
-    .catch(() => localStorage.removeItem("epsilon-token"));
 }
 
 async function auth(method: "login" | "register") {
