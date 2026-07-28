@@ -1,7 +1,7 @@
 // The pixels. list() routes membership ops; each row renders from its own
 // lens, so edits patch text in place — no diffing, no re-render.
-import { connect, list, text, pushDisposeScope, popDisposeScope } from "@blueshed/epsilon";
-import type { OpSignal } from "@blueshed/epsilon";
+import { connect, list, text, pushDisposeScope, popDisposeScope } from "../epsilon";
+import type { OpSignal } from "../epsilon";
 import type { Board, Card } from "./types";
 
 const remote = connect("/ws".replace(/^/, `ws://${location.host}`));

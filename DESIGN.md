@@ -73,6 +73,13 @@ No vdom. No OT/CRDT (model is authoritative; LWW + resync). No offline. No arbit
 
 ## Decisions (Peter, 2026-07-28)
 
+0. **No separate library.** `bun create blueshed/epsilon` scaffolds the app
+   WITH the runtime vendored in (`epsilon/`, tests included). No npm package,
+   no version skew, no install — the stack is source you own, small enough to
+   read. (This is delta's "vendor-first" philosophy applied to everything,
+   and the correction of an inversion: the library hosting the app was
+   upside down; the app hosts the runtime.)
+
 1. **Server mints ids — every tier.** Clients send `/coll/-`; the assigned id comes back in the echo op. Uniform with Postgres sequences; no client uuids. Consequence: identity is *always* conferred by the store — the Active Record law holds on every rung.
 2. **`at()` composes.** `board.at("/cards").at("/5")` ≡ `board.at("/cards/5")`. Path rebasing must be associative — one test pins it.
 3. **Users are schema-native.** The `users` table ships in the core schema; auth (register/login/JWT) works out of the box on day one. Delta's auth-jwt is the borrowed implementation, but it's no longer opt-in.

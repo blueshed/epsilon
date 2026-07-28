@@ -9,5 +9,5 @@
     "noEmit": true,
     "types": ["bun"]
   },
-  "include": ["*.ts"]
+  "include": ["server.ts", "src/**/*.ts", "epsilon/**/*.ts"]
 }

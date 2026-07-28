@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "@blueshed/epsilon",
+      "name": "epsilon",
       "devDependencies": {
         "@happy-dom/global-registrator": "^20.11.1",
         "@types/bun": "^1.3.14",

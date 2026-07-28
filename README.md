@@ -2,35 +2,50 @@
 
 The next letter after delta. One op stream, Postgres to pixel.
 
-**A model, the documents that view and edit it, and a UX that stays in sync — one concept, one vocabulary, all the way down.**
+```sh
+bun create blueshed/epsilon my-app
+cd my-app && bun dev     # two tabs, type in one, watch the other
+```
+
+**There is no library to install.** The runtime is the [`epsilon/`](epsilon/)
+folder in your app — ~1k lines of TypeScript you own, with its own tests.
+`bun test` verifies your stack, in your repo, forever. Edit it; it's yours.
 
 ## The knowns
 
-- **Users are first-class.** Auth is in the schema from day one, not bolted on.
-- **Postgres, db-first.** The schema is the source of truth; identity is minted by the database and carried everywhere, never re-derived.
-- **Bun, simple.** One runtime, no build step, `--compile` to a binary.
-- **The UX is the same stream.** Signals carry ops, not just "something changed." `list()` routes ops; nothing diffs.
+- **Users are first-class.** `users` and `sessions` ship in the schema; register/login work on day one.
+- **Postgres, db-first.** Set `EPSILON_PG_URL` and the doc is durable — state and versions survive restarts. Identity is minted by the database and carried everywhere, never re-derived.
+- **Bun, simple.** One runtime, TypeScript on both sides, no build step, zero dependencies (`pg` is optional, dev-time, and retires when Bun ships `sql.listen`).
+- **The UX is the same stream.** Signals carry ops; `list()` routes them; nothing diffs.
+
+## The app (three files, yours)
+
+- [`server.ts`](server.ts) — the authority. In-memory out of the box; Postgres via one env var.
+- [`src/client.ts`](src/client.ts) — the pixels. A remote doc is a signal whose writes go over the wire; the echo renders them.
+- [`index.html`](index.html) — Bun serves and bundles it.
+
+```sh
+bun run db:up            # compose Postgres (or use your own)
+EPSILON_PG_URL=postgres://epsilon:epsilon@localhost:5599/epsilon bun dev
+```
+
+## The runtime (epsilon/, also yours)
+
+| File | What it is |
+|---|---|
+| `op.ts` | Three verbs, JSON-Pointer paths, pollution-guarded |
+| `signal.ts` | Op-carrying signals; composing `at()` lenses |
+| `doc.ts` | The wire — one Signal class both sides; `apply()` hides the WebSocket |
+| `ui.ts` | `list()` routes membership ops; row content flows through lenses |
+| `pg.ts` | Durability + LISTEN/NOTIFY fan-out; schema-native users |
+| `schema.sql` | Plain DDL — docs, ops log, users, sessions |
+
+`*.test.ts` beside each — the tests are the contract. [DESIGN.md](DESIGN.md) is the why.
 
 ## Lineage
 
-delta proved the document lens (model ↔ doc, three verbs, three backends).
-railroad proved signals-to-DOM (real nodes, no vdom).
-They meet today at `doc.data` by convention. Epsilon makes them meet by design: **the delta IS the signal.**
+[delta](https://github.com/blueshed/delta) proved the document lens; [railroad](https://github.com/blueshed/railroad) proved signals-to-DOM. Epsilon merges them and hands you the source: the delta IS the signal, and the stack IS the app.
 
-## Starting an app
+## License
 
-```sh
-bun create blueshed/epsilon-app my-app
-```
-
-`template/` here is the working copy of that repo — a complete three-file
-app (in-memory by default; set `EPSILON_PG_URL` for durable Postgres). Edit
-it here, alongside the library and tests, then publish updates with:
-
-```sh
-git subtree push --prefix=template https://github.com/blueshed/epsilon-app.git main
-```
-
-## Status
-
-The primitive and the wire run — `bun test` (signal + real-WebSocket doc suites). Read [DESIGN.md](DESIGN.md); the tests are the contract.
+MIT

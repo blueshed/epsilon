@@ -1,32 +1,17 @@
 {
-  "name": "@blueshed/epsilon",
-  "version": "0.0.1",
+  "name": "epsilon",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "One op stream, Postgres to pixel — the delta IS the signal. Design-phase merge of @blueshed/delta and @blueshed/railroad.",
-  "exports": {
-    ".": "./index.ts",
-    "./op": "./op.ts",
-    "./signal": "./signal.ts",
-    "./doc": "./doc.ts",
-    "./ui": "./ui.ts",
-    "./pg": "./pg.ts"
-  },
+  "description": "One op stream, Postgres to pixel — bun create blueshed/epsilon my-app. The runtime lives in your app: epsilon/, ~1k lines, tests included.",
   "scripts": {
+    "dev": "bun --hot server.ts",
     "check": "bunx tsc --noEmit",
-    "test": "bun test signal.test.ts doc.test.ts ui.test.ts",
-    "test:pg": "bun test pg.test.ts",
+    "test": "bun test epsilon/signal.test.ts epsilon/doc.test.ts epsilon/ui.test.ts",
+    "test:pg": "bun test epsilon/pg.test.ts",
     "db:up": "docker compose up -d --wait",
     "db:down": "docker compose down -v",
     "ci": "bun run db:up && bun run check && bun test; code=$?; bun run db:down; exit $code"
-  },
-  "peerDependencies": {
-    "pg": "^8.11.0"
-  },
-  "peerDependenciesMeta": {
-    "pg": {
-      "optional": true
-    }
   },
   "devDependencies": {
     "@happy-dom/global-registrator": "^20.11.1",
@@ -34,6 +19,9 @@
     "@types/pg": "^8.20.0",
     "pg": "^8.22.0",
     "typescript": "^5.9.3"
+  },
+  "bun-create": {
+    "start": "bun run dev"
   },
   "license": "MIT"
 }
