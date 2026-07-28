@@ -67,15 +67,33 @@ The boundary: **SQL owns composition and multi-table transactions; TS owns
 the op vocabulary, transport, and UI.** A tier uses stored functions exactly
 when the model is relational.
 
+## Delivered (Peter-driven, 2026-07-28 evening)
+
+1. **Server mints ids — every tier.** Clients send `add /coll/-`; the host
+   assigns a uuid (doc-native) or the Postgres sequence assigns (relational);
+   the echo carries the resolved path. Arrays keep native `-` append.
+2. **Auth UI in the template.** `requireAuth` turns on with Postgres; the
+   dialog drives register/login/authenticate; tokens restore sessions.
+3. **Relational tier v1** (`board.sql` is the pattern): tables are the truth;
+   `<doc>_apply(name, ops, user)` applies + mints + logs + notifies in ONE
+   transaction (`FOR UPDATE` serializes writers — no lost updates);
+   `<doc>_open(name)` composes at OPEN time only.
+
+Two laws that fell out of Peter's review of the first cut:
+
+- **Express the change, never recompose.** Writes are O(change): op log +
+  version bump. Composition is an open-time cost (`doc_open` indirection —
+  one read path for both tiers). A write must never rebuild the doc.
+- **NOTIFY is a doorbell, not a payload.** `{name, v}` (~40 bytes — the 8k
+  limit is unreachable); listeners fetch ops from `doc_ops`, which is the
+  event log AND the audit trail (`by_user`, `at`).
+
 ## Open items
 
-1. **Id minting at the doc-native tier contradicts decision 1** — the client
-   recipe mints uuids; the server should assign (e.g. `add /coll/-` returns
-   the id in the echo, like Postgres sequences will at the relational tier).
-2. Relational tier: docs as lenses over tables, stored functions for
-   composition + multi-table writes.
-3. Template UI for auth (register/login) once `requireAuth` is the default
-   story.
+- Generalize the relational pattern (multiple collections, scoped docs, RLS)
+  — `board.sql` is one worked doc type; delta's framework SQL is the map.
+- `--hot` note: top-level resources cache on `globalThis` (see server.ts) or
+  every reload leaks a pool and resets versions.
 
 ## Non-goals
 

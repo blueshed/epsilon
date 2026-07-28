@@ -1,0 +1,9 @@
+body { font-family: system-ui; max-width: 40rem; margin: 2rem auto; }
+ul { padding: 0; }
+li { list-style: none; padding: .4rem .6rem; border-bottom: 1px solid #ddd; }
+input { width: 100%; padding: .5rem; font-size: 1rem; box-sizing: border-box; }
+dialog { border: 1px solid #ccc; border-radius: .5rem; padding: 1.2rem; min-width: 20rem; }
+dialog::backdrop { background: rgb(0 0 0 / .3); }
+dialog input { margin: .25rem 0 .6rem; }
+dialog button { padding: .45rem .9rem; margin-right: .5rem; font-size: 1rem; }
+#auth-error { color: #b00; min-height: 1.2em; font-size: .9rem; }

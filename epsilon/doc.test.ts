@@ -107,3 +107,19 @@ describe("the wire", () => {
     expect(({} as any).hacked).toBeUndefined();
   });
 });
+
+describe("decision 1: the server mints ids", () => {
+  test("add to /cards/- echoes a server uuid; both clients converge on it", async () => {
+    const a = client().doc<Board>("board");
+    const b = client().doc<Board>("board");
+    await Promise.all([a.ready, b.ready]);
+
+    a.apply([{ op: "add", path: "/cards/-", value: { title: "minted", done: false } } as any]);
+    await until(() => Object.keys(b.peek()!.cards).some((k) => b.peek()!.cards[k]!.title === "minted"));
+
+    const id = Object.keys(a.peek()!.cards).find((k) => a.peek()!.cards[k]!.title === "minted")!;
+    expect(id).not.toBe("-");
+    expect(id.length).toBe(36);                          // uuid — not client-invented
+    expect(b.peek()!.cards[id]!.title).toBe("minted");   // same id everywhere
+  });
+});

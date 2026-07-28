@@ -3,16 +3,25 @@
   <head>
     <meta charset="utf-8" />
     <title>epsilon-app</title>
-    <style>
-      body { font-family: system-ui; max-width: 40rem; margin: 2rem auto; }
-      ul { padding: 0; } li { list-style: none; padding: .4rem .6rem; border-bottom: 1px solid #ddd; }
-      input { width: 100%; padding: .5rem; font-size: 1rem; }
-    </style>
+    <link rel="stylesheet" href="./index.css" />
   </head>
   <body>
     <h1>epsilon</h1>
     <form id="form"><input id="input" placeholder="type, press enter, watch the other tab" autofocus /></form>
     <ul id="log"></ul>
-    <script type="module" src="./src/client.ts"></script>
+
+    <dialog id="auth">
+      <form method="dialog">
+        <h2>sign in</h2>
+        <input id="auth-name" placeholder="name (register only)" autocomplete="name" />
+        <input id="auth-email" type="email" placeholder="email" autocomplete="email" />
+        <input id="auth-password" type="password" placeholder="password" autocomplete="current-password" />
+        <p id="auth-error"></p>
+        <button id="auth-login">log in</button>
+        <button id="auth-register">register</button>
+      </form>
+    </dialog>
+
+    <script type="module" src="./index.ts"></script>
   </body>
 </html>

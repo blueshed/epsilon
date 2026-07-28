@@ -5,11 +5,30 @@
 -- adds stored functions for composition and multi-table writes — see
 -- DESIGN.md "Storage tiers".
 
+-- data: the doc itself (doc-native tier) — NULL for relational docs, whose
+-- state lives in tables and composes at open. open_fn: the composition
+-- function for relational docs. Writes NEVER recompose; they express the
+-- change (doc_ops) and bump v. Composition is an open-time cost only.
 CREATE TABLE IF NOT EXISTS docs (
   name text PRIMARY KEY,
   v bigint NOT NULL DEFAULT 0,
-  data jsonb NOT NULL
+  data jsonb,
+  open_fn text
 );
+ALTER TABLE docs ALTER COLUMN data DROP NOT NULL;
+ALTER TABLE docs ADD COLUMN IF NOT EXISTS open_fn text;
+
+-- The ONE read path for both tiers: stored data, or composed on demand.
+CREATE OR REPLACE FUNCTION doc_open(p_doc text) RETURNS jsonb AS $$
+DECLARE v_fn text; v_data jsonb; v_out jsonb;
+BEGIN
+  SELECT open_fn, data INTO v_fn, v_data FROM docs WHERE name = p_doc;
+  IF NOT FOUND THEN RETURN NULL; END IF;
+  IF v_fn IS NULL THEN RETURN v_data; END IF;
+  EXECUTE format('SELECT %I($1)', v_fn) INTO v_out USING p_doc;
+  RETURN v_out;
+END;
+$$ LANGUAGE plpgsql;
 
 -- Every write, forever: the op log delta's temporal tables approximated.
 -- Catch-up (v > last seen) and audit both read from here.

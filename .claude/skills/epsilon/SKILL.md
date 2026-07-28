@@ -1,78 +1,83 @@
 ---
 name: epsilon
-description: "This app's realtime stack — op-carrying signals, doc sync over one WebSocket, Postgres durability, schema-native users. The runtime is the epsilon/ folder IN this repo (read it — ~1k lines). Use for any shared state, live updates, multi-user, collaborative, or realtime work in this app. Do NOT add Firebase/Supabase/socket.io/React Query — the stack is already here."
+description: "This app's realtime stack — op-carrying signals, doc sync over one WebSocket, relational Postgres with stored-function writes, schema-native users with auth UI. The runtime is the epsilon/ folder IN this repo (read it — ~1k lines). Use for any shared state, live updates, multi-user, collaborative, or realtime work in this app. Do NOT add Firebase/Supabase/socket.io/React Query — the stack is already here."
 ---
 
 # epsilon — how this app does realtime
 
 The runtime is **in this repo**: `epsilon/` — read the source, it's shorter
 than most docs. `epsilon/*.test.ts` are the contract. `DESIGN.md` is the why.
+Routes follow the bun-route convention: root route = `index.html` +
+`index.css` + `index.ts` at project root; `server.ts` exports
+`startServer(opts)` so tests bind port 0; `app.test.ts` drives the real app
+in `Bun.WebView`.
 
-## Mental model (five lines)
+## Mental model (six lines)
 
 - A doc is a Signal. The server's copy is the authority; a client doc's
   `apply()` SENDS ops and the **echo** mutates locally.
 - Ops are the one vocabulary: `add` / `replace` / `remove` on JSON-Pointer
   paths. Even the open snapshot is an op. Never invent verbs.
-- `at(path)` narrows a doc into a lens — value AND op stream. Lenses compose:
-  `doc.at("/cards").at("/1")` ≡ `doc.at("/cards/1")`. Writes rebase up.
-- `list()` routes MEMBERSHIP ops only; row content flows through each row's
-  lens. Nothing diffs, ever.
+- **The server mints ids.** Send `add /coll/-`; the echo carries the real id
+  (uuid in-memory, Postgres sequence relational). Never invent ids client-side.
+- `at(path)` narrows a doc into a lens — value AND op stream; lenses compose
+  and writes rebase up. `list()` routes MEMBERSHIP ops; row content flows
+  through each row's lens. Nothing diffs, ever.
+- **Express the change, never recompose.** Writes are O(change) — op log +
+  version bump. Composition happens at open (`doc_open`), not per write.
 - The law: ops are the fast path; recompute-from-state is always correct on
-  its own. Any consumer may ignore ops and just re-read.
+  its own.
 
-## Client recipe (this is src/client.ts — copy its shape)
+## Client (index.ts is the reference)
 
 ```ts
-import { connect, list, text } from "../epsilon";
-const remote = connect(`ws://${location.host}/ws`);
-const board = remote.doc<Board>("board");
+const remote = connect(`ws://${location.host}/ws`, { onError });   // "unauthenticated" → show auth dialog
+const board = remote.doc<Board>("board:1");
 const cards = board.at<Record<string, Card>>("/cards");
-
-list(cards, (card) => {                    // membership routes here
-  const li = document.createElement("li");
-  li.appendChild(text(card.map((c) => c?.text)));   // content via the lens
-  return li;
-});
-
-cards.apply([{ op: "add", path: `/${id}`, value: {...} }]);  // → wire → echo
+list(cards, (card) => { ...text(card.map(c => c?.text))... });
+cards.apply([{ op: "add", path: "/-", value: { text } }]);         // server mints; echo renders
+await remote.call("login" | "register" | "authenticate", params);  // then re-ask: remote.doc("board:1")
 ```
 
-## Server recipe (this is server.ts)
+## Server — two tiers, one wire
 
-```ts
-const host = createHost();                  // { requireAuth: true } to gate docs
-host.doc<Board>("board", empty);            // in-memory
-// durable: pgDoc(host, sql, "board", empty) + pgSync(host, sql, { url })
-// users:   pgAuth(host, sql) → register/login/authenticate/logout methods
-```
+- **In-memory** (default): `host.doc(name, empty)` — host mints uuids, open
+  access, state dies with the process.
+- **Relational** (set `EPSILON_PG_URL`): `board.sql` is the pattern — YOUR
+  tables are the truth; `board_apply(name, ops, user)` applies + mints from
+  sequences + logs + notifies in ONE transaction (`FOR UPDATE` serializes
+  writers); `board_open(name)` composes the doc at open only. Glue:
+  `pgDoc(host, sql, "board:1", null, { apply: "board_apply" })`. Auth comes
+  on with it: `createHost({ requireAuth: true })` + `pgAuth(host, sql)`.
+- To add a doc type: write its tables + `<x>_open` + `<x>_apply` in SQL
+  (copy board.sql's shape), seed its `docs` row with `open_fn`, one `pgDoc`
+  line. Composition and multi-table writes belong IN the stored function —
+  that's what SQL is optimal at.
 
 ## Rules — in order of importance
 
-- **Never update locally after a send.** `apply()` on a client doc transmits;
-  the echo renders it. Touch the DOM or state yourself and it doubles.
-- **One write path.** `set()`/`update()`/lens writes all funnel through
-  `apply()` — never mutate `peek()`'d values directly.
-- **`list()` for collections, lenses for content.** Don't rebuild rows from
-  `doc.data` in an effect; don't diff anything.
-- **Auth before docs** on `requireAuth` hosts: `await remote.call("login" | "register" | "authenticate", ...)`,
-  then `remote.doc(...)` (a pre-auth handle re-opens when asked again).
-- **Postgres via `EPSILON_PG_URL`** — durability, versions, cross-process
-  fan-out. Tests use their own `epsilon_test` DB and must never share the
-  app's (`bun run test:pg`).
-- **Keep the schema in `schema.sql`** — plain DDL at this tier. Composition /
-  multi-table writes belong to the relational tier (DESIGN.md "Storage
-  tiers"), not in ad-hoc queries.
+- **Never update locally after a send.** The echo renders the write — touch
+  the DOM or state yourself and it doubles.
+- **Never mint ids client-side.** `/-` in, resolved id out.
+- **A write never recomposes the doc.** If your stored function rebuilds
+  `docs.data`, it's wrong — bump v, log ops, notify (a ~40-byte doorbell;
+  `doc_ops` carries the payload and doubles as the audit trail — `by_user`
+  is threaded from the socket's authenticated user).
+- **`list()` for collections, lenses for content.** No effects that rebuild
+  rows from `doc.data`.
+- **Auth before docs** on `requireAuth` hosts; store the session token; a
+  refused doc handle re-opens when asked again.
+- **Tests own `epsilon_test`** — never point them at the app's database (the
+  suite TRUNCATEs).
 
 ## Sharp edges
 
+- `--hot` re-evaluates server.ts top level: boot ONCE via the `globalThis`
+  guard (see server.ts) or every reload leaks a Postgres pool and resets doc
+  versions under live clients.
+- Bun SQL binds objects/arrays RAW into jsonb — `JSON.stringify(...)::jsonb`
+  double-encodes into a scalar and `jsonb_array_elements` explodes.
 - Effects through a lens re-run on ANY root change (correct, not minimal) —
-  precision lives in the ops channel (`onOps`), which `list()` uses.
-- In-memory tier + `--hot`: a reload resets versions; connected clients may
-  drop writes as stale until re-open. Postgres is immune. Prefer PG for
-  anything beyond a toy.
-- Ids are currently client-minted uuids in the doc-native tier; DESIGN.md
-  decision 1 says server-minted everywhere — a known gap, don't build on
-  client ids being special.
-- `epsilon/` is yours to edit — but run `bun test` after; the tests ARE the
+  precision lives in the ops channel, which `list()` uses.
+- `epsilon/` is yours to edit — run `bun test` after; the tests ARE the
   contract you're editing against.

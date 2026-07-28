@@ -31,7 +31,7 @@
  */
 
 import { Signal, signal, type OpSignal } from "./signal";
-import type { Op } from "./op";
+import { valueAt, type Op } from "./op";
 
 type ClientMsg =
   | { action: "open"; doc: string }
@@ -52,6 +52,30 @@ export interface DocOpts {
    *  the ops, and the post-apply state. NOT called for hydrate/receive
    *  (those ops came FROM storage). */
   persist?: (v: number, ops: Op[], data: unknown) => void;
+  /**
+   * Authority-replacement hook: when set, client ops are handed here INSTEAD
+   * of being applied to the signal — for docs whose truth lives elsewhere
+   * (relational tables behind a stored function). The implementation applies
+   * to storage, then injects the resolved result via host.receive(). Server
+   * minting included: `-` ids are storage's to assign on this path.
+   * `userId` is the authenticated writer (audit trail — doc_ops.by_user).
+   */
+  write?: (ops: Op[], userId?: number | string) => void | Promise<void>;
+}
+
+/**
+ * Decision 1 — the server mints ids, every tier. An `add` ending in `/-`
+ * against a RECORD collection gets a server uuid (arrays keep native append
+ * semantics). Storage-backed docs mint in storage instead (their write hook
+ * sees the raw `-`; Postgres sequences assign).
+ */
+export function mintIds(doc: unknown, ops: Op[]): Op[] {
+  return ops.map((op) => {
+    if (op.op !== "add" || !op.path.endsWith("/-")) return op;
+    const parentPath = op.path.slice(0, -2);
+    if (Array.isArray(valueAt(doc, parentPath))) return op;
+    return { ...op, path: `${parentPath}/${crypto.randomUUID()}` };
+  });
 }
 
 export interface Host {
@@ -85,7 +109,7 @@ export function createHost(opts?: {
   requireAuth?: boolean;
 }): Host {
   const path = opts?.path ?? "/ws";
-  const docs = new Map<string, { sig: Signal<any>; v: number; persist?: DocOpts["persist"] }>();
+  const docs = new Map<string, { sig: Signal<any>; v: number; persist?: DocOpts["persist"]; write?: DocOpts["write"] }>();
   const methods = new Map<string, (params: any, ws: any) => unknown | Promise<unknown>>();
   let server: any = null;
   let skipPersist = false;
@@ -104,7 +128,7 @@ export function createHost(opts?: {
       const existing = docs.get(name);
       if (existing) return existing.sig as Signal<T>;
       const sig = signal<T>(empty);
-      const entry = { sig, v: 0, persist: docOpts?.persist };
+      const entry = { sig, v: 0, persist: docOpts?.persist, write: docOpts?.write };
       docs.set(name, entry);
       // Broadcast is just the doc's own ops channel piped to subscribers —
       // whether the write came from a client, server code, or storage
@@ -197,7 +221,13 @@ export function createHost(opts?: {
           } satisfies ServerMsg));
         } else if (msg.action === "ops") {
           try {
-            entry.sig.apply(msg.ops); // authority applies; onOps above broadcasts
+            if (entry.write) {
+              // Storage is the authority (relational tier): it applies,
+              // mints ids, and re-enters via host.receive().
+              await entry.write(msg.ops, ws.data?.user?.id);
+            } else {
+              entry.sig.apply(mintIds(entry.sig.peek(), msg.ops));
+            }
           } catch (err) {
             ws.send(JSON.stringify({ doc: msg.doc, error: String(err) } satisfies ServerMsg));
           }

@@ -27,25 +27,64 @@ import type { Signal } from "./signal";
 
 const CHANNEL = "epsilon_ops";
 
-/** Apply schema.sql — plain DDL, idempotent, statement by statement. */
+/** Run a whole SQL file in one call (multi-statement, plpgsql-safe). */
+export async function applySql(sql: SQL, file: URL | string): Promise<void> {
+  await sql.unsafe(await Bun.file(file).text());
+}
+
+/** Apply schema.sql — plain DDL, idempotent. */
 export async function ensureSchema(sql: SQL): Promise<void> {
-  const ddl = await Bun.file(new URL("./schema.sql", import.meta.url)).text();
-  for (const stmt of ddl.split(";")) {
-    const s = stmt.trim();
-    if (s) await sql.unsafe(s);
-  }
+  await applySql(sql, new URL("./schema.sql", import.meta.url));
 }
 
 /**
- * Host a doc backed by Postgres: load (or create) the row, hydrate the host,
- * persist every local write, NOTIFY other processes.
+ * Host a doc backed by Postgres.
+ *
+ * Doc-native (default): the doc is a JSONB blob — TS applies ops, one guarded
+ * UPDATE persists, NOTIFY fans out.
+ *
+ * Relational (`opts.apply` = a stored function name): the TABLES are the
+ * truth. Client ops go to `<apply>(name, ops)` in ONE transaction — it mints
+ * ids from sequences, updates tables, recomposes the doc into docs.data,
+ * logs doc_ops, bumps v, NOTIFYs — and returns `{v, ops}` with resolved
+ * paths/rows, which re-enter through host.receive(). Composition and
+ * multi-table writes live in SQL, where they're optimal; hydrate, catch-up,
+ * fan-out, wire, and UI are IDENTICAL to the doc-native tier.
  */
 export async function pgDoc<T>(
   host: Host,
   sql: SQL,
   name: string,
   empty: T,
+  opts?: { apply?: string },
 ): Promise<Signal<T>> {
+  if (opts?.apply) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(opts.apply)) {
+      throw new Error(`[epsilon/pg] apply must be a plain function name: ${opts.apply}`);
+    }
+    const applyFn = opts.apply;
+    const sig = host.doc<T>(name, empty, {
+      async write(ops, userId) {
+        // ops bind RAW — Bun encodes arrays/objects as jsonb; stringify+cast
+        // double-encodes into a scalar (see the doc-native lesson above).
+        const rows = await sql.unsafe(
+          `SELECT ${applyFn}($1, $2, $3) AS r`,
+          [name, ops as unknown, userId ?? null],
+        );
+        const r = rows[0]!.r as { v: number | string; ops: Op[] };
+        if (host.receive(name, Number(r.v), r.ops) === "gap") {
+          const [doc] = await sql`SELECT v, doc_open(name) AS data FROM docs WHERE name = ${name}`;
+          if (doc) host.hydrate(name, Number(doc.v), doc.data);
+        }
+      },
+    });
+    // Composition happens HERE, at open — never per write.
+    const [row] = await sql`SELECT v, doc_open(name) AS data FROM docs WHERE name = ${name}`;
+    if (!row) throw new Error(`[epsilon/pg] relational doc ${name} not seeded — your SQL file should INSERT its docs row`);
+    host.hydrate(name, Number(row.v), row.data);
+    return sig;
+  }
+
   // Persistence is serialized per doc (delta's A2 lesson): a chain, not a race.
   let chain: Promise<void> = Promise.resolve();
 
@@ -73,7 +112,7 @@ export async function pgDoc<T>(
     },
   });
 
-  const [row] = await sql`SELECT v, data FROM docs WHERE name = ${name}`;
+  const [row] = await sql`SELECT v, doc_open(name) AS data FROM docs WHERE name = ${name}`;
   if (row) {
     host.hydrate(name, Number(row.v), row.data);
   } else {
@@ -93,7 +132,7 @@ async function catchUp(host: Host, sql: SQL, name: string): Promise<void> {
     SELECT v, ops FROM doc_ops WHERE name = ${name} AND v > ${current} ORDER BY v`;
   for (const m of missed) {
     if (host.receive(name, Number(m.v), m.ops as Op[]) === "gap") {
-      const [doc] = await sql`SELECT v, data FROM docs WHERE name = ${name}`;
+      const [doc] = await sql`SELECT v, doc_open(name) AS data FROM docs WHERE name = ${name}`;
       if (doc) host.hydrate(name, Number(doc.v), doc.data);
       return;
     }
