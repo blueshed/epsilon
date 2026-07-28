@@ -213,18 +213,20 @@ describe("the vision: per-user docs, creation as an op, multi-doc writes", () =>
   test("mine:<uid> is yours alone — the WIRE refuses strangers like a missing doc", async () => {
     const host = createHost({ requireAuth: true });
     await pgAuth(host, sql);
-    host.docs("mine:", async (name) => {
+    host.docs("mine:", async (name, userId) => {
       const uid = Number(name.split(":")[1]);
+      if (!Number.isFinite(uid) || Number(userId) !== uid) throw new Error(`unknown doc: ${name}`);
       await pgDoc(host, sql, name, null, {
         apply: "mine_apply", seed: { open_fn: "mine_open" },
         openAs: uid, guard: (u) => Number(u) === uid,
       });
     });
-    host.docs("board:", async (name) => {
+    host.docs("board:", async (name, userId) => {
       const id = Number(name.split(":")[1]);
       const [b] = await sql`SELECT owner_id FROM boards WHERE id = ${id}`;
       if (!b) throw new Error(`unknown doc: ${name}`);
       const owner = b.owner_id == null ? null : Number(b.owner_id);
+      if (owner != null && Number(userId) !== owner) throw new Error(`unknown doc: ${name}`);
       await pgDoc(host, sql, name, null, {
         apply: "board_apply", openAs: owner,
         guard: owner == null ? undefined : (u) => Number(u) === owner,

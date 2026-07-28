@@ -104,8 +104,12 @@ export interface Host {
    * Dynamic docs: when a client opens an unregistered name matching prefix,
    * the factory runs once (concurrent opens coalesce) and must register the
    * doc via host.doc(). Doc names are data — "board:42", "mine:7".
+   * `userId` is the asking socket's authenticated user: throw BEFORE
+   * registering to refuse ("unknown doc" — no existence oracle) and a probe
+   * hosts and seeds nothing. Coalesced opens share the FIRST asker's run —
+   * per-user refusal of an already-registered doc belongs to `open`/`guard`.
    */
-  docs(prefix: string, factory: (name: string) => unknown | Promise<unknown>): void;
+  docs(prefix: string, factory: (name: string, userId?: number | string) => unknown | Promise<unknown>): void;
   fetch(req: Request, server: any): Response | undefined;
   websocket: {
     message(ws: any, raw: string | Buffer): void | Promise<void>;
@@ -125,7 +129,7 @@ export function createHost(opts?: {
   type Entry = { sig: Signal<any>; v: number; persist?: DocOpts["persist"]; write?: DocOpts["write"]; open?: DocOpts["open"] };
   const docs = new Map<string, Entry>();
   const methods = new Map<string, (params: any, ws: any) => unknown | Promise<unknown>>();
-  const prefixes = new Map<string, (name: string) => unknown | Promise<unknown>>();
+  const prefixes = new Map<string, (name: string, userId?: number | string) => unknown | Promise<unknown>>();
   const pendingFactories = new Map<string, Promise<unknown>>();
   let server: any = null;
   let skipPersist = false;
@@ -137,14 +141,14 @@ export function createHost(opts?: {
   }
 
   /** Registered entry, or run the matching prefix factory (coalesced). */
-  async function resolveEntry(name: string): Promise<Entry | undefined> {
+  async function resolveEntry(name: string, userId?: number | string): Promise<Entry | undefined> {
     const existing = docs.get(name);
     if (existing) return existing;
     for (const [prefix, factory] of prefixes) {
       if (!name.startsWith(prefix)) continue;
       let pending = pendingFactories.get(name);
       if (!pending) {
-        pending = Promise.resolve(factory(name));
+        pending = Promise.resolve(factory(name, userId));
         pendingFactories.set(name, pending);
         pending.finally(() => pendingFactories.delete(name)).catch(() => {});
       }
@@ -247,7 +251,7 @@ export function createHost(opts?: {
         }
         let entry: Entry | undefined;
         try {
-          entry = await resolveEntry(msg.doc);
+          entry = await resolveEntry(msg.doc, ws.data?.user?.id);
         } catch (err) {
           ws.send(JSON.stringify({ doc: msg.doc, error: String(err) } satisfies ServerMsg));
           return;
@@ -375,7 +379,8 @@ export function connect(
 ): Remote {
   const docs = new Map<string, RemoteDoc<any>>();
   const pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
-  const queued: ClientMsg[] = [];   // calls made before the socket opened
+  const queued: ClientMsg[] = [];    // calls made before the socket opened
+  const queuedOps: ClientMsg[] = []; // writes made while the socket was down
   let nextId = 1;
   let ws: WebSocket;
   let closed = false;
@@ -389,7 +394,14 @@ export function connect(
     doc<T>(name: string) {
       let doc = docs.get(name) as RemoteDoc<T> | undefined;
       if (!doc) {
-        doc = new RemoteDoc<T>((ops) => send({ action: "ops", doc: name, ops }));
+        doc = new RemoteDoc<T>((ops) => {
+          // Never drop a write silently: while the socket is down, ops queue
+          // and flush on reconnect — after the connect hook and the re-opens,
+          // so a requireAuth host accepts them and echoes flow normally.
+          const msg: ClientMsg = { action: "ops", doc: name, ops };
+          if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
+          else queuedOps.push(msg);
+        });
         docs.set(name, doc);
         send({ action: "open", doc: name }); // no-op if not connected yet
       } else if (doc.v === 0) {
@@ -414,6 +426,7 @@ export function connect(
       closed = true;
       for (const [, p] of pending) p.reject(new Error("closed"));
       pending.clear();
+      queuedOps.length = 0;   // a deliberate close abandons unflushed writes
       try { ws.close(); } catch { /* already closed */ }
     },
   };
@@ -433,6 +446,7 @@ export function connect(
         console.error("[epsilon/doc] onConnect hook failed:", err);
       }
       for (const name of docs.keys()) send({ action: "open", doc: name });
+      for (const msg of queuedOps.splice(0)) ws.send(JSON.stringify(msg));
     };
     ws.onmessage = (ev) => {
       const msg = JSON.parse(String(ev.data)) as ServerMsg;

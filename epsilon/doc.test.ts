@@ -167,6 +167,75 @@ describe("reconnect — onConnect re-authenticates before docs re-open", () => {
     await until(() => doc.peek()!.cards["1"]!.done === true, 3000);
     srv.stop(true);
   });
+
+  test("writes made while the socket is DOWN queue and flush, not drop", async () => {
+    const h = createHost({ requireAuth: true });
+    const authority = h.doc<Board>("secret", structuredClone(empty));
+    h.method("become", (_p, ws) => { ws.data ??= {}; ws.data.user = { id: 7 }; return { id: 7 }; });
+    h.method("hang", () => new Promise(() => {}));   // pending until the drop
+    h.method("kick", (_p, ws) => { ws.close(); });
+    const srv = Bun.serve({
+      port: 0,
+      fetch: (req, s) => h.fetch(req, s) ?? new Response("", { status: 404 }),
+      websocket: h.websocket,
+    });
+    h.setServer(srv);
+
+    const r = connect(`ws://localhost:${srv.port}${h.path}`, {
+      onConnect: async (remote) => { await remote.call("become"); },
+    });
+    remotes.push(r);
+    const doc = r.doc<Board>("secret");
+    await doc.ready;
+
+    const dropped = r.call("hang").catch(() => {});  // rejects when onclose fires
+    r.call("kick").catch(() => {});
+    await dropped;                                   // socket is definitely down
+    doc.at("/cards/1/title").set("offline write");   // queued, not lost
+    await until(() => doc.peek()!.cards["1"]!.title === "offline write", 3000);
+    expect(authority.peek().cards["1"]!.title).toBe("offline write");
+    srv.stop(true);
+  });
+});
+
+describe("dynamic docs — the factory sees the asking identity", () => {
+  test("a probe is refused BEFORE anything is hosted; the owner still opens", async () => {
+    const h = createHost({ requireAuth: true });
+    h.method("become", (p: { id: number }, ws) => { ws.data ??= {}; ws.data.user = { id: p.id }; return ws.data.user; });
+    let built = 0;
+    h.docs("mine:", (name, userId) => {
+      if (name !== `mine:${userId}`) throw new Error(`unknown doc: ${name}`);
+      built++;
+      h.doc(name, { cards: {} } satisfies Board);
+    });
+    const srv = Bun.serve({
+      port: 0,
+      fetch: (req, s) => h.fetch(req, s) ?? new Response("", { status: 404 }),
+      websocket: h.websocket,
+    });
+    h.setServer(srv);
+    const wsUrl = `ws://localhost:${srv.port}${h.path}`;
+
+    const errors: string[] = [];
+    const stranger = connect(wsUrl, {
+      onConnect: async (remote) => { await remote.call("become", { id: 9 }); },
+      onError: (_d, e) => errors.push(e),
+    });
+    remotes.push(stranger);
+    stranger.doc("mine:7");
+    await until(() => errors.length > 0, 3000);
+    expect(errors[0]).toContain("unknown doc");
+    expect(built).toBe(0);                    // the probe hosted NOTHING
+
+    const owner = connect(wsUrl, {
+      onConnect: async (remote) => { await remote.call("become", { id: 7 }); },
+    });
+    remotes.push(owner);
+    const mine = owner.doc<Board>("mine:7");
+    await mine.ready;
+    expect(built).toBe(1);
+    srv.stop(true);
+  });
 });
 
 describe("dynamic docs — names are data, hosted on first open", () => {

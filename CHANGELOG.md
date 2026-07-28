@@ -24,6 +24,18 @@ will ship.
   `doc.ready` instead of hanging forever; re-asking after a refusal re-arms
   it. Refusals still report through `onError`, never as unhandled
   rejections.
+- Doc writes made while the socket is down queue and flush on reconnect —
+  after the connect hook and the re-opens, so a `requireAuth` host accepts
+  them — instead of being silently dropped. A deliberate `close()` abandons
+  the queue.
+
+### Security
+
+- Dynamic-doc factories receive the asking user —
+  `host.docs(prefix, (name, userId) => ...)` — and the template's `mine:` /
+  `board:` factories refuse strangers BEFORE hosting or seeding anything.
+  Previously any authenticated user probing `mine:<n>` names minted `docs`
+  rows and hosted signals without bound.
 
 ## [0.1.0] — 2026-07-28
 

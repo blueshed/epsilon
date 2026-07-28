@@ -79,6 +79,9 @@ stored function with the identity the socket authenticated.
   (copy 003-board.sql's shape), seed its `docs` row with `open_fn`, one `pgDoc`
   line. Composition and multi-table writes belong IN the stored function —
   that's what SQL is optimal at.
+- Dynamic docs: `host.docs(prefix, (name, userId) => ...)` — the factory sees
+  the asking user; throw `unknown doc` BEFORE hosting/seeding so probes cost
+  nothing (see server.ts's `mine:` factory).
 
 ## Rules — in order of importance
 
