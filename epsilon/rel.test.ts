@@ -208,3 +208,90 @@ describe("ownership — users mean something", () => {
     expect(row.d).not.toBeNull();
   });
 });
+
+describe("the vision: per-user docs, creation as an op, multi-doc writes", () => {
+  test("mine:<uid> is yours alone — the WIRE refuses strangers like a missing doc", async () => {
+    const host = createHost({ requireAuth: true });
+    await pgAuth(host, sql);
+    host.docs("mine:", async (name) => {
+      const uid = Number(name.split(":")[1]);
+      await pgDoc(host, sql, name, null, {
+        apply: "mine_apply", seed: { open_fn: "mine_open" },
+        openAs: uid, guard: (u) => Number(u) === uid,
+      });
+    });
+    host.docs("board:", async (name) => {
+      const id = Number(name.split(":")[1]);
+      const [b] = await sql`SELECT owner_id FROM boards WHERE id = ${id}`;
+      if (!b) throw new Error(`unknown doc: ${name}`);
+      const owner = b.owner_id == null ? null : Number(b.owner_id);
+      await pgDoc(host, sql, name, null, {
+        apply: "board_apply", openAs: owner,
+        guard: owner == null ? undefined : (u) => Number(u) === owner,
+      });
+    });
+    const url = serve(host);
+    // The rename mirror is a cross-doc write delivered by the fan-out
+    // machinery — production always runs pgSync; so does this test.
+    stops.push((await pgSync(host, sql, { url: PG_URL })).stop);
+
+    // Alice and Mallory.
+    const alice = client(url);
+    const am = await alice.call<{ user: { id: number } }>("register", {
+      name: "Alice", email: "alice@vision.test", password: "pw",
+    });
+    const aliceId = am.user.id;
+    const mallory = client(url);
+    await mallory.call("register", { name: "Mallory", email: "mallory@vision.test", password: "pw" });
+
+    // Alice's list opens; Mallory asking for it reads as unknown.
+    const mine = alice.doc<{ boards: Record<string, { id: number; name: string }> }>(`mine:${aliceId}`);
+    await mine.ready;
+    expect(mine.peek()!.boards).toEqual({});
+    const spyErrors: string[] = [];
+    const mallory2 = connect(url, { onError: (_d: string, e: string) => spyErrors.push(e) });
+    remotes.push(mallory2);
+    await mallory2.call("login", { email: "mallory@vision.test", password: "pw" });
+    mallory2.doc(`mine:${aliceId}`);
+    await until(() => spyErrors.length > 0);
+    expect(spyErrors[0]).toContain("unknown doc");
+
+    // CREATING A BOARD IS AN OP — the echo carries the sequence id and the
+    // board's own doc row now exists.
+    mine.at("/boards").apply([{ op: "add", path: "/-", value: { name: "the plan" } }]);
+    await until(() => Object.keys(mine.peek()!.boards).length === 1);
+    const bid = Object.values(mine.peek()!.boards)[0]!.id;
+    const [docRow] = await sql`SELECT open_fn FROM docs WHERE name = ${"board:" + bid}`;
+    expect(docRow.open_fn).toBe("board_open");
+
+    // Alice opens her new board over the wire and writes to it.
+    const board = alice.doc<Board>(`board:${bid}`);
+    await board.ready;
+    expect(board.peek()!.name).toBe("the plan");
+    board.at<Record<string, Card>>("/cards").apply([{ op: "add", path: "/-", value: { text: "step one" } }]);
+    await until(() => Object.keys(board.peek()!.cards).length === 1);
+
+    // Mallory cannot open it — same "unknown doc" a missing board gives.
+    mallory2.doc(`board:${bid}`);
+    await until(() => spyErrors.length > 1);
+    expect(spyErrors[1]).toContain("unknown doc");
+
+    // RENAME MIRRORS across docs in one transaction: board write → mine op.
+    const mineVBefore = await sql`SELECT v FROM docs WHERE name = ${"mine:" + aliceId}`;
+    board.at<string>("/name").set("the better plan");
+    await until(() => mine.peek()!.boards[String(bid)]!.name === "the better plan");
+    const [mineOps] = await sql`
+      SELECT ops, by_user FROM doc_ops WHERE name = ${"mine:" + aliceId}
+      AND v = ${Number(mineVBefore[0].v) + 1}`;
+    expect(mineOps.ops[0].path).toBe(`/boards/${bid}`);
+    expect(Number(mineOps.by_user)).toBe(aliceId);
+
+    // DELETE CASCADES: cards go via FK, the doc row and log go explicitly.
+    mine.at("/boards").apply([{ op: "remove", path: `/${bid}` }]);
+    await until(() => Object.keys(mine.peek()!.boards).length === 0);
+    const cards = await sql`SELECT 1 FROM cards WHERE board_id = ${bid}`;
+    const docsLeft = await sql`SELECT 1 FROM docs WHERE name = ${"board:" + bid}`;
+    expect(cards.length).toBe(0);
+    expect(docsLeft.length).toBe(0);
+  });
+});

@@ -1,12 +1,19 @@
 // The pixels. list() routes membership ops; each row renders from its own
-// lens. Adds go to "/cards/-" — the SERVER mints the id (uuid in-memory,
-// Postgres sequence relational) and the echo renders it.
-import { connect, list, text, pushDisposeScope, popDisposeScope } from "./epsilon";
-import type { OpSignal } from "./epsilon";
+// lens. Adds go to "/-" — the SERVER mints ids (Postgres sequences here).
+// With auth on, you get YOUR boards (mine:<uid>): creating one is an op on
+// that doc; opening one is just another doc name.
+import { connect, list, text, effect, pushDisposeScope, popDisposeScope } from "./epsilon";
+import type { OpSignal, Dispose } from "./epsilon";
 import type { Board, Card } from "./types";
+
+interface BoardRef { id: number | string; name: string }
+interface Mine { boards: Record<string, BoardRef> }
 
 const authDialog = document.getElementById("auth") as HTMLDialogElement;
 const authError = document.getElementById("auth-error")!;
+const mineSection = document.getElementById("mine")!;
+const boardName = document.getElementById("board-name")!;
+const log = document.getElementById("log")!;
 
 const remote = connect(`ws://${location.host}/ws`, {
   onError(_doc, error) {
@@ -16,15 +23,87 @@ const remote = connect(`ws://${location.host}/ws`, {
   },
 });
 
-const board = remote.doc<Board>("board:1");
-const cards = board.at<Record<string, Card>>("/cards") as OpSignal<Record<string, Card> | null>;
+// --- the board on screen ---------------------------------------------------
 
-// Session restore: a stored token authenticates before the queued doc open
-// would otherwise 401. call() queues until the socket opens.
+let disposeBoard: Dispose | null = null;
+
+function openBoard(name: string): void {
+  disposeBoard?.();
+  log.replaceChildren();
+  location.hash = `#/${name}`;
+  const doc = remote.doc<Board>(name);
+  const cards = doc.at<Record<string, Card>>("/cards") as OpSignal<Record<string, Card> | null>;
+  pushDisposeScope();
+  effect(() => { boardName.textContent = doc.get()?.name ?? ""; });
+  log.appendChild(
+    list(cards, (card) => {
+      const li = document.createElement("li");
+      li.appendChild(text(card.map((c) => c?.text)));
+      return li;
+    }),
+  );
+  disposeBoard = popDisposeScope();
+
+  const form = document.getElementById("form") as HTMLFormElement;
+  const input = document.getElementById("input") as HTMLInputElement;
+  form.onsubmit = (e) => {
+    e.preventDefault();
+    if (!input.value.trim()) return;
+    // No local append — the echo (with the server-minted id) renders it.
+    cards.apply([{ op: "add", path: "/-", value: { text: input.value } }]);
+    input.value = "";
+  };
+}
+
+const hashBoard = () => /^#\/(board:\d+)$/.exec(location.hash)?.[1];
+
+// --- your boards (authenticated mode) --------------------------------------
+
+function showMine(userId: number | string): void {
+  const mine = remote.doc<Mine>(`mine:${userId}`);
+  const boards = mine.at<Record<string, BoardRef>>("/boards") as OpSignal<Record<string, BoardRef> | null>;
+  mineSection.hidden = false;
+
+  pushDisposeScope();
+  document.getElementById("boards")!.appendChild(
+    list(boards, (row, id) => {
+      const li = document.createElement("li");
+      const name = document.createElement("span");
+      name.appendChild(text(row.map((b) => b?.name)));
+      name.onclick = () => openBoard(`board:${id}`);
+      const del = document.createElement("button");
+      del.textContent = "✕";
+      del.onclick = () => boards.apply([{ op: "remove", path: `/${id}` }]);
+      li.append(name, " ", del);
+      return li;
+    }),
+  );
+  popDisposeScope(); // app-lifetime
+
+  const form = document.getElementById("board-form") as HTMLFormElement;
+  const input = document.getElementById("new-board") as HTMLInputElement;
+  form.onsubmit = (e) => {
+    e.preventDefault();
+    if (!input.value.trim()) return;
+    boards.apply([{ op: "add", path: "/-", value: { name: input.value } }]);
+    input.value = "";
+  };
+
+  openBoard(hashBoard() ?? "board:1");
+}
+
+// --- auth ------------------------------------------------------------------
+
+function afterAuth(user: { id: number | string }): void {
+  authDialog.close();
+  showMine(user.id);
+}
+
 const token = localStorage.getItem("epsilon-token");
 if (token) {
-  remote.call("authenticate", { token })
-    .then(() => remote.doc("board:1"))            // re-ask — now authorized
+  // call() queues until the socket opens — this beats the queued doc opens.
+  remote.call<{ id: number }>("authenticate", { token })
+    .then(afterAuth)
     .catch(() => localStorage.removeItem("epsilon-token"));
 }
 
@@ -35,10 +114,9 @@ async function auth(method: "login" | "register") {
     password: (document.getElementById("auth-password") as HTMLInputElement).value,
   };
   try {
-    const { token } = await remote.call<{ token: string }>(method, params);
+    const { token, user } = await remote.call<{ token: string; user: { id: number } }>(method, params);
     localStorage.setItem("epsilon-token", token);
-    authDialog.close();
-    remote.doc("board:1");                        // re-open now we're in
+    afterAuth(user);
   } catch (err) {
     authError.textContent = String(err instanceof Error ? err.message : err);
   }
@@ -46,24 +124,8 @@ async function auth(method: "login" | "register") {
 document.getElementById("auth-login")!.onclick = (e) => { e.preventDefault(); auth("login"); };
 document.getElementById("auth-register")!.onclick = (e) => { e.preventDefault(); auth("register"); };
 
-const log = document.getElementById("log")!;
-const form = document.getElementById("form") as HTMLFormElement;
-const input = document.getElementById("input") as HTMLInputElement;
+// --- boot ------------------------------------------------------------------
 
-pushDisposeScope();
-log.appendChild(
-  list(cards, (card) => {
-    const li = document.createElement("li");
-    li.appendChild(text(card.map((c) => c?.text)));
-    return li;
-  }),
-);
-popDisposeScope(); // app-lifetime scope — keep the disposer if you route
-
-form.onsubmit = (e) => {
-  e.preventDefault();
-  if (!input.value.trim()) return;
-  // No local append — the echo (with the server-minted id) renders it.
-  cards.apply([{ op: "add", path: "/-", value: { text: input.value } }]);
-  input.value = "";
-};
+// In-memory mode (no auth gate): the shared board just works. If the host
+// requires auth, this open triggers the dialog via onError instead.
+openBoard(hashBoard() ?? "board:1");

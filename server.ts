@@ -23,11 +23,40 @@ export async function startServer(opts: StartOpts = {}) {
   if (pgUrl) {
     const { SQL } = await import("bun");
     const { migrate, pgDoc, pgSync, pgAuth } = await import("./epsilon/pg");
-    sql = new SQL(pgUrl);
-    await migrate(sql, { dir: opts.dbDir ?? "db" });   // db/*.sql, in order, hash-recorded
-    await pgAuth(host, sql);                           // wire adapter over the SQL contract
-    await pgDoc<Board>(host, sql, "board:1", null as unknown as Board, { apply: "board_apply" });
-    await pgSync(host, sql, { url: pgUrl });           // cross-process fan-out
+    const db = new SQL(pgUrl);
+    sql = db;
+    await migrate(db, { dir: opts.dbDir ?? "db" });    // db/*.sql, in order, hash-recorded
+    await pgAuth(host, db);                            // wire adapter over the SQL contract
+
+    // Docs are DYNAMIC — names are data, hosted on first open.
+    // board:<id> — shared when owner_id is NULL (the seeded board:1),
+    // otherwise the owner's alone, decided by the tables.
+    host.docs("board:", async (name) => {
+      const id = Number(name.split(":")[1]);
+      if (!Number.isFinite(id)) throw new Error(`unknown doc: ${name}`);
+      const [b] = await db`SELECT owner_id FROM boards WHERE id = ${id}`;
+      if (!b) throw new Error(`unknown doc: ${name}`);
+      const owner = b.owner_id == null ? null : Number(b.owner_id);
+      await pgDoc<Board>(host, db, name, null as unknown as Board, {
+        apply: "board_apply",
+        openAs: owner,
+        guard: owner == null ? undefined : (u) => Number(u) === owner,
+      });
+    });
+
+    // mine:<uid> — YOUR board list; creating a board is an op on it.
+    host.docs("mine:", async (name) => {
+      const uid = Number(name.split(":")[1]);
+      if (!Number.isFinite(uid)) throw new Error(`unknown doc: ${name}`);
+      await pgDoc(host, db, name, null, {
+        apply: "mine_apply",
+        seed: { open_fn: "mine_open" },
+        openAs: uid,
+        guard: (u) => Number(u) === uid,
+      });
+    });
+
+    await pgSync(host, db, { url: pgUrl });            // cross-process fan-out
   } else {
     host.doc<Board>("board:1", { name: "main", cards: {} });
   }

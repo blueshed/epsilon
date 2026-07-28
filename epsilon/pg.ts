@@ -53,14 +53,27 @@ export async function pgDoc<T>(
   sql: SQL,
   name: string,
   empty: T,
-  opts?: { apply?: string },
+  opts?: {
+    apply?: string;
+    /** Create the docs row on first host (dynamic docs — mine:<uid>). */
+    seed?: { open_fn: string };
+    /** Identity the hosted composition runs AS (an owner/uid derived from the
+     *  name). The hosted signal holds THAT view; pair with `guard`. */
+    openAs?: number | null;
+    /** Who may receive the hosted snapshot over the wire. Refusals read as
+     *  "unknown doc" — no existence oracle. */
+    guard?: (userId?: number | string) => boolean;
+  },
 ): Promise<Signal<T>> {
   if (opts?.apply) {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(opts.apply)) {
       throw new Error(`[epsilon/pg] apply must be a plain function name: ${opts.apply}`);
     }
     const applyFn = opts.apply;
-    const sig = host.doc<T>(name, empty, {
+    const openAs = opts.openAs ?? null;
+    const guard = opts.guard;
+    let sig!: Signal<T>;
+    sig = host.doc<T>(name, empty, {
       async write(ops, userId) {
         // ops bind RAW — Bun encodes arrays/objects as jsonb; stringify+cast
         // double-encodes into a scalar (see the doc-native lesson above).
@@ -70,13 +83,20 @@ export async function pgDoc<T>(
         );
         const r = rows[0]!.r as { v: number | string; ops: Op[] };
         if (host.receive(name, Number(r.v), r.ops) === "gap") {
-          const [doc] = await sql`SELECT v, doc_open(name) AS data FROM docs WHERE name = ${name}`;
+          const [doc] = await sql`SELECT v, doc_open(name, ${openAs}) AS data FROM docs WHERE name = ${name}`;
           if (doc) host.hydrate(name, Number(doc.v), doc.data);
         }
       },
+      open: guard ? (userId) => (guard(userId) ? sig.peek() : null) : undefined,
     });
-    // Composition happens HERE, at open — never per write.
-    const [row] = await sql`SELECT v, doc_open(name) AS data FROM docs WHERE name = ${name}`;
+    if (opts.seed) {
+      await sql`INSERT INTO docs (name, v, data, open_fn) VALUES (${name}, 0, NULL, ${opts.seed.open_fn})
+                ON CONFLICT (name) DO NOTHING`;
+    }
+    // Composition happens HERE, at open — never per write. `openAs` lets an
+    // identity-scoped doc compose its owner's view into the hosted signal;
+    // `guard` keeps that view from anyone else.
+    const [row] = await sql`SELECT v, doc_open(name, ${openAs}) AS data FROM docs WHERE name = ${name}`;
     if (!row) throw new Error(`[epsilon/pg] relational doc ${name} not seeded — your SQL file should INSERT its docs row`);
     host.hydrate(name, Number(row.v), row.data);
     return sig;

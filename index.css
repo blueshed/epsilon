@@ -1,9 +1,36 @@
-body { font-family: system-ui; max-width: 40rem; margin: 2rem auto; }
+:root {
+  --bg: #ffffff;
+  --fg: #16181c;
+  --line: #dddddd;
+  --muted: #667;
+  --danger: #b00020;
+  --field: #ffffff;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #16181c;
+    --fg: #e8e8ea;
+    --line: #33363c;
+    --muted: #99a;
+    --danger: #ff7b72;
+    --field: #1e2126;
+  }
+}
+
+body { font-family: system-ui; max-width: 40rem; margin: 2rem auto; background: var(--bg); color: var(--fg); }
 ul { padding: 0; }
-li { list-style: none; padding: .4rem .6rem; border-bottom: 1px solid #ddd; }
-input { width: 100%; padding: .5rem; font-size: 1rem; box-sizing: border-box; }
-dialog { border: 1px solid #ccc; border-radius: .5rem; padding: 1.2rem; min-width: 20rem; }
-dialog::backdrop { background: rgb(0 0 0 / .3); }
+li { list-style: none; padding: .4rem .6rem; border-bottom: 1px solid var(--line); }
+input { width: 100%; padding: .5rem; font-size: 1rem; box-sizing: border-box; background: var(--field); color: var(--fg); border: 1px solid var(--line); border-radius: .3rem; }
+input::placeholder { color: var(--muted); }
+dialog { border: 1px solid var(--line); border-radius: .5rem; padding: 1.2rem; min-width: 20rem; background: var(--bg); color: var(--fg); }
+dialog::backdrop { background: rgb(0 0 0 / .45); }
 dialog input { margin: .25rem 0 .6rem; }
-dialog button { padding: .45rem .9rem; margin-right: .5rem; font-size: 1rem; }
-#auth-error { color: #b00; min-height: 1.2em; font-size: .9rem; }
+dialog button { padding: .45rem .9rem; margin-right: .5rem; font-size: 1rem; background: var(--field); color: var(--fg); border: 1px solid var(--line); border-radius: .3rem; cursor: pointer; }
+#auth-error { color: var(--danger); min-height: 1.2em; font-size: .9rem; }
+#mine { margin-bottom: 1rem; }
+#boards li { display: flex; justify-content: space-between; align-items: center; }
+#boards span { cursor: pointer; flex: 1; }
+#boards button { border: none; background: none; color: var(--danger); cursor: pointer; font-size: 1rem; }
+#board-name { margin: .5rem 0 .3rem; }

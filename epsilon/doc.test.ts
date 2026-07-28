@@ -123,3 +123,27 @@ describe("decision 1: the server mints ids", () => {
     expect(b.peek()!.cards[id]!.title).toBe("minted");   // same id everywhere
   });
 });
+
+describe("dynamic docs — names are data, hosted on first open", () => {
+  test("a prefix factory hosts room:<x> on demand; unknown prefixes still 404", async () => {
+    let built = 0;
+    host.docs("room:", (name) => {
+      built++;
+      host.doc(name, { cards: {} } satisfies Board);
+    });
+
+    const a = client().doc<Board>("room:alpha");
+    const b = client().doc<Board>("room:alpha");
+    await Promise.all([a.ready, b.ready]);
+    expect(built).toBe(1);                       // concurrent opens coalesce
+
+    a.apply([{ op: "add", path: "/cards/-", value: { title: "in a room", done: false } } as any]);
+    await until(() => Object.values(b.peek()!.cards).some((c: any) => c.title === "in a room"));
+
+    const errors: string[] = [];
+    const r = client((_d, e) => errors.push(e));
+    r.doc("nowhere:1");
+    await until(() => errors.length > 0);
+    expect(errors[0]).toContain("unknown doc");
+  });
+});

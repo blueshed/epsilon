@@ -120,12 +120,28 @@ failures as unhandled rejections — use explicit BEGIN/COMMIT on a reserved
 connection. `pg_advisory_lock` is session-scoped, so the whole migration run
 must hold ONE reserved connection.
 
+## The vision, closed (2026-07-28, late)
+
+- **Docs are dynamic.** `host.docs(prefix, factory)` — names are data,
+  hosted on first open, concurrent opens coalesce.
+- **Per-identity docs.** `mine:<uid>` composes as its owner (`openAs`) and
+  is guarded on the wire (`guard`): strangers get "unknown doc" — no
+  existence oracle. Enforced again inside the stored functions.
+- **Creating a doc is an op.** `add /boards/-` on your mine doc creates an
+  owned board AND its doc row in one transaction; the echo carries the
+  sequence id; the client opens `board:<id>` like any other name.
+- **Multi-doc transactional writes.** A board rename mirrors into the
+  owner's mine doc — two docs, one transaction, both versioned, logged,
+  and notified. Delivery is the ordinary fan-out (pgSync).
+- **Delete cascades.** Cards via FK; the doc row and its log explicitly.
+
 ## Open items
 
-- Generalize the relational pattern (multiple collections, scoped docs, RLS)
-  — `board.sql` is one worked doc type; delta's framework SQL is the map.
-- `--hot` note: top-level resources cache on `globalThis` (see server.ts) or
-  every reload leaks a pool and resets versions.
+- Doc GC: a deleted doc's hosted signal lingers until process restart.
+- Sharing: boards are owner-or-public; a members table is the next
+  migration when needed (the `board_may` seam is where it goes).
+- Client doc handles accumulate per visited board (no per-doc close yet —
+  delta grew one; epsilon will too).
 
 ## Non-goals
 

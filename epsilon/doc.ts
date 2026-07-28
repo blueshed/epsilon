@@ -61,6 +61,13 @@ export interface DocOpts {
    * `userId` is the authenticated writer (audit trail — doc_ops.by_user).
    */
   write?: (ops: Op[], userId?: number | string) => void | Promise<void>;
+  /**
+   * Identity gate for the OPEN snapshot: return the snapshot for this user,
+   * or null/undefined to refuse (the client sees "not found" and is NOT
+   * subscribed). Docs without it serve the hosted signal to any socket the
+   * host admits.
+   */
+  open?: (userId?: number | string) => unknown;
 }
 
 /**
@@ -93,6 +100,12 @@ export interface Host {
   names(): string[];
   /** Register an RPC method, callable from clients via remote.call(). */
   method(name: string, fn: (params: any, ws: any) => unknown | Promise<unknown>): void;
+  /**
+   * Dynamic docs: when a client opens an unregistered name matching prefix,
+   * the factory runs once (concurrent opens coalesce) and must register the
+   * doc via host.doc(). Doc names are data — "board:42", "mine:7".
+   */
+  docs(prefix: string, factory: (name: string) => unknown | Promise<unknown>): void;
   fetch(req: Request, server: any): Response | undefined;
   websocket: {
     message(ws: any, raw: string | Buffer): void | Promise<void>;
@@ -109,8 +122,11 @@ export function createHost(opts?: {
   requireAuth?: boolean;
 }): Host {
   const path = opts?.path ?? "/ws";
-  const docs = new Map<string, { sig: Signal<any>; v: number; persist?: DocOpts["persist"]; write?: DocOpts["write"] }>();
+  type Entry = { sig: Signal<any>; v: number; persist?: DocOpts["persist"]; write?: DocOpts["write"]; open?: DocOpts["open"] };
+  const docs = new Map<string, Entry>();
   const methods = new Map<string, (params: any, ws: any) => unknown | Promise<unknown>>();
+  const prefixes = new Map<string, (name: string) => unknown | Promise<unknown>>();
+  const pendingFactories = new Map<string, Promise<unknown>>();
   let server: any = null;
   let skipPersist = false;
 
@@ -118,6 +134,24 @@ export function createHost(opts?: {
     const entry = docs.get(name);
     if (!entry) throw new Error(`[epsilon/doc] unknown doc: ${name}`);
     return entry;
+  }
+
+  /** Registered entry, or run the matching prefix factory (coalesced). */
+  async function resolveEntry(name: string): Promise<Entry | undefined> {
+    const existing = docs.get(name);
+    if (existing) return existing;
+    for (const [prefix, factory] of prefixes) {
+      if (!name.startsWith(prefix)) continue;
+      let pending = pendingFactories.get(name);
+      if (!pending) {
+        pending = Promise.resolve(factory(name));
+        pendingFactories.set(name, pending);
+        pending.finally(() => pendingFactories.delete(name)).catch(() => {});
+      }
+      await pending;
+      return docs.get(name);
+    }
+    return undefined;
   }
 
   return {
@@ -128,7 +162,7 @@ export function createHost(opts?: {
       const existing = docs.get(name);
       if (existing) return existing.sig as Signal<T>;
       const sig = signal<T>(empty);
-      const entry = { sig, v: 0, persist: docOpts?.persist, write: docOpts?.write };
+      const entry: Entry = { sig, v: 0, persist: docOpts?.persist, write: docOpts?.write, open: docOpts?.open };
       docs.set(name, entry);
       // Broadcast is just the doc's own ops channel piped to subscribers —
       // whether the write came from a client, server code, or storage
@@ -173,6 +207,10 @@ export function createHost(opts?: {
       methods.set(name, fn);
     },
 
+    docs(prefix, factory) {
+      prefixes.set(prefix, factory);
+    },
+
     fetch(req: Request, srv: any) {
       const url = new URL(req.url);
       if (url.pathname === path && srv.upgrade(req)) return undefined;
@@ -207,17 +245,31 @@ export function createHost(opts?: {
           ws.send(JSON.stringify({ doc: msg.doc, error: "unauthenticated" } satisfies ServerMsg));
           return;
         }
-        const entry = docs.get(msg.doc);
+        let entry: Entry | undefined;
+        try {
+          entry = await resolveEntry(msg.doc);
+        } catch (err) {
+          ws.send(JSON.stringify({ doc: msg.doc, error: String(err) } satisfies ServerMsg));
+          return;
+        }
         if (!entry) {
           ws.send(JSON.stringify({ doc: msg.doc, error: `unknown doc: ${msg.doc}` } satisfies ServerMsg));
           return;
         }
         if (msg.action === "open") {
+          // Identity-gated docs choose their snapshot per user — a refusal
+          // reads exactly like a missing doc (no existence oracle) and does
+          // NOT subscribe the socket.
+          const snapshot = entry.open ? entry.open(ws.data?.user?.id) : entry.sig.peek();
+          if (entry.open && snapshot == null) {
+            ws.send(JSON.stringify({ doc: msg.doc, error: `unknown doc: ${msg.doc}` } satisfies ServerMsg));
+            return;
+          }
           ws.subscribe(msg.doc);
           // The snapshot IS an op — same vocabulary, same client code path.
           ws.send(JSON.stringify({
             doc: msg.doc, v: entry.v,
-            ops: [{ op: "replace", path: "", value: entry.sig.peek() }],
+            ops: [{ op: "replace", path: "", value: snapshot }],
           } satisfies ServerMsg));
         } else if (msg.action === "ops") {
           try {

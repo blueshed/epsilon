@@ -69,6 +69,32 @@ describe("the app, end to end", () => {
       (t) => t.includes("audited card"),
     );
 
+    // THE VISION, through the UI: create a board (an op on mine:<uid>),
+    // switch to it, write a card into it.
+    await view.click("#new-board");
+    await view.type("my project");
+    await view.press("Enter");
+    await waitFor(
+      () => view.evaluate<string>("document.querySelector('#boards').textContent"),
+      (t) => t.includes("my project"),
+    );
+    await view.click("#boards li span");
+    await waitFor(
+      () => view.evaluate<string>("document.querySelector('#board-name').textContent"),
+      (t) => t === "my project",
+    );
+    await view.click("#input");
+    await view.type("first step");
+    await view.press("Enter");
+    await waitFor(
+      () => view.evaluate<string>("document.querySelector('#log').textContent"),
+      (t) => t.includes("first step"),
+    );
+    const [myBoard] = await db`SELECT b.id, b.owner_id FROM boards b JOIN users u ON u.id = b.owner_id WHERE b.name = ${"my project"}`;
+    expect(myBoard).toBeDefined();                                 // owned, in the tables
+    const [myCard] = await db`SELECT text FROM cards WHERE board_id = ${myBoard.id}`;
+    expect(myCard.text).toBe("first step");
+
     const [row] = await db`SELECT id, text FROM cards WHERE text = ${"audited card"}`;
     expect(row).toBeDefined();                                    // the table is the truth
     const [audit] = await db`SELECT by_user, ops FROM doc_ops WHERE name = ${"board:1"} ORDER BY v DESC LIMIT 1`;
