@@ -175,12 +175,12 @@ export interface Sync {
 export async function pgSync(
   host: Host,
   sql: SQL,
-  opts?: { ms?: number; url?: string },
+  opts?: { ms?: number; url?: string; mode?: "listen" | "poll" },
 ): Promise<Sync> {
   const url = opts?.url ?? process.env.EPSILON_PG_URL;
 
   // --- listen mode (pg installed, url known) ------------------------------
-  if (url) {
+  if (url && opts?.mode !== "poll") {
     let ClientCtor: any;
     try {
       const pg: any = await import("pg");
@@ -242,12 +242,17 @@ export async function pgSync(
     if (stopped || inFlight) return;
     inFlight = true;
     try {
-      for (const name of host.names()) {
-        const [row] = await sql`SELECT v FROM docs WHERE name = ${name}`;
-        if (!row) continue;
+      const names = host.names();
+      if (names.length === 0) return;
+      // One sweep, not one query per doc. Bind as jsonb (Bun encodes JS
+      // arrays that way) and unnest server-side.
+      const rows = await sql`
+        SELECT name, v FROM docs
+        WHERE name IN (SELECT jsonb_array_elements_text(${names as any}))`;
+      for (const row of rows) {
         let current: number;
-        try { current = host.v(name); } catch { continue; }
-        if (Number(row.v) > current) await catchUp(host, sql, name);
+        try { current = host.v(row.name as string); } catch { continue; }
+        if (Number(row.v) > current) await catchUp(host, sql, row.name as string);
       }
     } catch (err) {
       console.error("[epsilon/pg] sync tick failed:", err);
@@ -275,7 +280,31 @@ function asUser(row: any): User {
   return { id: Number(row.id), name: row.name, email: row.email };
 }
 
-export async function pgAuth(host: Host, sql: SQL): Promise<void> {
+export async function pgAuth(
+  host: Host,
+  sql: SQL,
+  opts?: { maxAttempts?: number; windowMs?: number },
+): Promise<void> {
+  // bcrypt (cost 12) is deliberately expensive, which makes register/login a
+  // CPU faucet for anyone hammering them — a fixed window per client IP caps
+  // that. In-process on purpose: it protects THIS process's CPU; the SQL
+  // contract stays unthrottled. `authenticate` is exempt — it's one indexed
+  // SELECT, and every reconnect re-auths through it (onConnect).
+  const maxAttempts = opts?.maxAttempts ?? 10;
+  const windowMs = opts?.windowMs ?? 60_000;
+  const attempts = new Map<string, { n: number; resetAt: number }>();
+  function throttle(ws: any): void {
+    const key = String(ws?.remoteAddress ?? "?");
+    const now = Date.now();
+    const slot = attempts.get(key);
+    if (!slot || now >= slot.resetAt) {
+      if (attempts.size > 10_000) attempts.clear();   // bounded memory
+      attempts.set(key, { n: 1, resetAt: now + windowMs });
+      return;
+    }
+    if (++slot.n > maxAttempts) throw new Error("too many attempts — try again later");
+  }
+
   async function startSession(ws: any, user: User): Promise<{ token: string; user: User }> {
     const [row] = await sql`SELECT session_start(${user.id}) AS token`;
     ws.data ??= {};
@@ -284,6 +313,7 @@ export async function pgAuth(host: Host, sql: SQL): Promise<void> {
   }
 
   host.method("register", async (params: { name?: string; email?: string; password?: string }, ws) => {
+    throttle(ws);
     const { name, email, password } = params ?? {};
     if (!name || !email || !password) throw new Error("name, email, and password required");
     let rows;
@@ -299,6 +329,7 @@ export async function pgAuth(host: Host, sql: SQL): Promise<void> {
   });
 
   host.method("login", async (params: { email?: string; password?: string }, ws) => {
+    throttle(ws);
     const { email, password } = params ?? {};
     if (!email || !password) throw new Error("email and password required");
     // login() returns NULL for unknown email AND wrong password alike, with

@@ -7,6 +7,12 @@
  *   { op: "replace", path: "/field",    value: v }   — set at path
  *   { op: "add",     path: "/items/-",  value: v }   — set, or append with /-
  *   { op: "remove",  path: "/items/0" }              — delete by path
+ *
+ * NOT RFC 6902, despite the verb names: `add` SETS (an existing array index
+ * is overwritten, never shifted — only `/-` appends) and `replace` creates
+ * a missing record key. Ops assert state, they don't negotiate it — the
+ * authority's echo is the truth (LWW). Batches are atomic: a throw unwinds
+ * the applied prefix.
  */
 
 export type Op =

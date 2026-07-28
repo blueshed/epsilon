@@ -142,6 +142,8 @@ must hold ONE reserved connection.
   migration when needed (the `board_may` seam is where it goes).
 - Client doc handles accumulate per visited board (no per-doc close yet —
   delta grew one; epsilon will too).
+- Prune cadence: `epsilon_prune(keep)` (006) runs at boot only — long-lived
+  deployments should cron it.
 
 ## Non-goals
 

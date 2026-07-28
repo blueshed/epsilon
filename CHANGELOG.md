@@ -15,6 +15,20 @@ will ship.
   dropped socket recovers a logged-in session by itself instead of stranding
   it at the auth dialog.
 - This changelog.
+- `db/006-housekeeping.sql` — `epsilon_prune(keep interval)` bounds the two
+  unbounded tables: `doc_ops` older than `keep` (catch-up re-hydrates from
+  the snapshot on a gap, so only audit history is lost) and expired
+  sessions. The server calls it at boot; cron it in long-lived deployments.
+- `pgSync` accepts `mode: "poll"` to force the interval fallback.
+
+### Changed
+
+- The poll fallback sweeps every hosted doc in ONE query per tick instead
+  of one query per doc.
+- `op.ts` documents that the vocabulary is NOT RFC 6902: `add` sets (an
+  array index is overwritten, only `/-` appends), `replace` creates missing
+  keys, batches are atomic. `ui.ts`'s first-paint comment corrected: rows
+  created before the caller appends ride the fragment in — nothing drops.
 
 ### Fixed
 
@@ -41,6 +55,10 @@ will ship.
 
 ### Security
 
+- `register` / `login` are rate limited per client IP (fixed window,
+  10/min by default, `pgAuth(host, sql, { maxAttempts, windowMs })` to
+  tune) — bcrypt at cost 12 was a CPU faucet for anyone hammering them.
+  `authenticate` stays unthrottled: every reconnect re-auths through it.
 - Dynamic-doc factories receive the asking user —
   `host.docs(prefix, (name, userId) => ...)` — and the template's `mine:` /
   `board:` factories refuse strangers BEFORE hosting or seeding anything.

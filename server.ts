@@ -26,6 +26,7 @@ export async function startServer(opts: StartOpts = {}) {
     const db = new SQL(pgUrl);
     sql = db;
     await migrate(db, { dir: opts.dbDir ?? "db" });    // db/*.sql, in order, hash-recorded
+    await db`SELECT epsilon_prune()`;                  // bounded tables: old ops, dead sessions
     await pgAuth(host, db);                            // wire adapter over the SQL contract
 
     // Docs are DYNAMIC — names are data, hosted on first open.

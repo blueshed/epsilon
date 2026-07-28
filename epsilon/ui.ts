@@ -97,10 +97,12 @@ export function list<T>(
     for (const id of [...rows.keys()]) removeRow(id);
   });
 
-  // First paint synchronously if data is already present; a doc that opens
-  // later paints via its snapshot op (reconcile above). Rows created before
-  // the fragment is appended land after the anchor is in the document — so
-  // defer creation until the value exists AND the anchor has a parent.
+  // The anchor is parented by this fragment from birth, so addRow ALWAYS has
+  // a parent to insert into — rows created before the caller appends ride
+  // the fragment into the document; nothing can drop. First paint defers a
+  // microtask so a synchronous caller has appended by then and initial rows
+  // go straight into the live DOM; a doc that opens later paints via its
+  // snapshot op (reconcile above).
   const frag = document.createDocumentFragment();
   frag.appendChild(anchor);
   queueMicrotask(() => { if (!disposed && sig.peek() != null) reconcile(); });
