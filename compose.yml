@@ -1,0 +1,14 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: epsilon
+      POSTGRES_PASSWORD: epsilon
+      POSTGRES_DB: epsilon
+    ports:
+      - "5599:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U epsilon"]
+      interval: 1s
+      timeout: 3s
+      retries: 30

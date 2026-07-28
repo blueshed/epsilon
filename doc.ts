@@ -35,23 +35,43 @@ import type { Op } from "./op";
 
 type ClientMsg =
   | { action: "open"; doc: string }
-  | { action: "ops"; doc: string; ops: Op[] };
+  | { action: "ops"; doc: string; ops: Op[] }
+  | { action: "call"; id: number; method: string; params?: unknown };
 
 type ServerMsg =
   | { doc: string; v: number; ops: Op[] }
-  | { doc: string; error: string };
+  | { doc: string; error: string }
+  | { id: number; result?: unknown; error?: string };
 
 // ---------------------------------------------------------------------------
 // Server — createHost()
 // ---------------------------------------------------------------------------
 
+export interface DocOpts {
+  /** Durability hook — called after each local write with the new version,
+   *  the ops, and the post-apply state. NOT called for hydrate/receive
+   *  (those ops came FROM storage). */
+  persist?: (v: number, ops: Op[], data: unknown) => void;
+}
+
 export interface Host {
   /** Register (or fetch) a hosted doc. The returned Signal is the authority —
    *  server code applies ops to it directly and they broadcast. */
-  doc<T>(name: string, empty: T): Signal<T>;
+  doc<T>(name: string, empty: T, opts?: DocOpts): Signal<T>;
+  /** Load state from storage: broadcasts a snapshot at version v, skips persist. */
+  hydrate(name: string, v: number, data: unknown): void;
+  /** Inject ops another process persisted: broadcast + apply, skip persist.
+   *  Returns "gap" when v isn't contiguous — caller should reload + hydrate. */
+  receive(name: string, v: number, ops: Op[]): "ok" | "stale" | "gap";
+  /** Current version of a hosted doc. */
+  v(name: string): number;
+  /** Names of all hosted docs (storage sync iterates these). */
+  names(): string[];
+  /** Register an RPC method, callable from clients via remote.call(). */
+  method(name: string, fn: (params: any, ws: any) => unknown | Promise<unknown>): void;
   fetch(req: Request, server: any): Response | undefined;
   websocket: {
-    message(ws: any, raw: string | Buffer): void;
+    message(ws: any, raw: string | Buffer): void | Promise<void>;
     open(ws: any): void;
     close(ws: any): void;
   };
@@ -59,29 +79,74 @@ export interface Host {
   path: string;
 }
 
-export function createHost(opts?: { path?: string }): Host {
+export function createHost(opts?: {
+  path?: string;
+  /** When set, open/ops require ws.data.user (set by an auth method). */
+  requireAuth?: boolean;
+}): Host {
   const path = opts?.path ?? "/ws";
-  const docs = new Map<string, { sig: Signal<any>; v: number }>();
+  const docs = new Map<string, { sig: Signal<any>; v: number; persist?: DocOpts["persist"] }>();
+  const methods = new Map<string, (params: any, ws: any) => unknown | Promise<unknown>>();
   let server: any = null;
+  let skipPersist = false;
+
+  function entryOf(name: string) {
+    const entry = docs.get(name);
+    if (!entry) throw new Error(`[epsilon/doc] unknown doc: ${name}`);
+    return entry;
+  }
 
   return {
     path,
     setServer(s: any) { server = s; },
 
-    doc<T>(name: string, empty: T): Signal<T> {
+    doc<T>(name: string, empty: T, docOpts?: DocOpts): Signal<T> {
       const existing = docs.get(name);
       if (existing) return existing.sig as Signal<T>;
       const sig = signal<T>(empty);
-      const entry = { sig, v: 0 };
+      const entry = { sig, v: 0, persist: docOpts?.persist };
       docs.set(name, entry);
       // Broadcast is just the doc's own ops channel piped to subscribers —
-      // whether the write came from a client or from server code.
+      // whether the write came from a client, server code, or storage
+      // (hydrate/receive pre-set the version and mute persistence).
       sig.onOps((ops) => {
         if (!ops) return;
         entry.v++;
         server?.publish(name, JSON.stringify({ doc: name, v: entry.v, ops } satisfies ServerMsg));
+        if (!skipPersist) entry.persist?.(entry.v, ops, sig.peek());
       });
       return sig;
+    },
+
+    hydrate(name, v, data) {
+      const entry = entryOf(name);
+      entry.v = v - 1;              // the apply below bumps it back to v
+      skipPersist = true;
+      try { entry.sig.apply([{ op: "replace", path: "", value: data }]); }
+      finally { skipPersist = false; }
+    },
+
+    receive(name, v, ops) {
+      const entry = entryOf(name);
+      if (v <= entry.v) return "stale";
+      if (v > entry.v + 1) return "gap";
+      entry.v = v - 1;
+      skipPersist = true;
+      try { entry.sig.apply(ops); }
+      finally { skipPersist = false; }
+      return "ok";
+    },
+
+    v(name) {
+      return entryOf(name).v;
+    },
+
+    names() {
+      return [...docs.keys()];
+    },
+
+    method(name, fn) {
+      methods.set(name, fn);
     },
 
     fetch(req: Request, srv: any) {
@@ -93,9 +158,31 @@ export function createHost(opts?: { path?: string }): Host {
     websocket: {
       open(_ws: any) {},
       close(_ws: any) {},
-      message(ws: any, raw: string | Buffer) {
+      async message(ws: any, raw: string | Buffer) {
         let msg: ClientMsg;
         try { msg = JSON.parse(String(raw)); } catch { return; }
+
+        if (msg.action === "call") {
+          const fn = methods.get(msg.method);
+          if (!fn) {
+            ws.send(JSON.stringify({ id: msg.id, error: `unknown method: ${msg.method}` } satisfies ServerMsg));
+            return;
+          }
+          try {
+            const result = await fn(msg.params, ws);
+            ws.send(JSON.stringify({ id: msg.id, result } satisfies ServerMsg));
+          } catch (err) {
+            ws.send(JSON.stringify({ id: msg.id, error: String(err) } satisfies ServerMsg));
+          }
+          return;
+        }
+
+        // Doc traffic — gated when the host requires auth (an auth method
+        // sets ws.data.user; docs stay closed until it has).
+        if (opts?.requireAuth && ws.data?.user == null) {
+          ws.send(JSON.stringify({ doc: msg.doc, error: "unauthenticated" } satisfies ServerMsg));
+          return;
+        }
         const entry = docs.get(msg.doc);
         if (!entry) {
           ws.send(JSON.stringify({ doc: msg.doc, error: `unknown doc: ${msg.doc}` } satisfies ServerMsg));
@@ -159,6 +246,8 @@ class RemoteDoc<T> extends Signal<T | null> {
 
 export interface Remote {
   doc<T>(name: string): OpSignal<T | null> & { ready: Promise<void> };
+  /** Invoke a host method (auth, RPC). Rejects on error or transport drop. */
+  call<T = unknown>(method: string, params?: unknown): Promise<T>;
   close(): void;
 }
 
@@ -167,6 +256,9 @@ export function connect(
   opts?: { onError?: (doc: string, error: string) => void },
 ): Remote {
   const docs = new Map<string, RemoteDoc<any>>();
+  const pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
+  const queued: ClientMsg[] = [];   // calls made before the socket opened
+  let nextId = 1;
   let ws: WebSocket;
   let closed = false;
   let backoff = 100;
@@ -179,11 +271,22 @@ export function connect(
     ws = new WebSocket(url);
     ws.onopen = () => {
       backoff = 100;
-      // (Re)open every doc — the snapshot-as-op resets each baseline.
+      // Queued calls first (authenticate before opens, so requireAuth hosts
+      // serve the snapshots), then (re)open every doc — the snapshot-as-op
+      // resets each baseline.
+      for (const msg of queued.splice(0)) ws.send(JSON.stringify(msg));
       for (const name of docs.keys()) send({ action: "open", doc: name });
     };
     ws.onmessage = (ev) => {
       const msg = JSON.parse(String(ev.data)) as ServerMsg;
+      if ("id" in msg) {
+        const p = pending.get(msg.id);
+        if (!p) return;
+        pending.delete(msg.id);
+        if (msg.error != null) p.reject(new Error(msg.error));
+        else p.resolve(msg.result);
+        return;
+      }
       if ("error" in msg) {
         opts?.onError?.(msg.doc, msg.error);
         return;
@@ -193,6 +296,10 @@ export function connect(
       if (doc.receive(msg.v, msg.ops) === "gap") send({ action: "open", doc: msg.doc });
     };
     ws.onclose = () => {
+      // Fail fast rather than hang — a retried call after reconnect is the
+      // caller's decision (it may not be idempotent, e.g. register).
+      for (const [, p] of pending) p.reject(new Error("disconnected"));
+      pending.clear();
       if (closed) return;
       setTimeout(wire, (backoff = Math.min(backoff * 2, 10_000)));
     };
@@ -206,11 +313,27 @@ export function connect(
         doc = new RemoteDoc<T>((ops) => send({ action: "ops", doc: name, ops }));
         docs.set(name, doc);
         send({ action: "open", doc: name }); // no-op if not connected yet
+      } else if (doc.v === 0) {
+        // Asked again before any snapshot landed — the first open may have
+        // been refused (e.g. pre-auth on a requireAuth host). Ask again.
+        send({ action: "open", doc: name });
       }
       return doc;
     },
+    call<T>(method: string, params?: unknown): Promise<T> {
+      return new Promise<T>((resolve, reject) => {
+        if (closed) return reject(new Error("closed"));
+        const id = nextId++;
+        pending.set(id, { resolve, reject });
+        const msg: ClientMsg = { action: "call", id, method, params };
+        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
+        else queued.push(msg);   // sent on open; rejected if the dial fails (onclose drains pending)
+      });
+    },
     close() {
       closed = true;
+      for (const [, p] of pending) p.reject(new Error("closed"));
+      pending.clear();
       try { ws.close(); } catch { /* already closed */ }
     },
   };

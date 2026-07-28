@@ -17,6 +17,20 @@ delta proved the document lens (model ↔ doc, three verbs, three backends).
 railroad proved signals-to-DOM (real nodes, no vdom).
 They meet today at `doc.data` by convention. Epsilon makes them meet by design: **the delta IS the signal.**
 
+## Starting an app
+
+`template/` is a complete three-file app (in-memory by default; set
+`EPSILON_PG_URL` for durable Postgres). It is staged here until it moves to
+its own repo — `bun create` discovers GitHub templates by repository, so the
+end state is:
+
+```sh
+bun create blueshed/epsilon-app my-app
+```
+
+(The split is one `git init` away: the template folder IS the repo's
+contents. Until `@blueshed/epsilon` is published, `bun link` the library.)
+
 ## Status
 
 The primitive and the wire run — `bun test` (signal + real-WebSocket doc suites). Read [DESIGN.md](DESIGN.md); the tests are the contract.

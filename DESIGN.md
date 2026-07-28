@@ -40,12 +40,32 @@ Any line not paying one of these taxes is deletable.
 - **Location transparency**: a remote doc is a Signal whose `apply()` *sends*; the echo mutates. `set()`, `update()`, and every `at()` lens work over the wire unchanged, because they only ever call `apply()`.
 - No optimistic apply — the echo renders the write (delta's rule).
 - Contiguous `v` per doc: replay ignored, gap → re-open, reconnect → re-open all.
+- `call()` for RPC (queued until the socket opens); auth methods set the socket's user; `requireAuth` hosts refuse doc traffic until one has.
+- Postgres tier (pg.ts): TS applies ops, one guarded UPDATE persists, doc_ops is the log. Cross-process fan-out POLLS versions for now — Bun's SQL client has no LISTEN callbacks yet (verified, 1.3.14); the NOTIFY is already sent, so this swaps to LISTEN the day `sql.listen` ships.
 
 ## The pixels (v0 — ui.ts)
 
 - `list()` routes **membership only** (add/remove/root-reconcile). Field ops never reach it — each row renders from its own `at()` lens, so content updates flow lens → binding. No diffing anywhere; snapshots diff *key sets*, and surviving rows keep their nodes.
 - `text(sig)` is the state-channel binding — the always-correct fallback, one effect per node.
 - Known v0 looseness: lens `get()` tracks the root, so state effects over-fire on unrelated changes (correct, not minimal). The precise path is the ops channel; tightening the state cut is listed future work.
+
+## Storage tiers — where stored functions live (Peter, 2026-07-28)
+
+Two tiers, one boundary rule:
+
+- **Doc-native (v0, pg.ts):** the doc IS a JSONB blob. Nothing to compose, no
+  second table to touch — TS `applyOps` + one guarded UPDATE is the whole
+  write. No stored functions **at this tier** because there's no work for
+  them, not as a principle.
+- **Relational (next):** the doc is a lens over tables. There, stored
+  functions are OPTIMAL and epsilon uses them: composition
+  (`jsonb_object_agg` where the data lives, one round trip) and multi-table
+  writes (transactional cascades, RLS in the same statement). This is
+  delta's proven ground — borrow its patterns.
+
+The boundary: **SQL owns composition and multi-table transactions; TS owns
+the op vocabulary, transport, and UI.** A tier uses stored functions exactly
+when the model is relational.
 
 ## Non-goals
 
