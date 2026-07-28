@@ -19,4 +19,4 @@ They meet today at `doc.data` by convention. Epsilon makes them meet by design: 
 
 ## Status
 
-Design. Nothing here runs yet. Read [DESIGN.md](DESIGN.md).
+The primitive and the wire run — `bun test` (signal + real-WebSocket doc suites). Read [DESIGN.md](DESIGN.md); the tests are the contract.

@@ -34,6 +34,13 @@ board.apply(ops);   // mutate in place + notify, passing the ops along
 
 Any line not paying one of these taxes is deletable.
 
+## The wire (v0 — doc.ts)
+
+- **The snapshot IS an op** — open replies with a versioned root-replace. One vocabulary; no second message shape.
+- **Location transparency**: a remote doc is a Signal whose `apply()` *sends*; the echo mutates. `set()`, `update()`, and every `at()` lens work over the wire unchanged, because they only ever call `apply()`.
+- No optimistic apply — the echo renders the write (delta's rule).
+- Contiguous `v` per doc: replay ignored, gap → re-open, reconnect → re-open all.
+
 ## Non-goals
 
 No vdom. No OT/CRDT (model is authoritative; LWW + resync). No offline. No arbitrary live queries — read views without a lawful `put` are read-only, as in delta.

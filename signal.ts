@@ -154,8 +154,9 @@ export class Signal<T> implements OpSignal<T> {
 
   set(newValue: T): void {
     if (this.equalsFn(this.value, newValue)) return;
-    this.value = newValue;
-    this.notify([{ op: "replace", path: "", value: newValue }]);
+    // Route through apply() — the ONE write path. Subclasses that redirect
+    // apply() (a remote doc sending ops over the wire) get set() for free.
+    this.apply([{ op: "replace", path: "", value: newValue }]);
   }
 
   update(fn: (current: T) => T): void {
