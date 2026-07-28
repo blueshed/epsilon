@@ -1,0 +1,21 @@
+{
+  "name": "@blueshed/epsilon",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "One op stream, Postgres to pixel — the delta IS the signal. Design-phase merge of @blueshed/delta and @blueshed/railroad.",
+  "exports": {
+    ".": "./index.ts",
+    "./op": "./op.ts",
+    "./signal": "./signal.ts"
+  },
+  "scripts": {
+    "check": "bunx tsc --noEmit",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.14",
+    "typescript": "^5.9.3"
+  },
+  "license": "MIT"
+}
