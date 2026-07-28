@@ -41,6 +41,12 @@ Any line not paying one of these taxes is deletable.
 - No optimistic apply — the echo renders the write (delta's rule).
 - Contiguous `v` per doc: replay ignored, gap → re-open, reconnect → re-open all.
 
+## The pixels (v0 — ui.ts)
+
+- `list()` routes **membership only** (add/remove/root-reconcile). Field ops never reach it — each row renders from its own `at()` lens, so content updates flow lens → binding. No diffing anywhere; snapshots diff *key sets*, and surviving rows keep their nodes.
+- `text(sig)` is the state-channel binding — the always-correct fallback, one effect per node.
+- Known v0 looseness: lens `get()` tracks the root, so state effects over-fire on unrelated changes (correct, not minimal). The precise path is the ops channel; tightening the state cut is listed future work.
+
 ## Non-goals
 
 No vdom. No OT/CRDT (model is authoritative; LWW + resync). No offline. No arbitrary live queries — read views without a lawful `put` are read-only, as in delta.

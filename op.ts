@@ -34,6 +34,11 @@ export function splitPath(path: string): string[] {
   return tokens;
 }
 
+/** Escape one reference token for embedding in a pointer (~ first, then /). */
+export function escapeToken(token: string): string {
+  return token.replace(/~/g, "~0").replace(/\//g, "~1");
+}
+
 function parsePath(path: string): (string | number)[] {
   return splitPath(path).map((t) => (/^\d+$/.test(t) ? Number(t) : t));
 }
