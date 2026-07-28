@@ -41,7 +41,7 @@ Any line not paying one of these taxes is deletable.
 - No optimistic apply — the echo renders the write (delta's rule).
 - Contiguous `v` per doc: replay ignored, gap → re-open, reconnect → re-open all.
 - `call()` for RPC (queued until the socket opens); auth methods set the socket's user; `requireAuth` hosts refuse doc traffic until one has.
-- Postgres tier (pg.ts): TS applies ops, one guarded UPDATE persists, doc_ops is the log. Cross-process fan-out POLLS versions for now — Bun's SQL client has no LISTEN callbacks yet (verified, 1.3.14); the NOTIFY is already sent, so this swaps to LISTEN the day `sql.listen` ships.
+- Postgres tier (pg.ts): TS applies ops, one guarded UPDATE persists, doc_ops is the log. Cross-process fan-out is real push — LISTEN/NOTIFY via the optional `pg` peer (a dedicated connection with reconnect + catch-up), because Bun's SQL client has no LISTEN callbacks yet (verified, 1.3.14). Decision (Peter, 2026-07-28): carry `pg` for this one job and RETIRE it the day `sql.listen` ships — the seam and tests don't change. Without `pg` installed, `pgSync` degrades to polling.
 
 ## The pixels (v0 — ui.ts)
 

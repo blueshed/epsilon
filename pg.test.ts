@@ -112,7 +112,12 @@ describe("cross-process fan-out (LISTEN/NOTIFY)", () => {
     const sqlB = freshSql();
     const boardA = await pgDoc<Board>(a, sqlA, "board:x", structuredClone(empty));
     const boardB = await pgDoc<Board>(b, sqlB, "board:x", structuredClone(empty));
-    stops.push(pgSync(a, sqlA, { ms: 50 }), pgSync(b, sqlB, { ms: 50 }));
+    const syncA = await pgSync(a, sqlA, { url: PG_URL });
+    const syncB = await pgSync(b, sqlB, { url: PG_URL });
+    stops.push(syncA.stop, syncB.stop);
+    // pg is installed in this repo, so fan-out must be real push, not polling.
+    expect(syncA.mode).toBe("listen");
+    expect(syncB.mode).toBe("listen");
     const urlB = serve(b);
     const browserB = client(urlB).doc<Board>("board:x");
     await browserB.ready;

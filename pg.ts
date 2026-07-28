@@ -84,42 +84,114 @@ export async function pgDoc<T>(
 }
 
 
+/** Bring one hosted doc up to the database's version. Idempotent — receive()
+ *  drops stale versions, so overlapping calls can't double-apply. */
+async function catchUp(host: Host, sql: SQL, name: string): Promise<void> {
+  let current: number;
+  try { current = host.v(name); } catch { return; }        // not hosted here
+  const missed = await sql`
+    SELECT v, ops FROM doc_ops WHERE name = ${name} AND v > ${current} ORDER BY v`;
+  for (const m of missed) {
+    if (host.receive(name, Number(m.v), m.ops as Op[]) === "gap") {
+      const [doc] = await sql`SELECT v, data FROM docs WHERE name = ${name}`;
+      if (doc) host.hydrate(name, Number(doc.v), doc.data);
+      return;
+    }
+  }
+}
+
+export interface Sync {
+  /** "listen" — pg LISTEN/NOTIFY push. "poll" — interval fallback. */
+  mode: "listen" | "poll";
+  stop(): void;
+}
+
 /**
- * Cross-process fan-out. Bun's SQL client has no LISTEN callbacks yet
- * (verified against 1.3.14), so v0 polls the versions of hosted docs — one
- * cheap indexed query per interval — and fetches only what was missed from
- * doc_ops, injecting via host.receive(). Gap → reload + hydrate. The NOTIFY
- * is already sent on every persist, so this function swaps to LISTEN the day
- * `sql.listen` ships; the seam and the tests stay identical.
+ * Cross-process fan-out. Prefers real push: when the optional `pg` package
+ * is installed, a dedicated connection LISTENs on the channel every persist
+ * already NOTIFYs, with reconnect + full catch-up. Without `pg`, falls back
+ * to polling hosted docs' versions.
  *
- * Returns a stop function.
+ * The pg dependency exists ONLY because Bun's SQL client has no LISTEN
+ * callbacks yet (verified, 1.3.14). The day `sql.listen` ships, the listen
+ * branch moves to Bun and `pg` retires — the seam and tests don't change.
  */
-export function pgSync(host: Host, sql: SQL, opts?: { ms?: number }): () => void {
+export async function pgSync(
+  host: Host,
+  sql: SQL,
+  opts?: { ms?: number; url?: string },
+): Promise<Sync> {
+  const url = opts?.url ?? process.env.EPSILON_PG_URL;
+
+  // --- listen mode (pg installed, url known) ------------------------------
+  if (url) {
+    let ClientCtor: any;
+    try {
+      const pg: any = await import("pg");
+      ClientCtor = pg.Client ?? pg.default?.Client;
+    } catch { /* pg not installed — fall through to polling */ }
+
+    if (ClientCtor) {
+      let client: any = null;
+      let stopped = false;
+      let backoff = 200;
+
+      async function start(): Promise<void> {
+        if (stopped) return;
+        try {
+          client = new ClientCtor({ connectionString: url });
+          client.on("error", () => { if (!stopped) retry(); });
+          await client.connect();
+          await client.query(`LISTEN ${CHANNEL}`);
+          client.on("notification", (msg: { payload?: string }) => {
+            if (stopped || !msg.payload) return;
+            try {
+              const { name } = JSON.parse(msg.payload) as { name: string };
+              void catchUp(host, sql, name).catch((err) =>
+                console.error("[epsilon/pg] catch-up failed:", err));
+            } catch { /* malformed payload — ignore */ }
+          });
+          backoff = 200;
+          // Anything committed while we were (re)connecting was NOTIFYd to
+          // nobody — catch every hosted doc up now.
+          for (const name of host.names()) await catchUp(host, sql, name);
+        } catch (err) {
+          console.error("[epsilon/pg] listen connect failed:", err);
+          retry();
+        }
+      }
+
+      function retry(): void {
+        try { client?.end(); } catch { /* closing */ }
+        client = null;
+        if (stopped) return;
+        setTimeout(() => void start(), (backoff = Math.min(backoff * 2, 10_000)));
+      }
+
+      await start();
+      return {
+        mode: "listen",
+        stop() {
+          stopped = true;
+          try { client?.end(); } catch { /* closing */ }
+        },
+      };
+    }
+  }
+
+  // --- poll fallback ------------------------------------------------------
   let stopped = false;
   let inFlight = false;
-
   async function tick(): Promise<void> {
     if (stopped || inFlight) return;
     inFlight = true;
     try {
-      // One query per hosted doc — simple beats clever at polling cadence.
-      // (Bun's SQL array binding can't express ANY($1::text[]) yet.)
       for (const name of host.names()) {
         const [row] = await sql`SELECT v FROM docs WHERE name = ${name}`;
         if (!row) continue;
-        const dbV = Number(row.v);
         let current: number;
         try { current = host.v(name); } catch { continue; }
-        if (dbV <= current) continue;                       // our own writes / no news
-        const missed = await sql`
-          SELECT v, ops FROM doc_ops WHERE name = ${name} AND v > ${current} ORDER BY v`;
-        for (const m of missed) {
-          if (host.receive(name, Number(m.v), m.ops as Op[]) === "gap") {
-            const [doc] = await sql`SELECT v, data FROM docs WHERE name = ${name}`;
-            if (doc) host.hydrate(name, Number(doc.v), doc.data);
-            break;
-          }
-        }
+        if (Number(row.v) > current) await catchUp(host, sql, name);
       }
     } catch (err) {
       console.error("[epsilon/pg] sync tick failed:", err);
@@ -127,9 +199,11 @@ export function pgSync(host: Host, sql: SQL, opts?: { ms?: number }): () => void
       inFlight = false;
     }
   }
-
   const timer = setInterval(tick, opts?.ms ?? 250);
-  return () => { stopped = true; clearInterval(timer); };
+  return {
+    mode: "poll",
+    stop() { stopped = true; clearInterval(timer); },
+  };
 }
 
 // ---------------------------------------------------------------------------

@@ -13,7 +13,8 @@ if (process.env.EPSILON_PG_URL) {
   const sql = new SQL(process.env.EPSILON_PG_URL);
   await ensureSchema(sql);
   await pgDoc<Board>(host, sql, "board", empty);
-  pgSync(host, sql);
+  // Push fan-out when `pg` is installed (bun add pg); polling otherwise.
+  await pgSync(host, sql, { url: process.env.EPSILON_PG_URL });
 } else {
   host.doc<Board>("board", empty);
 }
