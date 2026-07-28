@@ -5,7 +5,19 @@ import { SQL } from "bun";
 import { createHost, connect, type Host, type Remote } from "./doc";
 import { ensureSchema, pgDoc, pgSync, pgAuth } from "./pg";
 
-const PG_URL = process.env.EPSILON_PG_URL ?? "postgres://epsilon:epsilon@localhost:5599/epsilon";
+// Tests own a SEPARATE database (created on demand) — the suite TRUNCATEs,
+// and it must never share the app's DB. Point EPSILON_TEST_PG_URL elsewhere
+// to override; it deliberately does NOT read EPSILON_PG_URL.
+const ADMIN_URL = "postgres://epsilon:epsilon@localhost:5599/epsilon";
+const PG_URL = process.env.EPSILON_TEST_PG_URL ?? "postgres://epsilon:epsilon@localhost:5599/epsilon_test";
+
+async function ensureTestDb(): Promise<void> {
+  if (process.env.EPSILON_TEST_PG_URL) return;   // caller owns that DB
+  const admin = new SQL(ADMIN_URL);
+  const [exists] = await admin`SELECT 1 FROM pg_database WHERE datname = 'epsilon_test'`;
+  if (!exists) await admin.unsafe("CREATE DATABASE epsilon_test");
+  await admin.end();
+}
 
 interface Board { cards: Record<string, { id: number; title: string }> }
 const empty: Board = { cards: {} };
@@ -55,6 +67,7 @@ const untilDbV = (name: string, v: number) =>
   });
 
 beforeAll(async () => {
+  await ensureTestDb();
   sql = freshSql();
   await ensureSchema(sql);
   await ensureSchema(sql); // idempotent
