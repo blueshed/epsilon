@@ -75,10 +75,16 @@ stored function with the identity the socket authenticated.
   writers); `board_open(name)` composes the doc at open only. Glue:
   `pgDoc(host, sql, "board:1", null, { apply: "board_apply" })`. Auth comes
   on with it: `createHost({ requireAuth: true })` + `pgAuth(host, sql)`.
-- To add a doc type: write its tables + `<x>_open` + `<x>_apply` in SQL
-  (copy 003-board.sql's shape), seed its `docs` row with `open_fn`, one `pgDoc`
-  line. Composition and multi-table writes belong IN the stored function —
-  that's what SQL is optimal at.
+- To add a doc type, use the DOC KIT (`db/007-doc-kit.sql`): a table,
+  `<x>_open` (ONE composition query), and `<x>_apply` =
+  `doc_begin(p_doc, <permit>)` → your dispatch loop (`doc_path(v_op)` to
+  match, DML, `v_out := v_out || op_add/op_replace/op_remove(...)`) →
+  `RETURN doc_commit(p_doc, v_out, p_user)`. The kit owns locks, refusals
+  (no existence oracle), versioning, audit, NOTIFY; `doc_drop` deletes a
+  doc whole, `doc_commit` on ANOTHER doc is the multi-doc mirror. Copy
+  `008-board-on-kit.sql` (worked example) or rel.test.ts's `todo` type
+  (minimal). Then seed the `docs` row with `open_fn` and add one `pgDoc`
+  line behind a gated factory.
 - Dynamic docs: `host.docs(prefix, (name, userId) => ...)` — the factory sees
   the asking user; throw `unknown doc` BEFORE hosting/seeding so probes cost
   nothing (see server.ts's `mine:` factory).

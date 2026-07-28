@@ -88,6 +88,28 @@ Two laws that fell out of Peter's review of the first cut:
   limit is unreachable); listeners fetch ops from `doc_ops`, which is the
   event log AND the audit trail (`by_user`, `at`).
 
+## The doc kit (007) — SQL reuse where it's core
+
+The first relational doc types were hand-rolled skeletons: every `_apply`
+re-wrote the same lock prologue, path splitting, echo building, and
+bump-log-notify tail. The kit extracts THAT — nine small functions — and
+leaves the dispatch loop yours:
+
+- `doc_begin(doc, permit)` — lock + exist + permit; absence and refusal
+  raise indistinguishably (`unknown doc` / `not found`). NULL permit reads
+  as refused, so `board_may(...)` passes raw.
+- `doc_commit(doc, ops, user)` — bump v, log, doorbell; returns `{v, ops}`
+  or NULL when the doc row doesn't exist — which makes it the multi-doc
+  MIRROR primitive too (a mirror into a never-seeded doc no-ops).
+- `doc_lock` (tolerant, for mirror pre-locks — canonical order per 005),
+  `doc_drop` (registry row + log die together), `doc_id`, `doc_path`, and
+  `op_add`/`op_replace`/`op_remove` — the wire's three verbs, in SQL.
+
+A doc type is now ~30 lines of app SQL: one composition query + one
+dispatch function. 008 is board/mine rebuilt on it (behavior-identical,
+paths now match exactly); rel.test.ts's `todo` type is the minimal worked
+example, driven over the real wire.
+
 ## Db-first, properly (Peter's challenge, 2026-07-28 night)
 
 The first cut wasn't db-first enough. Three gaps, closed:

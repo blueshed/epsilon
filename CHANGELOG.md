@@ -9,6 +9,19 @@ will ship.
 
 ### Added
 
+- **The doc kit** (`db/007-doc-kit.sql`) — the reusable skeleton of a
+  relational doc type, so a new type is ~30 lines of app SQL: one
+  composition query plus one dispatch function. `doc_begin` (lock + exist +
+  permit, no existence oracle), `doc_commit` (bump v, log, doorbell — and
+  the multi-doc mirror primitive: NULL no-op on never-seeded docs),
+  `doc_lock`, `doc_drop`, `doc_id`, `doc_path`, and
+  `op_add`/`op_replace`/`op_remove` — the wire's three verbs in SQL.
+- `db/008-board-on-kit.sql` — `board_apply`/`mine_apply` rewritten on the
+  kit, behavior-identical (005's lock order included) at half the length.
+  One tightening: paths match exactly (`/name/x` no longer renames).
+- rel.test.ts's `todo` type — a complete new doc type built on the kit and
+  driven over the real wire; the minimal recipe an app copies.
+
 - `connect(url, { onConnect })` — a hook awaited on every socket open (first
   connect and each reconnect), after queued calls flush and before docs
   (re)open. The template re-authenticates there with the stored token, so a

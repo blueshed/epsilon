@@ -209,6 +209,97 @@ describe("ownership — users mean something", () => {
   });
 });
 
+// A NEW doc type on the doc kit (007): one table, one composition query,
+// one dispatch function. This is the recipe a real app copies.
+const TODO_SQL = `
+CREATE TABLE IF NOT EXISTS todos (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  owner_id bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  text text NOT NULL,
+  done boolean NOT NULL DEFAULT false
+);
+
+CREATE OR REPLACE FUNCTION todo_open(p_doc text, p_user bigint DEFAULT NULL) RETURNS jsonb AS $$
+  SELECT CASE WHEN p_user IS NULL OR p_user <> doc_id(p_doc) THEN NULL ELSE
+    jsonb_build_object('todos', COALESCE(
+      (SELECT jsonb_object_agg(t.id::text,
+         jsonb_build_object('id', t.id, 'text', t.text, 'done', t.done))
+         FROM todos t WHERE t.owner_id = doc_id(p_doc)),
+      '{}'::jsonb))
+  END;
+$$ LANGUAGE sql STABLE;
+
+CREATE OR REPLACE FUNCTION todo_apply(p_doc text, p_ops jsonb, p_user bigint DEFAULT NULL) RETURNS jsonb AS $$
+DECLARE
+  v_uid bigint := doc_id(p_doc);
+  v_op jsonb; v_p text[]; v_id bigint; v_out jsonb := '[]'::jsonb;
+BEGIN
+  PERFORM doc_begin(p_doc, p_user = v_uid);
+  FOR v_op IN SELECT jsonb_array_elements(p_ops) LOOP
+    v_p := doc_path(v_op);
+    IF v_p = ARRAY['todos', '-'] AND v_op->>'op' = 'add' THEN
+      INSERT INTO todos (owner_id, text) VALUES (v_uid, v_op->'value'->>'text') RETURNING id INTO v_id;
+      v_out := v_out || op_add('/todos/' || v_id,
+        jsonb_build_object('id', v_id, 'text', v_op->'value'->>'text', 'done', false));
+    ELSIF array_length(v_p, 1) = 3 AND v_p[1] = 'todos' AND v_p[3] = 'done' AND v_op->>'op' = 'replace' THEN
+      UPDATE todos SET done = (v_op->>'value')::boolean WHERE id = v_p[2]::bigint AND owner_id = v_uid;
+      IF NOT FOUND THEN RAISE EXCEPTION 'row not found: %', v_op->>'path'; END IF;
+      v_out := v_out || op_replace(v_op->>'path', v_op->'value');
+    ELSIF array_length(v_p, 1) = 2 AND v_p[1] = 'todos' AND v_op->>'op' = 'remove' THEN
+      DELETE FROM todos WHERE id = v_p[2]::bigint AND owner_id = v_uid;
+      IF FOUND THEN v_out := v_out || op_remove(v_op->>'path'); END IF;
+    ELSE
+      RAISE EXCEPTION 'unsupported op: % %', v_op->>'op', v_op->>'path';
+    END IF;
+  END LOOP;
+  RETURN doc_commit(p_doc, v_out, p_user);
+END;
+$$ LANGUAGE plpgsql;
+`;
+
+describe("the doc kit — a new doc type is dispatch + composition only", () => {
+  test("todo: full wire round trip on kit-built SQL", async () => {
+    await sql.unsafe(TODO_SQL);
+    const host = createHost({ requireAuth: true });
+    await pgAuth(host, sql);
+    host.docs("todo:", async (name, userId) => {
+      const uid = Number(name.split(":")[1]);
+      if (!Number.isFinite(uid) || Number(userId) !== uid) throw new Error(`unknown doc: ${name}`);
+      await pgDoc(host, sql, name, null, {
+        apply: "todo_apply", seed: { open_fn: "todo_open" },
+        openAs: uid, guard: (u) => Number(u) === uid,
+      });
+    });
+    const url = serve(host);
+
+    const r = client(url);
+    const me = await r.call<{ user: { id: number } }>("register", {
+      name: "Kit", email: "kit@kit.test", password: "pw",
+    });
+    const uid = me.user.id;
+    type Todos = { todos: Record<string, { id: number; text: string; done: boolean }> };
+    const doc = r.doc<Todos>(`todo:${uid}`);
+    await doc.ready;
+    expect(doc.peek()!.todos).toEqual({});
+
+    doc.at("/todos").apply([{ op: "add", path: "/-", value: { text: "ship the kit" } }]);
+    await until(() => Object.keys(doc.peek()!.todos).length === 1);
+    const id = Object.keys(doc.peek()!.todos)[0]!;
+    expect(doc.peek()!.todos[id]!.done).toBe(false);   // sequence id, echoed row
+
+    doc.at<boolean>(`/todos/${id}/done`).set(true);
+    await until(() => doc.peek()!.todos[id]!.done === true);
+    const [row] = await sql`SELECT done FROM todos WHERE id = ${id}`;
+    expect(row.done).toBe(true);                       // the table is the truth
+
+    doc.at("/todos").apply([{ op: "remove", path: `/${id}` }]);
+    await until(() => Object.keys(doc.peek()!.todos).length === 0);
+
+    const [audit] = await sql`SELECT by_user FROM doc_ops WHERE name = ${"todo:" + uid} AND v = 1`;
+    expect(Number(audit.by_user)).toBe(uid);           // doc_commit wrote the audit row
+  });
+});
+
 describe("lock order — a rename's mirror and a board delete cannot deadlock", () => {
   test("concurrent board_apply(rename) vs mine_apply(remove) of the same board", async () => {
     // 004 locked board→mine on rename while mine_apply's delete locks
