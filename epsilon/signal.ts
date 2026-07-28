@@ -26,7 +26,7 @@
  * propagation). applyOps/valueAt from @blueshed/delta core.ts via ./op.
  */
 
-import { applyOps, valueAt, splitPath, type Op } from "./op";
+import { applyOp, valueAt, splitPath, type Op } from "./op";
 
 type Listener = (() => void) & { level?: number };
 type OpsHandler = (ops: Op[] | undefined) => void;
@@ -167,17 +167,30 @@ export class Signal<T> implements OpSignal<T> {
    * Apply ops: mutate the value IN PLACE (deep paths; the ref stays stable),
    * or reassign it (root path ""), then notify both channels with the ops.
    * No equality gate — an op is an assertion of change.
+   *
+   * ATOMIC: a throw mid-batch unwinds the applied prefix and notifies
+   * NOTHING — the value never diverges from what subscribers saw. This
+   * matches the relational tier, where the stored function's transaction
+   * rolls the whole batch back.
    */
   apply(ops: Op[]): void {
-    for (const op of ops) {
-      if (splitPath(op.path).length === 0) {
-        // Root op — the signal owns its value, so reassignment is correct
-        // here (delta's in-place root semantics existed for shared doc refs).
-        if (op.op === "remove") this.value = undefined as T;
-        else this.value = (op as { value: unknown }).value as T;
-      } else {
-        applyOps(this.value, [op]);
+    const undos: (() => void)[] = [];
+    try {
+      for (const op of ops) {
+        if (splitPath(op.path).length === 0) {
+          // Root op — the signal owns its value, so reassignment is correct
+          // here (delta's in-place root semantics existed for shared doc refs).
+          const prev = this.value;
+          undos.push(() => { this.value = prev; });
+          if (op.op === "remove") this.value = undefined as T;
+          else this.value = (op as { value: unknown }).value as T;
+        } else {
+          undos.push(applyOp(this.value, op));
+        }
       }
+    } catch (err) {
+      for (let i = undos.length - 1; i >= 0; i--) undos[i]!();
+      throw err;
     }
     this.notify(ops);
   }

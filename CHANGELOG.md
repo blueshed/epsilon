@@ -28,6 +28,16 @@ will ship.
   after the connect hook and the re-opens, so a `requireAuth` host accepts
   them — instead of being silently dropped. A deliberate `close()` abandons
   the queue.
+- `Signal.apply` (and `applyOps`) are ATOMIC: a bad op mid-batch unwinds
+  the applied prefix and notifies nothing, so a hosted signal can never
+  silently diverge from what its subscribers saw. Matches the relational
+  tier, where the stored function's transaction rolls the batch back.
+- `db/005-lock-order.sql` — a rename now locks the owner's `mine:` doc
+  BEFORE its own docs row, matching `mine_apply`'s order and closing an
+  AB-BA deadlock between a rename's mirror and a concurrent board delete.
+- Persistence muting during `hydrate`/`receive` is per-doc: a synchronous
+  cascade that writes ANOTHER doc during the apply persists that doc
+  normally instead of being silently skipped.
 
 ### Security
 

@@ -126,13 +126,15 @@ export function createHost(opts?: {
   requireAuth?: boolean;
 }): Host {
   const path = opts?.path ?? "/ws";
-  type Entry = { sig: Signal<any>; v: number; persist?: DocOpts["persist"]; write?: DocOpts["write"]; open?: DocOpts["open"] };
+  // muted: this entry's ops came FROM storage (hydrate/receive), so its
+  // persist must not re-run. PER ENTRY — a synchronous cascade that writes a
+  // DIFFERENT doc during the apply still persists that doc normally.
+  type Entry = { sig: Signal<any>; v: number; muted: boolean; persist?: DocOpts["persist"]; write?: DocOpts["write"]; open?: DocOpts["open"] };
   const docs = new Map<string, Entry>();
   const methods = new Map<string, (params: any, ws: any) => unknown | Promise<unknown>>();
   const prefixes = new Map<string, (name: string, userId?: number | string) => unknown | Promise<unknown>>();
   const pendingFactories = new Map<string, Promise<unknown>>();
   let server: any = null;
-  let skipPersist = false;
 
   function entryOf(name: string) {
     const entry = docs.get(name);
@@ -166,16 +168,16 @@ export function createHost(opts?: {
       const existing = docs.get(name);
       if (existing) return existing.sig as Signal<T>;
       const sig = signal<T>(empty);
-      const entry: Entry = { sig, v: 0, persist: docOpts?.persist, write: docOpts?.write, open: docOpts?.open };
+      const entry: Entry = { sig, v: 0, muted: false, persist: docOpts?.persist, write: docOpts?.write, open: docOpts?.open };
       docs.set(name, entry);
       // Broadcast is just the doc's own ops channel piped to subscribers —
       // whether the write came from a client, server code, or storage
-      // (hydrate/receive pre-set the version and mute persistence).
+      // (hydrate/receive pre-set the version and mute THIS doc's persist).
       sig.onOps((ops) => {
         if (!ops) return;
         entry.v++;
         server?.publish(name, JSON.stringify({ doc: name, v: entry.v, ops } satisfies ServerMsg));
-        if (!skipPersist) entry.persist?.(entry.v, ops, sig.peek());
+        if (!entry.muted) entry.persist?.(entry.v, ops, sig.peek());
       });
       return sig;
     },
@@ -183,9 +185,9 @@ export function createHost(opts?: {
     hydrate(name, v, data) {
       const entry = entryOf(name);
       entry.v = v - 1;              // the apply below bumps it back to v
-      skipPersist = true;
+      entry.muted = true;
       try { entry.sig.apply([{ op: "replace", path: "", value: data }]); }
-      finally { skipPersist = false; }
+      finally { entry.muted = false; }
     },
 
     receive(name, v, ops) {
@@ -193,9 +195,9 @@ export function createHost(opts?: {
       if (v <= entry.v) return "stale";
       if (v > entry.v + 1) return "gap";
       entry.v = v - 1;
-      skipPersist = true;
+      entry.muted = true;
       try { entry.sig.apply(ops); }
-      finally { skipPersist = false; }
+      finally { entry.muted = false; }
       return "ok";
     },
 

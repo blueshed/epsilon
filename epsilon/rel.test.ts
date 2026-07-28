@@ -209,6 +209,41 @@ describe("ownership — users mean something", () => {
   });
 });
 
+describe("lock order — a rename's mirror and a board delete cannot deadlock", () => {
+  test("concurrent board_apply(rename) vs mine_apply(remove) of the same board", async () => {
+    // 004 locked board→mine on rename while mine_apply's delete locks
+    // mine→board — AB-BA. 005 makes the rename take mine FIRST. The delete
+    // may still win the race (rename sees "not found") — that's LWW; what
+    // must never happen is a deadlock abort.
+    const [u] = await sql`SELECT register('Racer', 'racer@lock.test', 'pw') AS u`;
+    const uid = Number((u.u as { id: number }).id);
+    await sql`INSERT INTO docs (name, v, data, open_fn) VALUES (${"mine:" + uid}, 0, NULL, 'mine_open')
+              ON CONFLICT (name) DO NOTHING`;
+    const a = freshSql();
+    const b = freshSql();   // two pools — genuinely concurrent transactions
+
+    for (let i = 0; i < 8; i++) {
+      const mk = await sql.unsafe(
+        `SELECT mine_apply($1, $2, $3) AS r`,
+        ["mine:" + uid, [{ op: "add", path: "/boards/-", value: { name: `race ${i}` } }] as unknown, uid],
+      );
+      const bid = Number((mk[0]!.r as { ops: { value: { id: number } }[] }).ops[0]!.value.id);
+
+      const results = await Promise.allSettled([
+        a.unsafe(`SELECT board_apply($1, $2, $3)`,
+          ["board:" + bid, [{ op: "replace", path: "/name", value: `renamed ${i}` }] as unknown, uid]),
+        b.unsafe(`SELECT mine_apply($1, $2, $3)`,
+          ["mine:" + uid, [{ op: "remove", path: `/boards/${bid}` }] as unknown, uid]),
+      ]);
+      for (const res of results) {
+        if (res.status === "rejected") {
+          expect(String(res.reason)).not.toMatch(/deadlock/i);
+        }
+      }
+    }
+  });
+});
+
 describe("the vision: per-user docs, creation as an op, multi-doc writes", () => {
   test("mine:<uid> is yours alone — the WIRE refuses strangers like a missing doc", async () => {
     const host = createHost({ requireAuth: true });

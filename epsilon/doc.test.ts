@@ -238,6 +238,22 @@ describe("dynamic docs — the factory sees the asking identity", () => {
   });
 });
 
+describe("persistence muting is per-doc", () => {
+  test("a cascade writing doc B during doc A's receive still persists B", () => {
+    const h = createHost();
+    const persisted: string[] = [];
+    const a = h.doc<{ n: number }>("a", { n: 0 }, { persist: () => { persisted.push("a"); } });
+    h.doc<{ n: number }>("b", { n: 0 }, { persist: () => { persisted.push("b"); } });
+    const b = h.doc<{ n: number }>("b", { n: 0 });   // same entry back
+    // A server-side cascade: whenever A changes, derive into B.
+    a.onOps((ops) => { if (ops) b.apply([{ op: "replace", path: "/n", value: 1 }]); });
+
+    // A's ops came FROM storage — A must not re-persist; B's write is new.
+    expect(h.receive("a", 1, [{ op: "replace", path: "/n", value: 1 }])).toBe("ok");
+    expect(persisted).toEqual(["b"]);
+  });
+});
+
 describe("dynamic docs — names are data, hosted on first open", () => {
   test("a prefix factory hosts room:<x> on demand; unknown prefixes still 404", async () => {
     let built = 0;
