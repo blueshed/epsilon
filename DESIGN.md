@@ -67,6 +67,16 @@ The boundary: **SQL owns composition and multi-table transactions; TS owns
 the op vocabulary, transport, and UI.** A tier uses stored functions exactly
 when the model is relational.
 
+## Open items
+
+1. **Id minting at the doc-native tier contradicts decision 1** — the client
+   recipe mints uuids; the server should assign (e.g. `add /coll/-` returns
+   the id in the echo, like Postgres sequences will at the relational tier).
+2. Relational tier: docs as lenses over tables, stored functions for
+   composition + multi-table writes.
+3. Template UI for auth (register/login) once `requireAuth` is the default
+   story.
+
 ## Non-goals
 
 No vdom. No OT/CRDT (model is authoritative; LWW + resync). No offline. No arbitrary live queries — read views without a lawful `put` are read-only, as in delta.

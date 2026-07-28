@@ -18,8 +18,8 @@ schema-native users. Merges the ideas of `../delta` and `../railroad`.
 - **Small language**: three verbs (`add`/`replace`/`remove`), JSON-Pointer paths. Never invent verbs.
 - The law: ops are the fast path; recompute-from-state must always be correct on its own.
 - Budget every line against the four taxes in DESIGN.md (identity, time, lifetime, medium). If it pays none, delete it.
-- Peter is dyslexic: keep docs and reports SHORT. Insight, acknowledgement, next steps.
-- Checkpoint with Peter at design decisions — propose 2–3 options with a recommendation.
+- For realtime work in the app, follow `.claude/skills/epsilon/SKILL.md` — it ships with every scaffold.
+- Keep docs and reports SHORT.
 
 ## Commands
 
