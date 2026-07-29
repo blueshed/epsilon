@@ -67,6 +67,8 @@ EPSILON_PG_URL=postgres://epsilon:epsilon@localhost:5599/epsilon bun dev
 
 [delta](https://github.com/blueshed/delta) proved the document lens; [railroad](https://github.com/blueshed/railroad) proved signals-to-DOM. Epsilon merges them and hands you the source: the delta IS the signal, and the stack IS the app.
 
+Built in conversation with [Claude Code](https://claude.com/claude-code) — the runtime, its tests, and these docs; 0.3.0 itself was driven by a field report Claude wrote after building a real app on the stack in one sitting.
+
 ## License
 
-MIT
+MIT © 2026 [blueshed.co.uk](https://blueshed.co.uk) — [LICENSE](LICENSE) ships with every scaffold, as MIT asks.

@@ -7,6 +7,15 @@ will ship.
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-07-29
+
+### Added
+
+- `LICENSE` (MIT, © 2026 blueshed.co.uk) — the repo declared MIT but
+  carried no notice, and MIT requires it in every copy; scaffolds are
+  copies, so it ships with them. README's Lineage now credits the third
+  collaborator: built in conversation with Claude Code.
+
 ## [0.3.0] — 2026-07-29
 
 Driven by a field report: a real app (a shared journey planner for eight
