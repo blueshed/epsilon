@@ -1,6 +1,6 @@
 {
   "name": "epsilon",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "type": "module",
   "description": "One op stream, Postgres to pixel — bun create blueshed/epsilon my-app. The runtime lives in your app: epsilon/, ~1.7k lines, tests included.",

@@ -7,6 +7,8 @@ will ship.
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-07-29
+
 ### Added
 
 - **Doc lifetime is paid, not leaked.** `remote.doc(name)` handles are
