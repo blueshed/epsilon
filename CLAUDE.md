@@ -9,7 +9,7 @@ schema-native users. Merges the ideas of `../delta` and `../railroad`.
 
 - `server.ts`, `index.html`, `src/` — the app (the part users make theirs).
 - `epsilon/` — the runtime + its tests. Tests are the contract; DESIGN.md is the why.
-- `db/` — numbered migrations: 001–002 core (doc registry, auth), 006 housekeeping, 007 the doc kit, the rest the app's doc types. See DESIGN.md "Storage tiers" and "The doc kit".
+- `db/` — numbered migrations: 001–002 core (doc registry, auth), 003 the doc kit, 004 housekeeping, 005 the app's doc types (board/mine/sharing). See DESIGN.md "Storage tiers" and "The doc kit".
 
 ## Rules
 

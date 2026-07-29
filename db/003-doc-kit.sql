@@ -1,11 +1,11 @@
--- 007 — the doc kit: the reusable skeleton of a relational doc type. A new
+-- 003 — the doc kit: the reusable skeleton of a relational doc type. A new
 -- type writes ONLY its dispatch (the DML per op shape) and its composition;
 -- the kit encodes the rules once:
 --
 --   lock discipline      doc_lock / doc_begin — FOR UPDATE serializes
---                        writers per doc; canonical order (005): a
---                        transaction touching a user's mine doc AND board
---                        docs locks mine FIRST.
+--                        writers per doc; canonical order (see 005): ALL
+--                        mine docs ascending uid, THEN board docs
+--                        ascending id, pre-scanned and locked up front.
 --   no existence oracle  doc_begin raises 'unknown doc' for absence and
 --                        'not found' for refusal — strangers can't tell
 --                        which. Pass the permit expression raw; NULL reads
@@ -18,8 +18,8 @@
 --
 -- A doc type is then: <t>_open (ONE composition query) and
 -- <t>_apply = doc_begin → dispatch loop → RETURN doc_commit.
--- 008 is board/mine rewritten on the kit; rel.test.ts's `todo` type is the
--- minimal worked example.
+-- 005-board.sql is board/mine built on it; rel.test.ts's `todo` type is
+-- the minimal worked example.
 
 -- <type>:<id> — the naming convention, in one place.
 CREATE OR REPLACE FUNCTION doc_id(p_doc text) RETURNS bigint AS $$

@@ -26,6 +26,7 @@
     "typescript": "^5.9.3"
   },
   "bun-create": {
+    "postinstall": "rm -rf .github",
     "start": "bun run dev"
   },
   "license": "MIT"

@@ -63,10 +63,10 @@ function — no runtime change.
 `board_may(board, user)` gates BOTH `board_open` (NULL for outsiders) and
 `board_apply` (RAISE "not found" — never confirm a doc exists). Follow that
 shape for every doc type: one predicate, both directions, checked inside the
-stored function with the identity the socket authenticated. Since 009 the
+stored function with the identity the socket authenticated. Since 0.2.1 the
 predicate admits MEMBERS too: share by email with `add /members/-` on the
 board (owner only); the member's own list mirrors it in the same
-transaction. Multi-doc mirrors must follow 009's lock order: all mine docs
+transaction. Multi-doc mirrors must follow 005-board.sql's lock order: all mine docs
 ascending uid, then board docs ascending id, pre-scanned and locked up
 front — mirror only into docs you pre-locked.
 
@@ -74,8 +74,8 @@ front — mirror only into docs you pre-locked.
 
 - **In-memory** (default): `host.doc(name, empty)` — host mints uuids, open
   access, state dies with the process.
-- **Relational** (set `EPSILON_PG_URL`): `db/008-board-on-kit.sql` is the
-  pattern (built on the 007 doc kit) — YOUR
+- **Relational** (set `EPSILON_PG_URL`): `db/005-board.sql` is the
+  pattern (built on the 003 doc kit) — YOUR
   tables are the truth; `board_apply(name, ops, user)` applies + mints from
   sequences + logs + notifies in ONE transaction (`FOR UPDATE` serializes
   writers); `board_open(name)` composes the doc at open only. Glue:
@@ -87,14 +87,14 @@ front — mirror only into docs you pre-locked.
   (mount a volume); pgSync is skipped — no sibling processes exist.
   Deploying with it? `bun add @electric-sql/pglite`. Outgrowing it?
   pg_dump, set `EPSILON_PG_URL` — a config change, same schema.
-- To add a doc type, use the DOC KIT (`db/007-doc-kit.sql`): a table,
+- To add a doc type, use the DOC KIT (`db/003-doc-kit.sql`): a table,
   `<x>_open` (ONE composition query), and `<x>_apply` =
   `doc_begin(p_doc, <permit>)` → your dispatch loop (`doc_path(v_op)` to
   match, DML, `v_out := v_out || op_add/op_replace/op_remove(...)`) →
   `RETURN doc_commit(p_doc, v_out, p_user)`. The kit owns locks, refusals
   (no existence oracle), versioning, audit, NOTIFY; `doc_drop` deletes a
   doc whole, `doc_commit` on ANOTHER doc is the multi-doc mirror. Copy
-  `008-board-on-kit.sql` (worked example) or rel.test.ts's `todo` type
+  `db/005-board.sql` (worked example) or rel.test.ts's `todo` type
   (minimal). Then seed the `docs` row with `open_fn` and add one `pgDoc`
   line behind a gated factory.
 - Dynamic docs: `host.docs(prefix, (name, userId) => ...)` — the factory sees

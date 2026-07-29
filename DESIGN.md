@@ -100,7 +100,7 @@ Two laws that fell out of Peter's review of the first cut:
   limit is unreachable); listeners fetch ops from `doc_ops`, which is the
   event log AND the audit trail (`by_user`, `at`).
 
-## The doc kit (007) — SQL reuse where it's core
+## The doc kit (db/003-doc-kit.sql) — SQL reuse where it's core
 
 The first relational doc types were hand-rolled skeletons: every `_apply`
 re-wrote the same lock prologue, path splitting, echo building, and
@@ -118,7 +118,7 @@ leaves the dispatch loop yours:
   `op_add`/`op_replace`/`op_remove` — the wire's three verbs, in SQL.
 
 A doc type is now ~30 lines of app SQL: one composition query + one
-dispatch function. 008 is board/mine rebuilt on it (behavior-identical,
+dispatch function. db/005-board.sql is board/mine built on it (behavior-identical,
 paths now match exactly); rel.test.ts's `todo` type is the minimal worked
 example, driven over the real wire.
 
@@ -169,7 +169,7 @@ must hold ONE reserved connection.
   and notified. Delivery is the ordinary fan-out (pgSync).
 - **Delete cascades.** Cards via FK; the doc row and its log explicitly.
 
-## Sharing (009) — members, mirrored
+## Sharing (db/005-board.sql) — members, mirrored
 
 - `board_members` + `board_may`: public, owner, or member — one predicate,
   both directions, asked again on every open (guards may be async: the
@@ -222,3 +222,9 @@ No vdom. No OT/CRDT (model is authoritative; LWW + resync). No offline. No arbit
 1. **Server mints ids — every tier.** Clients send `/coll/-`; the assigned id comes back in the echo op. Uniform with Postgres sequences; no client uuids. Consequence: identity is *always* conferred by the store — the Active Record law holds on every rung.
 2. **`at()` composes.** `board.at("/cards").at("/5")` ≡ `board.at("/cards/5")`. Path rebasing must be associative — one test pins it.
 3. **Users are schema-native.** The `users` table ships in the core schema; auth (register/login/JWT) works out of the box on day one. Delta's auth-jwt is the borrowed implementation, but it's no longer opt-in.
+4. **Migrations are day-zero truth, not a development diary** (Peter,
+   2026-07-29). Pre-1.0 the `db/` files were squashed to the final state —
+   001 core, 002 auth, 003 the kit, 004 housekeeping, 005 the app's doc
+   types. The narrative lives in git and this file. Databases that applied
+   the old files upgrade cleanly (new names, idempotent statements); once
+   real deployments exist, the files freeze and forward-only rules.

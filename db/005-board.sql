@@ -1,28 +1,40 @@
--- 009 — sharing: a board is owner-or-public no more — MEMBERS. One new
--- table, board_may grown to include it, and the doc functions rebuilt on
--- the kit so membership flows everywhere it must:
+-- 005 — the app's doc types: board:<id> and mine:<uid>, with sharing.
+-- THE worked example a new doc type copies: tables are the truth, one
+-- composition function per type (open-time only), one dispatch function
+-- per type on the doc kit (003). Squashed to the final state pre-1.0 —
+-- the development story lives in git and DESIGN.md, not here.
 --
---   board_open   composes /members {uid: {id, name, email}}
---   mine_open    lists boards you own AND boards shared with you
---   board_apply  add /members/- {email} (owner only, minted by email),
---                remove /members/<uid> (owner, or yourself — leaving),
---                each mirrored into that member's mine doc
---   mine_apply   remove /boards/<id> now means DELETE when you own it
---                (mirrored out of every member's mine) and LEAVE when you
---                don't (mirrored into the board's /members)
---
--- Cards also grow `done` (the third verb-shape in the demo): a boolean the
--- UI toggles with one replace op.
---
--- CANONICAL LOCK ORDER, generalized from 005: every transaction locks ALL
--- the mine docs it will touch in ASCENDING uid order, THEN board docs in
--- ascending id order. Both functions pre-scan the batch and take the locks
--- up front; dispatch then only commits into docs already locked. Mirror
--- targets are re-read under the board lock and INTERSECTED with the
--- pre-locked set, so a membership change that races the pre-scan can only
--- SKIP a mirror, never lock out of order. A skipped mirror leaves a stale
--- name (or a ghost entry) in one mine list until that doc re-opens —
--- recompute-from-state heals it; the tables are always right.
+--   ownership     board_may: public (owner_id NULL), owner, or member —
+--                 one predicate, enforced in _open (NULL) and _apply
+--                 (RAISE 'not found' — no existence oracle).
+--   sharing       add /members/- {email} (owner only, minted by email);
+--                 remove /members/<uid> (owner, or yourself — leaving).
+--                 On your own list, remove /boards/<id> DELETES what you
+--                 own and LEAVES what you don't.
+--   mirrors       member changes, renames, and deletes doc_commit into
+--                 every mine doc that shows the board — same transaction.
+--   LOCK ORDER    every transaction locks ALL the mine docs it will touch
+--                 in ASCENDING uid order, THEN board docs in ascending id
+--                 order. Both apply functions pre-scan the batch and take
+--                 the locks up front; mirrors only ever target pre-locked
+--                 docs, so a racing membership change can only SKIP a
+--                 mirror (recompute heals it), never lock out of order.
+
+CREATE TABLE IF NOT EXISTS boards (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  name text NOT NULL,
+  owner_id bigint REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS cards (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  board_id bigint NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+  text text NOT NULL,
+  done boolean NOT NULL DEFAULT false,
+  created_by bigint REFERENCES users(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_cards_board ON cards(board_id);
 
 CREATE TABLE IF NOT EXISTS board_members (
   board_id bigint NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
@@ -31,9 +43,15 @@ CREATE TABLE IF NOT EXISTS board_members (
 );
 CREATE INDEX IF NOT EXISTS idx_board_members_user ON board_members(user_id);
 
+-- Upgrade path for databases that predate the squash (ledger carries the
+-- old file names; every statement here is idempotent).
 ALTER TABLE cards ADD COLUMN IF NOT EXISTS done boolean NOT NULL DEFAULT false;
 
--- One rule, both directions, now three doors: public, owner, member.
+CREATE OR REPLACE FUNCTION mine_uid(p_doc text) RETURNS bigint AS $$
+  SELECT split_part(p_doc, ':', 2)::bigint;
+$$ LANGUAGE sql IMMUTABLE;
+
+-- One rule, both directions, three doors: public, owner, member.
 CREATE OR REPLACE FUNCTION board_may(p_bid bigint, p_user bigint) RETURNS boolean AS $$
   SELECT b.owner_id IS NULL OR b.owner_id = p_user
       OR EXISTS (SELECT 1 FROM board_members m
@@ -289,3 +307,11 @@ BEGIN
   RETURN doc_commit(p_doc, v_out, p_user);
 END;
 $$ LANGUAGE plpgsql;
+
+-- Seed the shared demo board (owner_id NULL) and its doc row. Idempotent —
+-- re-running must be a no-op.
+INSERT INTO boards (id, name) OVERRIDING SYSTEM VALUE VALUES (1, 'main')
+  ON CONFLICT (id) DO NOTHING;
+SELECT setval(pg_get_serial_sequence('boards', 'id'), GREATEST((SELECT max(id) FROM boards), 1));
+INSERT INTO docs (name, v, data, open_fn) VALUES ('board:1', 0, NULL, 'board_open')
+  ON CONFLICT (name) DO NOTHING;

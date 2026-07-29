@@ -7,6 +7,29 @@ will ship.
 
 ## [Unreleased]
 
+### Changed
+
+- **Migrations squashed to day-zero truth** (pre-1.0, no deployed
+  databases): `db/` is now 001 core, 002 auth, 003 the doc kit, 004
+  housekeeping, 005 the app's doc types (board/mine/sharing, final form) —
+  five files instead of nine, no superseded function versions replayed.
+  The development narrative lives in git and DESIGN.md. Databases that
+  applied the old files upgrade cleanly: the renamed files re-apply
+  idempotently; orphaned ledger rows are ignored by the runner.
+
+### Added
+
+- Deploy-ready: `server.ts` honors `PORT` (PaaS routers assign it);
+  `railway.json` carries the deploy story (start command, healthcheck) —
+  add a volume, set `EPSILON_PG_DIR=/data`, `bun add @electric-sql/pglite`
+  in the deploying app. Found by scaffolding a real app and simulating
+  the deploy: production install, `PORT` boot, CLI drive, restart-with-
+  volume durability — all verified.
+- Scaffolds no longer inherit the template's CI workflow: a
+  `bun-create.postinstall` removes `.github` from new apps (runs via
+  Bun's shell, where `rm` is a cross-platform builtin). The repo's
+  workflow guards the TEMPLATE's contract; an app opts into its own CI.
+
 ## [0.2.2] — 2026-07-29
 
 ### Added

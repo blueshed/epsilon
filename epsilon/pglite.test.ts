@@ -48,7 +48,7 @@ afterAll(async () => {
 describe("embedded Postgres — same schema, no server", () => {
   test("every migration applies; the demo board composes", async () => {
     const [m] = await sql`SELECT count(*)::int AS n FROM migrations`;
-    expect(Number(m.n)).toBeGreaterThanOrEqual(9);
+    expect(Number(m.n)).toBeGreaterThanOrEqual(5);
     const [b] = await sql`SELECT doc_open(${"board:1"}) AS d`;
     expect(b.d.name).toBe("main");
     expect(b.d.cards).toEqual({});
@@ -93,7 +93,7 @@ describe("embedded Postgres — same schema, no server", () => {
     expect(who.u.email).toBe("pete@pglite.test");
   });
 
-  test("sharing mirrors across docs in one transaction — the 009 machinery, in process", async () => {
+  test("sharing mirrors across docs in one transaction — the sharing machinery, in process", async () => {
     // Users straight into the table (bcrypt already proven above).
     const [o] = await sql`INSERT INTO users (email, name, password_hash) VALUES ('own@pg.lite', 'Own', 'x') RETURNING id`;
     const [f] = await sql`INSERT INTO users (email, name, password_hash) VALUES ('fri@pg.lite', 'Fri', 'x') RETURNING id`;

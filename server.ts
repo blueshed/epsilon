@@ -113,7 +113,7 @@ export async function startServer(opts: StartOpts = {}) {
   }
 
   const server = Bun.serve({
-    port: opts.port ?? 3000,
+    port: opts.port ?? Number(process.env.PORT ?? 3000),   // PaaS routers assign PORT
     routes: { "/": index },
     fetch: host.fetch,   // /ws upgrade; 404 for anything else
     websocket: host.websocket,
