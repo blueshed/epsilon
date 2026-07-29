@@ -7,7 +7,7 @@
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "noEmit": true,
-    "types": ["bun"]
+    "types": ["bun", "emscripten"]
   },
   "include": ["*.ts", "epsilon/**/*.ts"]
 }

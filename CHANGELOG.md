@@ -7,6 +7,33 @@ will ship.
 
 ## [Unreleased]
 
+## [0.2.2] — 2026-07-29
+
+### Added
+
+- **Embedded Postgres** (`epsilon/pglite.ts`) — the relational tier with NO
+  database process. `EPSILON_PG_DIR=./data` runs the same schema on
+  in-process Postgres (PGlite, WASM) behind a new structural `Sql` seam
+  that Bun's SQL also satisfies: every migration, the doc kit, sharing,
+  and the pgcrypto auth contract run UNCHANGED (bcrypt ~350ms in WASM —
+  on par with native; WASM boot ~7s, once). One deployable service, state
+  on a volume; single app process by design, so pgSync is skipped — no
+  sibling processes exist to hear from. Outgrow it: pg_dump, set
+  `EPSILON_PG_URL` — scaling up is a config change. `bun run test:pglite`
+  proves migrations, the wire, auth, the 009 mirrors, and reopen-the-
+  directory durability, no server anywhere; CI runs it. Optional
+  dependency like `pg`: `bun add @electric-sql/pglite` when deploying
+  with it.
+
+### Fixed
+
+- CI: the app tests hung at the default 5s test timeout — ubuntu-24.04
+  runners restrict unprivileged user namespaces (AppArmor), which kills
+  Chrome's sandbox at launch and stalls `Bun.WebView`. The workflow now
+  wraps Chrome with `--no-sandbox` (the container recipe from CLAUDE.md,
+  applied to CI), and `test:app` runs with a 30s per-test timeout — cold
+  Chrome plus the full auth flow doesn't fit in 5s on a slow runner.
+
 ## [0.2.1] — 2026-07-29
 
 ### Added

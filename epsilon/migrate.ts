@@ -13,7 +13,7 @@
  */
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
-import type { SQL } from "bun";
+import type { Sql } from "./pg";
 
 /** Namespace for the boot-time advisory lock (arbitrary, stable). */
 const LOCK_KEY = 8_147_231;
@@ -24,7 +24,7 @@ export interface Migration {
   applied: boolean;
 }
 
-async function ensureTable(sql: SQL): Promise<void> {
+async function ensureTable(sql: Sql): Promise<void> {
   await sql.unsafe(`
     CREATE TABLE IF NOT EXISTS migrations (
       name text PRIMARY KEY,
@@ -48,7 +48,7 @@ export function migrationFiles(dir: string): string[] {
  * Throws on drift: an applied file whose content changed.
  */
 export async function migrate(
-  sql: SQL,
+  sql: Sql,
   opts?: { dir?: string; log?: (msg: string) => void },
 ): Promise<Migration[]> {
   const dir = opts?.dir ?? "db";
@@ -112,7 +112,7 @@ export async function migrate(
 }
 
 /** What's applied vs pending — for a status command or a boot log. */
-export async function migrationStatus(sql: SQL, opts?: { dir?: string }): Promise<Migration[]> {
+export async function migrationStatus(sql: Sql, opts?: { dir?: string }): Promise<Migration[]> {
   await ensureTable(sql);
   const done = new Set<string>();
   for (const row of await sql`SELECT name FROM migrations`) done.add(row.name as string);
