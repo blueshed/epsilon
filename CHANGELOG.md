@@ -47,6 +47,19 @@ will ship.
   (`remove /cards/<id>`); the board title renames in place — blur or Enter
   sends one `replace /name` and the mirror renames it in every mine list
   live. The app test drives all three through a real browser.
+- **The CLI** (`epsilon/cli.ts`) — the wire from a terminal, so a human, a
+  script, or an AI can work the live app while `bun dev` runs. It is the
+  browser's own client (`connect()`) behind argv: one-shot commands, JSON
+  out. `register`/`login`/`whoami`/`logout` manage a session
+  (`.epsilon-token`, or `EPSILON_TOKEN`; re-authenticated by the connect
+  hook so every command runs as you); `open <doc> [pointer]` prints the
+  composed snapshot; `add`/`set`/`rm`/`apply` mutate and print the
+  RESOLVED echo the server broadcast — minted ids included; `watch`
+  streams snapshot-then-ops as NDJSON; `call` is RPC. `--url` /
+  `EPSILON_URL` pick the host; `--timeout` bounds every command. The
+  scaffold skill documents it, so agents reach for the wire instead of
+  guessing from source. `DocHandle` exposes `v` (the last applied server
+  version).
 
 ### Fixed
 

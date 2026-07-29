@@ -41,6 +41,7 @@ EPSILON_PG_URL=postgres://epsilon:epsilon@localhost:5599/epsilon bun dev
 | `ui.ts` | `list()` routes membership ops; row content flows through lenses |
 | `pg.ts` | Durability, LISTEN/NOTIFY fan-out, wire adapter for the SQL auth contract |
 | `migrate.ts` | Numbered migrations: ordered, hash-recorded, forward-only, transactional |
+| `cli.ts` | The wire from a terminal — auth-aware one-shot commands + `watch`, JSON out (humans, scripts, AIs) |
 
 `*.test.ts` beside each — the tests are the contract. [DESIGN.md](DESIGN.md) is the why.
 

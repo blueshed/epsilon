@@ -99,6 +99,30 @@ front — mirror only into docs you pre-locked.
   present IS watching the doc; it evicts with its last watcher. Ephemeral,
   per-process. Follow this shape for any who's-here / typing / cursor state.
 
+## The CLI — work the live app while it runs
+
+`epsilon/cli.ts` is the browser's own client (`connect()`) behind argv:
+one-shot, auth-aware, JSON out. While `bun dev` runs, USE IT — verify
+realtime behavior end-to-end instead of guessing from source:
+
+```sh
+bun epsilon/cli.ts register <name> <email> <password>  # token → .epsilon-token
+bun epsilon/cli.ts open board:1            # {doc, v, data} — composed snapshot
+bun epsilon/cli.ts open board:1 /cards     # a pointer slices it
+bun epsilon/cli.ts add mine:1 /boards/- '{"name":"plan"}'   # creation is an op
+bun epsilon/cli.ts add board:2 /cards/- '{"text":"hi"}'     # echo has the minted id
+bun epsilon/cli.ts set board:2 /cards/1/done true
+bun epsilon/cli.ts rm  board:2 /cards/1
+bun epsilon/cli.ts watch board:2 --for 3000    # NDJSON: snapshot, then each op
+bun epsilon/cli.ts call login '{"email":"…","password":"…"}'
+```
+
+Every mutation prints the RESOLVED echo the server broadcast — what you
+see is what every client rendered. `--url`/`EPSILON_URL` target another
+port; `EPSILON_TOKEN` overrides the token file; `--timeout` bounds every
+command (a bare `watch` runs until Ctrl-C). Write in one terminal, `watch`
+in another, and you are watching the fan-out itself.
+
 ## Rules — in order of importance
 
 - **Never update locally after a send.** The echo renders the write — touch

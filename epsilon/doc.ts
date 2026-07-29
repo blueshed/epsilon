@@ -435,9 +435,11 @@ class RemoteDoc<T> extends Signal<T | null> {
   }
 }
 
-/** What remote.doc() hands back: the doc plus its lifetime. */
+/** What remote.doc() hands back: the doc plus its lifetime and version. */
 export type DocHandle<T> = OpSignal<T | null> & {
   ready: Promise<void>;
+  /** Last server version applied; 0 = no snapshot yet. */
+  readonly v: number;
   /** Release this handle; the last one closes the doc (see RemoteDoc.close). */
   close(): void;
 };

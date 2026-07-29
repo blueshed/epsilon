@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "bun --hot server.ts",
     "check": "bunx tsc --noEmit",
-    "test": "bun test epsilon/signal.test.ts epsilon/doc.test.ts epsilon/ui.test.ts",
+    "test": "bun test epsilon/signal.test.ts epsilon/doc.test.ts epsilon/ui.test.ts epsilon/cli.test.ts",
     "test:migrate": "bun test epsilon/migrate.test.ts",
     "test:pg": "bun test epsilon/pg.test.ts epsilon/rel.test.ts",
     "test:app": "bun test app.test.ts",
