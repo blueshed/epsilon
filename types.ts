@@ -4,9 +4,19 @@
 export interface Card {
   id?: number | string;
   text: string;
+  done?: boolean;
+}
+
+export interface Member {
+  id: number;
+  name: string;
+  email: string;
 }
 
 export interface Board {
   name: string;
   cards: Record<string, Card>;
+  /** Relational tier only: set when the board is owned. */
+  owner_id?: number | null;
+  members?: Record<string, Member>;
 }

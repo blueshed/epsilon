@@ -17,7 +17,28 @@ export interface StartOpts {
 
 export async function startServer(opts: StartOpts = {}) {
   const pgUrl = opts.pgUrl ?? process.env.EPSILON_PG_URL;
-  const host: Host = createHost({ requireAuth: !!pgUrl });
+
+  // Presence: being ON a board is WATCHING its presence doc — an ordinary
+  // in-memory doc keyed by socket, written by the subscribe hooks and
+  // evicted with its last watcher. Ephemeral and per-process by design:
+  // nothing persists, nothing fans out across processes.
+  let sid = 0;
+  const presenceOf = (name: string) =>
+    host.names().includes(name) ? host.doc<Record<string, { name: string }>>(name, {}) : null;
+  const host: Host = createHost({
+    requireAuth: !!pgUrl,
+    onSubscribe(doc, ws) {
+      if (!doc.startsWith("presence:")) return;
+      ws.data.sid ??= ++sid;
+      presenceOf(doc)?.apply([
+        { op: "add", path: `/${ws.data.sid}`, value: { name: ws.data.user?.name ?? "guest" } },
+      ]);
+    },
+    onUnsubscribe(doc, ws) {
+      if (!doc.startsWith("presence:") || !ws.data?.sid) return;
+      presenceOf(doc)?.apply([{ op: "remove", path: `/${ws.data.sid}` }]);
+    },
+  });
   let sql: import("bun").SQL | undefined;
 
   if (pgUrl) {
@@ -30,20 +51,25 @@ export async function startServer(opts: StartOpts = {}) {
     await pgAuth(host, db);                            // wire adapter over the SQL contract
 
     // Docs are DYNAMIC — names are data, hosted on first open.
-    // board:<id> — shared when owner_id is NULL (the seeded board:1),
-    // otherwise the owner's alone, decided by the tables.
+    // board:<id> — public when owner_id is NULL (the seeded board:1),
+    // otherwise the owner's and their members', decided by board_may IN THE
+    // TABLES — the same predicate the stored functions enforce.
+    const may = async (id: number, u?: number | string) => {
+      const [r] = await db`SELECT board_may(${id}, ${u == null ? null : Number(u)}) AS ok`;
+      return !!r?.ok;
+    };
     host.docs("board:", async (name, userId) => {
       const id = Number(name.split(":")[1]);
       if (!Number.isFinite(id)) throw new Error(`unknown doc: ${name}`);
       const [b] = await db`SELECT owner_id FROM boards WHERE id = ${id}`;
-      if (!b) throw new Error(`unknown doc: ${name}`);
+      // A stranger is refused BEFORE hosting — probes cost nothing.
+      if (!b || !(await may(id, userId))) throw new Error(`unknown doc: ${name}`);
       const owner = b.owner_id == null ? null : Number(b.owner_id);
-      // An owned board refuses strangers BEFORE hosting — probes cost nothing.
-      if (owner != null && Number(userId) !== owner) throw new Error(`unknown doc: ${name}`);
       await pgDoc<Board>(host, db, name, null as unknown as Board, {
         apply: "board_apply",
         openAs: owner,
-        guard: owner == null ? undefined : (u) => Number(u) === owner,
+        // Membership changes bite on the next open — the guard asks SQL.
+        guard: owner == null ? undefined : (u) => may(id, u),
       });
     });
 
@@ -60,9 +86,18 @@ export async function startServer(opts: StartOpts = {}) {
       });
     });
 
+    // presence:board:<id> — who's looking, visible to whoever may open the
+    // board itself. Hosted empty; the subscribe hooks fill it.
+    host.docs("presence:", async (name, userId) => {
+      const id = Number(name.split(":")[2]);
+      if (!Number.isFinite(id) || !(await may(id, userId))) throw new Error(`unknown doc: ${name}`);
+      host.doc(name, {});
+    });
+
     await pgSync(host, db, { url: pgUrl });            // cross-process fan-out
   } else {
     host.doc<Board>("board:1", { name: "main", cards: {} });
+    host.docs("presence:", (name) => { host.doc(name, {}); });
   }
 
   const server = Bun.serve({

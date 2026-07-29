@@ -238,6 +238,52 @@ describe("dynamic docs — the factory sees the asking identity", () => {
   });
 });
 
+describe("presence — subscribe hooks drive an ephemeral doc (server.ts's pattern)", () => {
+  test("watchers appear on open, vanish on socket death, and the doc dies with its last watcher", async () => {
+    type Here = Record<string, { name: string }>;
+    let sid = 0;
+    let h!: ReturnType<typeof createHost>;
+    const presenceOf = (name: string) =>
+      h.names().includes(name) ? h.doc<Here>(name, {}) : null;
+    h = createHost({
+      onSubscribe(doc, ws) {
+        if (!doc.startsWith("presence:")) return;
+        ws.data.sid ??= ++sid;
+        presenceOf(doc)?.apply([{ op: "add", path: `/${ws.data.sid}`, value: { name: ws.data.user?.name ?? "guest" } }]);
+      },
+      onUnsubscribe(doc, ws) {
+        if (!doc.startsWith("presence:") || !ws.data?.sid) return;
+        presenceOf(doc)?.apply([{ op: "remove", path: `/${ws.data.sid}` }]);
+      },
+    });
+    h.docs("presence:", (name) => { h.doc(name, {}); });
+    const srv = Bun.serve({
+      port: 0,
+      fetch: (req, s) => h.fetch(req, s) ?? new Response("", { status: 404 }),
+      websocket: h.websocket,
+    });
+    h.setServer(srv);
+    const wsUrl = `ws://localhost:${srv.port}${h.path}`;
+
+    const a = connect(wsUrl);
+    const b = connect(wsUrl);
+    remotes.push(a);
+    const pa = a.doc<Here>("presence:room");
+    const pb = b.doc<Here>("presence:room");
+    await Promise.all([pa.ready, pb.ready]);
+    // Both see both — including themselves, added AFTER their snapshot.
+    await until(() => Object.keys(pa.peek() ?? {}).length === 2);
+    await until(() => Object.keys(pb.peek() ?? {}).length === 2);
+
+    b.close();                     // socket death removes b's entry
+    await until(() => Object.keys(pa.peek() ?? {}).length === 1);
+
+    pa.close();                    // last watcher — the doc evicts entirely
+    await until(() => !h.names().includes("presence:room"));
+    srv.stop(true);
+  });
+});
+
 describe("persistence muting is per-doc", () => {
   test("a cascade writing doc B during doc A's receive still persists B", () => {
     const h = createHost();
@@ -251,6 +297,73 @@ describe("persistence muting is per-doc", () => {
     // A's ops came FROM storage — A must not re-persist; B's write is new.
     expect(h.receive("a", 1, [{ op: "replace", path: "/n", value: 1 }])).toBe("ok");
     expect(persisted).toEqual(["b"]);
+  });
+});
+
+describe("lifetime — close() releases docs; unwatched dynamic docs evict", () => {
+  test("refcount: two handles, one socket — only the last close releases", async () => {
+    let built = 0;
+    host.docs("gc:", (name) => {
+      built++;
+      host.doc(name, { cards: {} } satisfies Board);
+    });
+
+    const r = client();
+    const a = r.doc<Board>("gc:1");
+    const b = r.doc<Board>("gc:1");
+    expect(b).toBe(a);                    // same handle, refcounted
+    await a.ready;
+    expect(host.names()).toContain("gc:1");
+
+    a.close();                            // one handle still live — doc stays
+    b.apply([{ op: "add", path: "/cards/9", value: { id: 9, title: "still here", done: false } }]);
+    await until(() => b.peek()!.cards["9"] !== undefined);
+
+    b.close();                            // last handle — server evicts
+    await until(() => !host.names().includes("gc:1"));
+    expect(built).toBe(1);
+
+    const again = client().doc<Board>("gc:1");
+    await again.ready;                    // factory re-hosts on the next open
+    expect(built).toBe(2);
+  });
+
+  test("a doc stays hosted while ANY socket watches it", async () => {
+    const x = client().doc<Board>("gc:2");
+    const y = client().doc<Board>("gc:2");
+    await Promise.all([x.ready, y.ready]);
+
+    x.close();
+    // y still watches — the doc must not evict; give the close a beat to land.
+    await new Promise((r) => setTimeout(r, 50));
+    expect(host.names()).toContain("gc:2");
+
+    y.close();
+    await until(() => !host.names().includes("gc:2"));
+  });
+
+  test("a dead socket unsubscribes everything it watched", async () => {
+    const r = connect(url);               // closed here, not in afterAll
+    const d = r.doc<Board>("gc:3");
+    await d.ready;
+    expect(host.names()).toContain("gc:3");
+    r.close();                            // socket death IS the unsubscribe
+    await until(() => !host.names().includes("gc:3"));
+  });
+
+  test("static docs survive their last watcher; closed handles refuse writes", async () => {
+    const r = client();
+    const d = r.doc<Board>("board");
+    await d.ready;
+    d.close();
+    await new Promise((res) => setTimeout(res, 50));
+    expect(host.names()).toContain("board");   // registered, not dynamic — lives on
+
+    expect(() => d.apply([{ op: "replace", path: "/cards/1/title", value: "nope" }]))
+      .toThrow("closed");
+    const fresh = r.doc<Board>("board");
+    expect(fresh).not.toBe(d);                 // a later ask starts fresh
+    await fresh.ready;
   });
 });
 

@@ -63,7 +63,12 @@ function — no runtime change.
 `board_may(board, user)` gates BOTH `board_open` (NULL for outsiders) and
 `board_apply` (RAISE "not found" — never confirm a doc exists). Follow that
 shape for every doc type: one predicate, both directions, checked inside the
-stored function with the identity the socket authenticated.
+stored function with the identity the socket authenticated. Since 009 the
+predicate admits MEMBERS too: share by email with `add /members/-` on the
+board (owner only); the member's own list mirrors it in the same
+transaction. Multi-doc mirrors must follow 009's lock order: all mine docs
+ascending uid, then board docs ascending id, pre-scanned and locked up
+front — mirror only into docs you pre-locked.
 
 ## Server — two tiers, one wire
 
@@ -89,6 +94,34 @@ stored function with the identity the socket authenticated.
 - Dynamic docs: `host.docs(prefix, (name, userId) => ...)` — the factory sees
   the asking user; throw `unknown doc` BEFORE hosting/seeding so probes cost
   nothing (see server.ts's `mine:` factory).
+- Presence: `presence:board:<id>` is an in-memory doc the host's
+  `onSubscribe`/`onUnsubscribe` hooks maintain (see server.ts) — being
+  present IS watching the doc; it evicts with its last watcher. Ephemeral,
+  per-process. Follow this shape for any who's-here / typing / cursor state.
+
+## The CLI — work the live app while it runs
+
+`epsilon/cli.ts` is the browser's own client (`connect()`) behind argv:
+one-shot, auth-aware, JSON out. While `bun dev` runs, USE IT — verify
+realtime behavior end-to-end instead of guessing from source:
+
+```sh
+bun epsilon/cli.ts register <name> <email> <password>  # token → .epsilon-token
+bun epsilon/cli.ts open board:1            # {doc, v, data} — composed snapshot
+bun epsilon/cli.ts open board:1 /cards     # a pointer slices it
+bun epsilon/cli.ts add mine:1 /boards/- '{"name":"plan"}'   # creation is an op
+bun epsilon/cli.ts add board:2 /cards/- '{"text":"hi"}'     # echo has the minted id
+bun epsilon/cli.ts set board:2 /cards/1/done true
+bun epsilon/cli.ts rm  board:2 /cards/1
+bun epsilon/cli.ts watch board:2 --for 3000    # NDJSON: snapshot, then each op
+bun epsilon/cli.ts call login '{"email":"…","password":"…"}'
+```
+
+Every mutation prints the RESOLVED echo the server broadcast — what you
+see is what every client rendered. `--url`/`EPSILON_URL` target another
+port; `EPSILON_TOKEN` overrides the token file; `--timeout` bounds every
+command (a bare `watch` runs until Ctrl-C). Write in one terminal, `watch`
+in another, and you are watching the fan-out itself.
 
 ## Rules — in order of importance
 
@@ -101,6 +134,10 @@ stored function with the identity the socket authenticated.
   is threaded from the socket's authenticated user).
 - **`list()` for collections, lenses for content.** No effects that rebuild
   rows from `doc.data`.
+- **Close what you leave.** `remote.doc()` handles are refcounted — call
+  `.close()` when a view is done with a doc (see `openBoard`). The last
+  close unsubscribes; the host evicts unwatched dynamic docs and their
+  factories re-host on the next open. Writes through a closed handle throw.
 - **Auth before docs** on `requireAuth` hosts; store the session token; a
   refused doc handle re-opens when asked again. Re-auth belongs in
   `onConnect` — it runs on every reconnect, before docs re-open.

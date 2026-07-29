@@ -7,5 +7,5 @@ export {
 } from "./signal";
 export type { OpSignal, ReadonlySignal, SignalOptions, Dispose } from "./signal";
 export { createHost, connect } from "./doc";
-export type { Host, Remote } from "./doc";
+export type { Host, Remote, DocHandle } from "./doc";
 export { list, text } from "./ui";

@@ -41,6 +41,7 @@ Any line not paying one of these taxes is deletable.
 - No optimistic apply — the echo renders the write (delta's rule).
 - Contiguous `v` per doc: replay ignored, gap → re-open, reconnect → re-open all.
 - `call()` for RPC (queued until the socket opens); auth methods set the socket's user; `requireAuth` hosts refuse doc traffic until one has.
+- Lifetime: `remote.doc()` handles are refcounted; the last `close()` unsubscribes and stops re-opens. The host counts watchers per socket and evicts an unwatched DYNAMIC doc — its factory re-hosts (and recomposes) on the next open. Static docs live for the process.
 - Postgres tier (pg.ts): TS applies ops, one guarded UPDATE persists, doc_ops is the log. Cross-process fan-out is real push — LISTEN/NOTIFY via the optional `pg` peer (a dedicated connection with reconnect + catch-up), because Bun's SQL client has no LISTEN callbacks yet (verified, 1.3.14). Decision (Peter, 2026-07-28): carry `pg` for this one job and RETIRE it the day `sql.listen` ships — the seam and tests don't change. Without `pg` installed, `pgSync` degrades to polling.
 
 ## The pixels (v0 — ui.ts)
@@ -157,13 +158,40 @@ must hold ONE reserved connection.
   and notified. Delivery is the ordinary fan-out (pgSync).
 - **Delete cascades.** Cards via FK; the doc row and its log explicitly.
 
+## Sharing (009) — members, mirrored
+
+- `board_members` + `board_may`: public, owner, or member — one predicate,
+  both directions, asked again on every open (guards may be async: the
+  membership check is one SQL call).
+- Share BY EMAIL: `add /members/-` on the board (owner only); the echo
+  carries the resolved member row and the member's mine doc gains the board
+  in the SAME transaction. `remove /members/<uid>`: the owner removes
+  anyone; a member removes themselves. On your own list, `remove
+  /boards/<id>` DELETES what you own and LEAVES what you don't.
+- Lock order, generalized from 005: ALL mine docs in ascending uid order,
+  THEN board docs in ascending id order. Both apply functions pre-scan the
+  batch and take every lock up front; mirrors only ever target pre-locked
+  docs. A membership change racing the pre-scan can only SKIP a mirror —
+  never lock out of order — and recompute-from-state heals the stale entry
+  at the next open.
+- Known limit: revocation bites at the write boundary and the next open; an
+  already-subscribed socket keeps receiving broadcasts until it closes the
+  doc (the per-subscriber limit above).
+
+## Presence — being there is watching a doc
+
+`presence:board:<id>` is an ordinary in-memory doc keyed by socket: the
+host's `onSubscribe`/`onUnsubscribe` hooks (a socket's first successful
+open; its release or death) write watchers in and out, and the doc evicts
+with its last watcher. Hooks fire AFTER the snapshot send, so a new
+subscriber sees itself appear as a contiguous op. Ephemeral and
+PER-PROCESS by design — nothing persists, nothing fans out across
+processes.
+
 ## Open items
 
-- Doc GC: a deleted doc's hosted signal lingers until process restart.
-- Sharing: boards are owner-or-public; a members table is the next
-  migration when needed (the `board_may` seam is where it goes).
-- Client doc handles accumulate per visited board (no per-doc close yet —
-  delta grew one; epsilon will too).
+- Doc GC covers the unwatched case; a deleted doc that still has watchers
+  lingers until they leave (no "doc deleted" push yet).
 - Prune cadence: `epsilon_prune(keep)` (006) runs at boot only — long-lived
   deployments should cron it.
 

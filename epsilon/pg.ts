@@ -55,9 +55,10 @@ export async function pgDoc<T>(
     /** Identity the hosted composition runs AS (an owner/uid derived from the
      *  name). The hosted signal holds THAT view; pair with `guard`. */
     openAs?: number | null;
-    /** Who may receive the hosted snapshot over the wire. Refusals read as
-     *  "unknown doc" — no existence oracle. */
-    guard?: (userId?: number | string) => boolean;
+    /** Who may receive the hosted snapshot over the wire. May be async —
+     *  e.g. `SELECT board_may(...)`, so membership changes take effect on
+     *  the next open. Refusals read as "unknown doc" — no existence oracle. */
+    guard?: (userId?: number | string) => boolean | Promise<boolean>;
   },
 ): Promise<Signal<T>> {
   if (opts?.apply) {
@@ -82,7 +83,7 @@ export async function pgDoc<T>(
           if (doc) host.hydrate(name, Number(doc.v), doc.data);
         }
       },
-      open: guard ? (userId) => (guard(userId) ? sig.peek() : null) : undefined,
+      open: guard ? async (userId) => ((await guard(userId)) ? sig.peek() : null) : undefined,
     });
     if (opts.seed) {
       await sql`INSERT INTO docs (name, v, data, open_fn) VALUES (${name}, 0, NULL, ${opts.seed.open_fn})

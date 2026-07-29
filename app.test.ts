@@ -23,6 +23,12 @@ describe("the app, end to end", () => {
     const { server } = await startServer({ port: 0 });
     await using view = new Bun.WebView({ width: 800, height: 600 });
     await view.navigate(server.url.href);
+    // The snapshot rendering is the app's "ready": typing before the module
+    // has wired onsubmit would native-submit the form and navigate away.
+    await waitFor(
+      () => view.evaluate<string>("document.querySelector('#board-name').textContent"),
+      (t) => t === "main",
+    );
     await view.click("#input");
     await view.type("hello from a real browser");
     await view.press("Enter");
@@ -31,6 +37,12 @@ describe("the app, end to end", () => {
       (t) => t.includes("hello from a real browser"),
     );
     expect(log).toContain("hello from a real browser");
+    // Presence: no auth, so the watcher shows as a guest.
+    const who = await waitFor(
+      () => view.evaluate<string>("document.querySelector('#who').textContent"),
+      (t) => t.includes("guest"),
+    );
+    expect(who).toContain("here:");
     server.stop(true);
   });
 
@@ -67,6 +79,12 @@ describe("the app, end to end", () => {
     await waitFor(
       () => view.evaluate<string>("document.querySelector('#log').textContent"),
       (t) => t.includes("audited card"),
+    );
+
+    // Presence knows who we are once authenticated.
+    await waitFor(
+      () => view.evaluate<string>("document.querySelector('#who').textContent"),
+      (t) => t.includes("Pete"),
     );
 
     // THE VISION, through the UI: create a board (an op on mine:<uid>),
@@ -114,6 +132,28 @@ describe("the app, end to end", () => {
     const [user] = await db`SELECT id FROM users WHERE email = ${"pete@app.test"}`;
     expect(Number(audit.by_user)).toBe(Number(user.id));          // the log is the audit
     expect(audit.ops[0].path).toBe(`/cards/${row.id}`);           // sequence id, resolved
+
+    // The OTHER two verbs, through the UI. Checkbox → replace /done:
+    await view.click("#log li input");
+    await waitFor(
+      async () => (await db`SELECT done FROM cards WHERE board_id = ${myBoard.id}`)[0]?.done as boolean,
+      (d) => d === true,
+    );
+    // ✕ → remove; the row leaves the table AND the pixels.
+    await view.click("#log li button");
+    await waitFor(
+      async () => Number((await db`SELECT count(*) AS n FROM cards WHERE board_id = ${myBoard.id}`)[0]!.n),
+      (n) => n === 0,
+    );
+    // Rename in place → replace /name; the mirror renames it in the mine
+    // list too — two docs, one transaction, both on screen.
+    await view.evaluate(
+      "(() => { const h = document.querySelector('#board-name'); h.textContent = 'renamed plan'; h.dispatchEvent(new Event('blur')); return 1; })()",
+    );
+    await waitFor(
+      () => view.evaluate<string>("document.querySelector('#boards').textContent"),
+      (t) => t.includes("renamed plan"),
+    );
 
     server.stop(true);
     await sql?.end?.();

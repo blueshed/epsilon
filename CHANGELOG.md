@@ -7,6 +7,68 @@ will ship.
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-07-29
+
+### Added
+
+- **Doc lifetime is paid, not leaked.** `remote.doc(name)` handles are
+  refcounted and gain `close()`: the last close unsubscribes on the server,
+  stops reconnect re-opens (previously every doc ever visited re-opened on
+  each reconnect, forever), and abandons that doc's queued writes; a write
+  through a closed handle throws. The host tracks subscriptions per socket
+  — a socket's death releases everything it watched — and EVICTS a
+  factory-hosted (dynamic) doc when its last watcher leaves; the factory
+  re-hosts and recomposes on the next open. Statically registered docs
+  still live for the process. The template's board switcher closes the
+  board it leaves.
+- CI (`.github/workflows/ci.yml`) — tsc + every suite, including the
+  real-browser app test, against a postgres:16 service container.
+- **Sharing** (`db/009-sharing.sql`) — `board_members`, and `board_may`
+  grown to public/owner/MEMBER. Share by email: `add /members/-` on the
+  board (owner only) mints the member row and mirrors the board into the
+  member's own list in the same transaction; `remove /members/<uid>` is the
+  owner removing anyone or a member leaving; on your own list, `remove
+  /boards/<id>` deletes what you own and LEAVES what you don't. Renames
+  now mirror path-precisely (`/boards/<id>/name`) into every list showing
+  the board. Lock order generalized from 005: all mine docs ascending uid,
+  then board docs ascending id, pre-scanned and locked up front. The
+  template grows a members panel on owned boards; `mine` rows mark shared
+  boards. Host `open`/pgDoc `guard` hooks may now be async, so the open
+  gate is `SELECT board_may(...)` — membership changes bite on the next
+  open. Cards gain a `done` boolean (dispatch + composition).
+- **Presence** — being on a board IS watching its presence doc.
+  `presence:board:<id>` is an ordinary in-memory doc keyed by socket,
+  maintained by the new host hooks `onSubscribe`/`onUnsubscribe` (fired on
+  a socket's first successful open — after the snapshot, so the new watcher
+  sees itself appear as a contiguous op — and on release or death) and
+  evicted with its last watcher. The template shows "here: …" under the
+  board name: guests before auth, names after. Ephemeral and per-process
+  by design.
+- **The demo speaks all three verbs.** Each card row has a done checkbox
+  (`replace /cards/<id>/done`, strikethrough when done) and a ✕
+  (`remove /cards/<id>`); the board title renames in place — blur or Enter
+  sends one `replace /name` and the mirror renames it in every mine list
+  live. The app test drives all three through a real browser.
+- **The CLI** (`epsilon/cli.ts`) — the wire from a terminal, so a human, a
+  script, or an AI can work the live app while `bun dev` runs. It is the
+  browser's own client (`connect()`) behind argv: one-shot commands, JSON
+  out. `register`/`login`/`whoami`/`logout` manage a session
+  (`.epsilon-token`, or `EPSILON_TOKEN`; re-authenticated by the connect
+  hook so every command runs as you); `open <doc> [pointer]` prints the
+  composed snapshot; `add`/`set`/`rm`/`apply` mutate and print the
+  RESOLVED echo the server broadcast — minted ids included; `watch`
+  streams snapshot-then-ops as NDJSON; `call` is RPC. `--url` /
+  `EPSILON_URL` pick the host; `--timeout` bounds every command. The
+  scaffold skill documents it, so agents reach for the wire instead of
+  guessing from source. `DocHandle` exposes `v` (the last applied server
+  version).
+
+### Fixed
+
+- The in-memory app test waits for the first snapshot before typing —
+  keystrokes racing module evaluation could native-submit the form and
+  navigate away (an intermittent CI-class flake).
+
 ## [0.2.0] — 2026-07-29
 
 ### Added

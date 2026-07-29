@@ -300,6 +300,140 @@ describe("the doc kit — a new doc type is dispatch + composition only", () => 
   });
 });
 
+describe("sharing — members make multi-user real (009)", () => {
+  interface MineDoc { boards: Record<string, { id: number; name: string; shared?: boolean }> }
+
+  test("add by email → member's list updates live; member writes; leaving and deleting revoke", async () => {
+    const host = createHost({ requireAuth: true });
+    await pgAuth(host, sql);
+    const may = async (id: number, u?: number | string) => {
+      const [r] = await sql`SELECT board_may(${id}, ${u == null ? null : Number(u)}) AS ok`;
+      return !!r?.ok;
+    };
+    host.docs("mine:", async (name, userId) => {
+      const uid = Number(name.split(":")[1]);
+      if (!Number.isFinite(uid) || Number(userId) !== uid) throw new Error(`unknown doc: ${name}`);
+      await pgDoc(host, sql, name, null, {
+        apply: "mine_apply", seed: { open_fn: "mine_open" },
+        openAs: uid, guard: (u) => Number(u) === uid,
+      });
+    });
+    host.docs("board:", async (name, userId) => {
+      const id = Number(name.split(":")[1]);
+      const [b] = await sql`SELECT owner_id FROM boards WHERE id = ${id}`;
+      if (!b || !(await may(id, userId))) throw new Error(`unknown doc: ${name}`);
+      const owner = b.owner_id == null ? null : Number(b.owner_id);
+      await pgDoc(host, sql, name, null, {
+        apply: "board_apply", openAs: owner,
+        guard: owner == null ? undefined : (u) => may(id, u),
+      });
+    });
+    const url = serve(host);
+    stops.push((await pgSync(host, sql, { url: PG_URL })).stop);
+
+    const owner = client(url);
+    const om = await owner.call<{ user: { id: number } }>("register", {
+      name: "Owner", email: "owner@share.test", password: "pw",
+    });
+    const oid = om.user.id;
+    const friendErrors: string[] = [];
+    const friend = connect(url, { onError: (_d: string, e: string) => friendErrors.push(e) });
+    remotes.push(friend);
+    const fm = await friend.call<{ user: { id: number } }>("register", {
+      name: "Friend", email: "friend@share.test", password: "pw",
+    });
+    const fid = fm.user.id;
+
+    // Owner creates a board; the friend probing it reads as a missing doc.
+    const oMine = owner.doc<MineDoc>(`mine:${oid}`);
+    await oMine.ready;
+    oMine.at("/boards").apply([{ op: "add", path: "/-", value: { name: "shared plan" } }]);
+    await until(() => Object.keys(oMine.peek()!.boards).length === 1);
+    const bid = Object.values(oMine.peek()!.boards)[0]!.id;
+
+    friend.doc(`board:${bid}`);
+    await until(() => friendErrors.length > 0);
+    expect(friendErrors[0]).toContain("unknown doc");
+
+    const fMine = friend.doc<MineDoc>(`mine:${fid}`);
+    await fMine.ready;
+    expect(fMine.peek()!.boards).toEqual({});
+
+    // SHARE BY EMAIL: one op on the board; the echo carries the member row
+    // and the mirror lands in the friend's own list, live, over the fan-out.
+    const oBoard = owner.doc<Board>(`board:${bid}`);
+    await oBoard.ready;
+    oBoard.at("/members").apply([{ op: "add", path: "/-", value: { email: "friend@share.test" } }]);
+    await until(() => fMine.peek()!.boards[String(bid)] !== undefined);
+    expect(fMine.peek()!.boards[String(bid)]!.shared).toBe(true);
+    expect(oBoard.peek()!.members![String(fid)]!.email).toBe("friend@share.test");
+
+    // The member opens the same doc name and WRITES — attributed to them.
+    const fBoard = friend.doc<Board>(`board:${bid}`);
+    await fBoard.ready;
+    fBoard.at("/cards").apply([{ op: "add", path: "/-", value: { text: "from the friend" } }]);
+    await until(() => Object.values(oBoard.peek()!.cards).some((c) => c.text === "from the friend"));
+    const [card] = await sql`SELECT created_by FROM cards WHERE board_id = ${bid}`;
+    expect(Number(card.created_by)).toBe(fid);
+
+    // A rename mirrors into EVERY list showing the board — and the precise
+    // path keeps the friend's `shared` flag intact.
+    oBoard.at<string>("/name").set("our plan");
+    await until(() => fMine.peek()!.boards[String(bid)]!.name === "our plan");
+    expect(fMine.peek()!.boards[String(bid)]!.shared).toBe(true);
+
+    // LEAVING: the friend removes the board from their own list; the board
+    // hears it and the membership row dies. Access ends at the next open.
+    fMine.at("/boards").apply([{ op: "remove", path: `/${bid}` }]);
+    await until(() => fMine.peek()!.boards[String(bid)] === undefined);
+    await until(() => oBoard.peek()!.members![String(fid)] === undefined);
+    expect((await sql`SELECT 1 FROM board_members WHERE board_id = ${bid}`).length).toBe(0);
+    const [reopen] = await sql`SELECT doc_open(${"board:" + bid}, ${fid}) AS d`;
+    expect(reopen.d).toBeNull();
+
+    // DELETE cascades to members' lists: re-share, then the owner deletes.
+    oBoard.at("/members").apply([{ op: "add", path: "/-", value: { email: "friend@share.test" } }]);
+    await until(() => fMine.peek()!.boards[String(bid)] !== undefined);
+    oMine.at("/boards").apply([{ op: "remove", path: `/${bid}` }]);
+    await until(() => oMine.peek()!.boards[String(bid)] === undefined);
+    await until(() => fMine.peek()!.boards[String(bid)] === undefined);
+    expect((await sql`SELECT 1 FROM docs WHERE name = ${"board:" + bid}`).length).toBe(0);
+  });
+
+  test("the function refuses: unknown email, non-owner invites, double add", async () => {
+    const [o] = await sql`SELECT register('Boss', 'boss@ref.test', 'pw') AS u`;
+    const [m] = await sql`SELECT register('Mate', 'mate@ref.test', 'pw') AS u`;
+    const boss = Number((o.u as { id: number }).id);
+    const mate = Number((m.u as { id: number }).id);
+    const [b] = await sql`INSERT INTO boards (name, owner_id) VALUES ('refusals', ${boss}) RETURNING id`;
+    const doc = `board:${b.id}`;
+    await sql`INSERT INTO docs (name, v, data, open_fn) VALUES (${doc}, 0, NULL, 'board_open')`;
+    const addOp = (email: string) => [{ op: "add", path: "/members/-", value: { email } }];
+
+    let err = "";
+    try { await sql.unsafe(`SELECT board_apply($1, $2, $3)`, [doc, addOp("nobody@ref.test") as unknown, boss]); }
+    catch (e) { err = String(e); }
+    expect(err).toContain("unknown user");
+
+    await sql.unsafe(`SELECT board_apply($1, $2, $3)`, [doc, addOp("mate@ref.test") as unknown, boss]);
+    err = "";
+    try { await sql.unsafe(`SELECT board_apply($1, $2, $3)`, [doc, addOp("boss@ref.test") as unknown, mate]); }
+    catch (e) { err = String(e); }
+    expect(err).toContain("owner only");
+
+    err = "";
+    try { await sql.unsafe(`SELECT board_apply($1, $2, $3)`, [doc, addOp("mate@ref.test") as unknown, boss]); }
+    catch (e) { err = String(e); }
+    expect(err).toContain("already a member");
+
+    // The owner removes the member; the row is gone.
+    const rm = await sql.unsafe(`SELECT board_apply($1, $2, $3) AS r`,
+      [doc, [{ op: "remove", path: `/members/${mate}` }] as unknown, boss]);
+    expect((rm[0]!.r as { ops: { path: string }[] }).ops[0]!.path).toBe(`/members/${mate}`);
+    expect((await sql`SELECT 1 FROM board_members WHERE board_id = ${b.id}`).length).toBe(0);
+  });
+});
+
 describe("lock order — a rename's mirror and a board delete cannot deadlock", () => {
   test("concurrent board_apply(rename) vs mine_apply(remove) of the same board", async () => {
     // 004 locked board→mine on rename while mine_apply's delete locks
@@ -404,14 +538,15 @@ describe("the vision: per-user docs, creation as an op, multi-doc writes", () =>
     await until(() => spyErrors.length > 1);
     expect(spyErrors[1]).toContain("unknown doc");
 
-    // RENAME MIRRORS across docs in one transaction: board write → mine op.
+    // RENAME MIRRORS across docs in one transaction: board write → mine op,
+    // path-precise (/boards/<id>/name) so sibling fields survive.
     const mineVBefore = await sql`SELECT v FROM docs WHERE name = ${"mine:" + aliceId}`;
     board.at<string>("/name").set("the better plan");
     await until(() => mine.peek()!.boards[String(bid)]!.name === "the better plan");
     const [mineOps] = await sql`
       SELECT ops, by_user FROM doc_ops WHERE name = ${"mine:" + aliceId}
       AND v = ${Number(mineVBefore[0].v) + 1}`;
-    expect(mineOps.ops[0].path).toBe(`/boards/${bid}`);
+    expect(mineOps.ops[0].path).toBe(`/boards/${bid}/name`);
     expect(Number(mineOps.by_user)).toBe(aliceId);
 
     // DELETE CASCADES: cards go via FK, the doc row and log go explicitly.

@@ -3,10 +3,10 @@
 // With auth on, you get YOUR boards (mine:<uid>): creating one is an op on
 // that doc; opening one is just another doc name.
 import { connect, list, text, effect, pushDisposeScope, popDisposeScope } from "./epsilon";
-import type { OpSignal, Dispose } from "./epsilon";
-import type { Board, Card } from "./types";
+import type { OpSignal, Dispose, DocHandle } from "./epsilon";
+import type { Board, Card, Member } from "./types";
 
-interface BoardRef { id: number | string; name: string }
+interface BoardRef { id: number | string; name: string; shared?: boolean }
 interface Mine { boards: Record<string, BoardRef> }
 
 const authDialog = document.getElementById("auth") as HTMLDialogElement;
@@ -14,6 +14,9 @@ const authError = document.getElementById("auth-error")!;
 const mineSection = document.getElementById("mine")!;
 const boardName = document.getElementById("board-name")!;
 const log = document.getElementById("log")!;
+const share = document.getElementById("share")!;
+const membersUl = document.getElementById("members")!;
+const who = document.getElementById("who")!;
 
 const remote = connect(
   // wss on https — a hardcoded ws:// is blocked as mixed content behind TLS.
@@ -41,6 +44,8 @@ const remote = connect(
 // --- the board on screen ---------------------------------------------------
 
 let disposeBoard: Dispose | null = null;
+let boardDoc: DocHandle<Board> | null = null;
+let presenceDoc: DocHandle<Record<string, { name: string }>> | null = null;
 let currentBoard: string | null = null;
 
 function openBoard(name: string): void {
@@ -48,18 +53,72 @@ function openBoard(name: string): void {
   disposeBoard?.();
   log.replaceChildren();
   location.hash = `#/${name}`;
-  const doc = remote.doc<Board>(name);
+  // Acquire before releasing: a same-name re-open keeps the handle alive
+  // (refcount), a switch lets the old doc close — the server unsubscribes
+  // and can evict it. No leak per visited board.
+  const prev = boardDoc;
+  const prevPresence = presenceDoc;
+  const doc = (boardDoc = remote.doc<Board>(name));
+  // Presence: watching this doc IS being on the board — the server's
+  // subscribe hooks write us in and out.
+  const pres = (presenceDoc = remote.doc<Record<string, { name: string }>>(`presence:${name}`));
+  prev?.close();
+  prevPresence?.close();
   const cards = doc.at<Record<string, Card>>("/cards") as OpSignal<Record<string, Card> | null>;
+  const members = doc.at<Record<string, Member>>("/members") as OpSignal<Record<string, Member> | null>;
+  membersUl.replaceChildren();
   pushDisposeScope();
   effect(() => { boardName.textContent = doc.get()?.name ?? ""; });
+  effect(() => {
+    const here = pres.get();
+    const names = here ? Object.values(here).map((p) => p?.name ?? "?") : [];
+    who.textContent = names.length ? `here: ${names.join(", ")}` : "";
+  });
+  // Each row shows all three verbs: the checkbox REPLACES /done, the text
+  // rides the lens, ✕ REMOVES the card. No local mutation — echoes render.
   log.appendChild(
-    list(cards, (card) => {
+    list(cards, (card, id) => {
       const li = document.createElement("li");
-      li.appendChild(text(card.map((c) => c?.text)));
+      const done = document.createElement("input");
+      done.type = "checkbox";
+      effect(() => { done.checked = !!card.get()?.done; });
+      done.onchange = () => card.at("/done").set(done.checked);
+      const label = document.createElement("span");
+      label.appendChild(text(card.map((c) => c?.text)));
+      effect(() => { label.style.textDecoration = card.get()?.done ? "line-through" : ""; });
+      const del = document.createElement("button");
+      del.textContent = "✕";
+      del.onclick = () => cards.apply([{ op: "remove", path: `/${id}` }]);
+      li.append(done, " ", label, " ", del);
+      return li;
+    }),
+  );
+  // Sharing lives on OWNED boards (relational tier composes owner_id).
+  effect(() => { share.hidden = doc.get()?.owner_id == null; });
+  membersUl.appendChild(
+    list(members, (m, uid) => {
+      const li = document.createElement("li");
+      li.appendChild(text(m.map((x) => (x ? `${x.name} <${x.email}>` : ""))));
+      const del = document.createElement("button");
+      del.textContent = "✕";
+      del.onclick = () => members.apply([{ op: "remove", path: `/${uid}` }]);
+      li.append(" ", del);
       return li;
     }),
   );
   disposeBoard = popDisposeScope();
+
+  const memberForm = document.getElementById("member-form") as HTMLFormElement;
+  const memberInput = document.getElementById("new-member") as HTMLInputElement;
+  memberForm.onsubmit = (e) => {
+    e.preventDefault();
+    const email = memberInput.value.trim();
+    if (!email) return;
+    // Minted by email — the echo carries the member's id, name, and the
+    // board appears in THEIR list via the mine-doc mirror.
+    members.apply([{ op: "add", path: "/-", value: { email } }]);
+    memberInput.value = "";
+  };
 
   const form = document.getElementById("form") as HTMLFormElement;
   const input = document.getElementById("input") as HTMLInputElement;
@@ -69,6 +128,18 @@ function openBoard(name: string): void {
     // No local append — the echo (with the server-minted id) renders it.
     cards.apply([{ op: "add", path: "/-", value: { text: input.value } }]);
     input.value = "";
+  };
+
+  // Rename in place: edit the title, blur (or Enter) sends one replace op.
+  // The echo — and its mirror into every mine list — renders the change.
+  boardName.contentEditable = "true";
+  boardName.onblur = () => {
+    const v = boardName.textContent?.trim();
+    if (v && v !== doc.peek()?.name) doc.at<string>("/name").set(v);
+    else boardName.textContent = doc.peek()?.name ?? "";
+  };
+  boardName.onkeydown = (e) => {
+    if (e.key === "Enter") { e.preventDefault(); boardName.blur(); }
   };
 }
 
@@ -94,7 +165,7 @@ function showMine(userId: number | string): void {
     list(boards, (row, id) => {
       const li = document.createElement("li");
       const name = document.createElement("span");
-      name.appendChild(text(row.map((b) => b?.name)));
+      name.appendChild(text(row.map((b) => (b ? b.name + (b.shared ? " · shared" : "") : ""))));
       name.onclick = () => openBoard(`board:${id}`);
       const del = document.createElement("button");
       del.textContent = "✕";

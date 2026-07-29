@@ -35,6 +35,7 @@ import { valueAt, type Op } from "./op";
 
 type ClientMsg =
   | { action: "open"; doc: string }
+  | { action: "close"; doc: string }
   | { action: "ops"; doc: string; ops: Op[] }
   | { action: "call"; id: number; method: string; params?: unknown };
 
@@ -64,10 +65,10 @@ export interface DocOpts {
   /**
    * Identity gate for the OPEN snapshot: return the snapshot for this user,
    * or null/undefined to refuse (the client sees "not found" and is NOT
-   * subscribed). Docs without it serve the hosted signal to any socket the
-   * host admits.
+   * subscribed). May be async — a membership check belongs in SQL. Docs
+   * without it serve the hosted signal to any socket the host admits.
    */
-  open?: (userId?: number | string) => unknown;
+  open?: (userId?: number | string) => unknown | Promise<unknown>;
 }
 
 /**
@@ -124,12 +125,23 @@ export function createHost(opts?: {
   path?: string;
   /** When set, open/ops require ws.data.user (set by an auth method). */
   requireAuth?: boolean;
+  /** Fired after a socket's FIRST successful open of a doc (snapshot already
+   *  sent, so ops applied here reach the new subscriber in order). Presence
+   *  is built on this pair — see server.ts. */
+  onSubscribe?: (doc: string, ws: any) => void;
+  /** Fired when a socket releases a doc — close action or socket death —
+   *  after any eviction, so writes back into an unwatched doc can check
+   *  host.names() first. */
+  onUnsubscribe?: (doc: string, ws: any) => void;
 }): Host {
   const path = opts?.path ?? "/ws";
   // muted: this entry's ops came FROM storage (hydrate/receive), so its
   // persist must not re-run. PER ENTRY — a synchronous cascade that writes a
   // DIFFERENT doc during the apply still persists that doc normally.
-  type Entry = { sig: Signal<any>; v: number; muted: boolean; persist?: DocOpts["persist"]; write?: DocOpts["write"]; open?: DocOpts["open"] };
+  // subs: sockets currently subscribed (lifetime tax). dynamic: hosted by a
+  // prefix factory, so it can be re-hosted — and is EVICTED when the last
+  // subscriber leaves; statically registered docs live for the process.
+  type Entry = { sig: Signal<any>; v: number; muted: boolean; subs: number; dynamic: boolean; persist?: DocOpts["persist"]; write?: DocOpts["write"]; open?: DocOpts["open"] };
   const docs = new Map<string, Entry>();
   const methods = new Map<string, (params: any, ws: any) => unknown | Promise<unknown>>();
   const prefixes = new Map<string, (name: string, userId?: number | string) => unknown | Promise<unknown>>();
@@ -155,9 +167,22 @@ export function createHost(opts?: {
         pending.finally(() => pendingFactories.delete(name)).catch(() => {});
       }
       await pending;
-      return docs.get(name);
+      const made = docs.get(name);
+      if (made) made.dynamic = true;   // re-hostable — evict when unwatched
+      return made;
     }
     return undefined;
+  }
+
+  /** Drop a socket's subscription; evict a dynamic doc nobody watches —
+   *  its factory re-hosts it (and recomposes) on the next open. */
+  function unsubscribe(ws: any, name: string): void {
+    if (!ws.data?.docs?.delete(name)) return;
+    try { ws.unsubscribe(name); } catch { /* socket already gone */ }
+    const entry = docs.get(name);
+    if (entry && --entry.subs <= 0 && entry.dynamic) docs.delete(name);
+    try { opts?.onUnsubscribe?.(name, ws); }
+    catch (err) { console.error("[epsilon/doc] onUnsubscribe hook threw:", err); }
   }
 
   return {
@@ -168,7 +193,7 @@ export function createHost(opts?: {
       const existing = docs.get(name);
       if (existing) return existing.sig as Signal<T>;
       const sig = signal<T>(empty);
-      const entry: Entry = { sig, v: 0, muted: false, persist: docOpts?.persist, write: docOpts?.write, open: docOpts?.open };
+      const entry: Entry = { sig, v: 0, muted: false, subs: 0, dynamic: false, persist: docOpts?.persist, write: docOpts?.write, open: docOpts?.open };
       docs.set(name, entry);
       // Broadcast is just the doc's own ops channel piped to subscribers —
       // whether the write came from a client, server code, or storage
@@ -224,8 +249,13 @@ export function createHost(opts?: {
     },
 
     websocket: {
-      open(_ws: any) {},
-      close(_ws: any) {},
+      open(ws: any) {
+        ws.data ??= {};
+        ws.data.docs = new Set<string>();   // this socket's subscriptions
+      },
+      close(ws: any) {
+        for (const name of [...(ws.data?.docs ?? [])]) unsubscribe(ws, name);
+      },
       async message(ws: any, raw: string | Buffer) {
         let msg: ClientMsg;
         try { msg = JSON.parse(String(raw)); } catch { return; }
@@ -242,6 +272,11 @@ export function createHost(opts?: {
           } catch (err) {
             ws.send(JSON.stringify({ id: msg.id, error: String(err) } satisfies ServerMsg));
           }
+          return;
+        }
+
+        if (msg.action === "close") {
+          unsubscribe(ws, msg.doc);   // idempotent; unknown names no-op
           return;
         }
 
@@ -266,17 +301,34 @@ export function createHost(opts?: {
           // Identity-gated docs choose their snapshot per user — a refusal
           // reads exactly like a missing doc (no existence oracle) and does
           // NOT subscribe the socket.
-          const snapshot = entry.open ? entry.open(ws.data?.user?.id) : entry.sig.peek();
+          let snapshot: unknown;
+          try {
+            snapshot = entry.open ? await entry.open(ws.data?.user?.id) : entry.sig.peek();
+          } catch (err) {
+            ws.send(JSON.stringify({ doc: msg.doc, error: String(err) } satisfies ServerMsg));
+            return;
+          }
           if (entry.open && snapshot == null) {
             ws.send(JSON.stringify({ doc: msg.doc, error: `unknown doc: ${msg.doc}` } satisfies ServerMsg));
             return;
           }
           ws.subscribe(msg.doc);
+          // Count each socket once — a gap-triggered re-open isn't a new sub.
+          const isNew = !ws.data.docs.has(msg.doc);
+          if (isNew) {
+            ws.data.docs.add(msg.doc);
+            entry.subs++;
+          }
           // The snapshot IS an op — same vocabulary, same client code path.
           ws.send(JSON.stringify({
             doc: msg.doc, v: entry.v,
             ops: [{ op: "replace", path: "", value: snapshot }],
           } satisfies ServerMsg));
+          // After the send: ops the hook applies follow the snapshot in order.
+          if (isNew) {
+            try { opts?.onSubscribe?.(msg.doc, ws); }
+            catch (err) { console.error("[epsilon/doc] onSubscribe hook threw:", err); }
+          }
         } else if (msg.action === "ops") {
           try {
             if (entry.write) {
@@ -310,10 +362,30 @@ class RemoteDoc<T> extends Signal<T | null> {
   private state: "pending" | "open" | "refused" = "pending";
   /** Last server version applied; 0 = no snapshot yet. */
   v = 0;
+  /** Live handles from remote.doc() — close() releases one. @internal */
+  refs = 0;
+  private closed = false;
 
-  constructor(private send: (ops: Op[]) => void) {
+  constructor(
+    private send: (ops: Op[]) => void,
+    private release: () => void,
+  ) {
     super(null);
     this.arm();
+  }
+
+  /** Release one handle. The LAST close unsubscribes on the server, stops
+   *  reconnect re-opens, and drops queued writes — the doc is gone; a later
+   *  remote.doc(name) starts fresh. Lifetime is paid here, not at restart. */
+  close(): void {
+    if (this.closed || --this.refs > 0) return;
+    this.closed = true;
+    this.release();
+  }
+
+  /** Writes through a closed handle are bugs — refuse loudly, not silently. */
+  private assertOpen(): void {
+    if (this.closed) throw new Error("[epsilon/doc] doc is closed");
   }
 
   private arm(): void {
@@ -328,6 +400,7 @@ class RemoteDoc<T> extends Signal<T | null> {
 
   /** Location transparency: writes go to the authority, never local. */
   override apply(ops: Op[]): void {
+    this.assertOpen();
     this.send(ops);
   }
 
@@ -362,8 +435,17 @@ class RemoteDoc<T> extends Signal<T | null> {
   }
 }
 
+/** What remote.doc() hands back: the doc plus its lifetime and version. */
+export type DocHandle<T> = OpSignal<T | null> & {
+  ready: Promise<void>;
+  /** Last server version applied; 0 = no snapshot yet. */
+  readonly v: number;
+  /** Release this handle; the last one closes the doc (see RemoteDoc.close). */
+  close(): void;
+};
+
 export interface Remote {
-  doc<T>(name: string): OpSignal<T | null> & { ready: Promise<void> };
+  doc<T>(name: string): DocHandle<T>;
   /** Invoke a host method (auth, RPC). Rejects on error or transport drop. */
   call<T = unknown>(method: string, params?: unknown): Promise<T>;
   close(): void;
@@ -396,14 +478,27 @@ export function connect(
     doc<T>(name: string) {
       let doc = docs.get(name) as RemoteDoc<T> | undefined;
       if (!doc) {
-        doc = new RemoteDoc<T>((ops) => {
-          // Never drop a write silently: while the socket is down, ops queue
-          // and flush on reconnect — after the connect hook and the re-opens,
-          // so a requireAuth host accepts them and echoes flow normally.
-          const msg: ClientMsg = { action: "ops", doc: name, ops };
-          if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
-          else queuedOps.push(msg);
-        });
+        doc = new RemoteDoc<T>(
+          (ops) => {
+            // Never drop a write silently: while the socket is down, ops queue
+            // and flush on reconnect — after the connect hook and the re-opens,
+            // so a requireAuth host accepts them and echoes flow normally.
+            const msg: ClientMsg = { action: "ops", doc: name, ops };
+            if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
+            else queuedOps.push(msg);
+          },
+          () => {
+            // Last handle closed: forget the doc (reconnects stop re-opening
+            // it), abandon its queued writes, tell the server. A close while
+            // the socket is down needs no message — the socket's death
+            // already unsubscribed us there.
+            docs.delete(name);
+            for (let i = queuedOps.length - 1; i >= 0; i--) {
+              if ((queuedOps[i] as { doc?: string }).doc === name) queuedOps.splice(i, 1);
+            }
+            send({ action: "close", doc: name });
+          },
+        );
         docs.set(name, doc);
         send({ action: "open", doc: name }); // no-op if not connected yet
       } else if (doc.v === 0) {
@@ -412,6 +507,7 @@ export function connect(
         doc.reopen();
         send({ action: "open", doc: name });
       }
+      doc.refs++;
       return doc;
     },
     call<T>(method: string, params?: unknown): Promise<T> {
