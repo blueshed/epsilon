@@ -7,6 +7,8 @@ will ship.
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-07-29
+
 ### Added
 
 - **The doc kit** (`db/007-doc-kit.sql`) — the reusable skeleton of a
