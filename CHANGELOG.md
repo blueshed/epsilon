@@ -16,6 +16,10 @@ will ship.
   Found by scaffolding a real app (`bun create`) and simulating the
   deploy: production install, `PORT` boot, CLI drive, restart-with-
   volume durability — all verified.
+- Scaffolds no longer inherit the template's CI workflow: a
+  `bun-create.postinstall` removes `.github` from new apps (runs via
+  Bun's shell, where `rm` is a cross-platform builtin). The repo's
+  workflow guards the TEMPLATE's contract; an app opts into its own CI.
 
 ## [0.2.2] — 2026-07-29
 
