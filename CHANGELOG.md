@@ -7,6 +7,8 @@ will ship.
 
 ## [Unreleased]
 
+## [0.2.3] — 2026-07-29
+
 ### Changed
 
 - **Migrations squashed to day-zero truth** (pre-1.0, no deployed
