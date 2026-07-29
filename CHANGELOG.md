@@ -66,6 +66,12 @@ will ship.
   cascade that writes ANOTHER doc during the apply persists that doc
   normally instead of being silently skipped.
 
+### Removed
+
+- `applySql` (pg.ts) — unused since migrations became the one schema path.
+- The `mintIds` export (doc.ts) — internal to the host's write path; nothing
+  outside doc.ts used it.
+
 ### Security
 
 - `register` / `login` are rate limited per client IP (fixed window,

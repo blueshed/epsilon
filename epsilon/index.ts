@@ -1,4 +1,4 @@
-/** @blueshed/epsilon — one op stream, Postgres to pixel. Design phase. */
+/** @blueshed/epsilon — one op stream, Postgres to pixel. */
 export type { Op } from "./op";
 export { applyOps, splitPath, valueAt } from "./op";
 export {

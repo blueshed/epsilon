@@ -68,7 +68,7 @@ export async function startServer(opts: StartOpts = {}) {
   const server = Bun.serve({
     port: opts.port ?? 3000,
     routes: { "/": index },
-    fetch: (req, srv) => host.fetch(req, srv) ?? new Response("not found", { status: 404 }),
+    fetch: host.fetch,   // /ws upgrade; 404 for anything else
     websocket: host.websocket,
     development: { hmr: true, console: true },
   });

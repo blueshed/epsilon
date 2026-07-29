@@ -76,7 +76,7 @@ export interface DocOpts {
  * semantics). Storage-backed docs mint in storage instead (their write hook
  * sees the raw `-`; Postgres sequences assign).
  */
-export function mintIds(doc: unknown, ops: Op[]): Op[] {
+function mintIds(doc: unknown, ops: Op[]): Op[] {
   return ops.map((op) => {
     if (op.op !== "add" || !op.path.endsWith("/-")) return op;
     const parentPath = op.path.slice(0, -2);
