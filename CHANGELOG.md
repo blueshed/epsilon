@@ -7,6 +7,21 @@ will ship.
 
 ## [Unreleased]
 
+### Added
+
+- **Doc lifetime is paid, not leaked.** `remote.doc(name)` handles are
+  refcounted and gain `close()`: the last close unsubscribes on the server,
+  stops reconnect re-opens (previously every doc ever visited re-opened on
+  each reconnect, forever), and abandons that doc's queued writes; a write
+  through a closed handle throws. The host tracks subscriptions per socket
+  — a socket's death releases everything it watched — and EVICTS a
+  factory-hosted (dynamic) doc when its last watcher leaves; the factory
+  re-hosts and recomposes on the next open. Statically registered docs
+  still live for the process. The template's board switcher closes the
+  board it leaves.
+- CI (`.github/workflows/ci.yml`) — tsc + every suite, including the
+  real-browser app test, against a postgres:16 service container.
+
 ## [0.2.0] — 2026-07-29
 
 ### Added

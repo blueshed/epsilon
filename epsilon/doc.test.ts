@@ -254,6 +254,73 @@ describe("persistence muting is per-doc", () => {
   });
 });
 
+describe("lifetime — close() releases docs; unwatched dynamic docs evict", () => {
+  test("refcount: two handles, one socket — only the last close releases", async () => {
+    let built = 0;
+    host.docs("gc:", (name) => {
+      built++;
+      host.doc(name, { cards: {} } satisfies Board);
+    });
+
+    const r = client();
+    const a = r.doc<Board>("gc:1");
+    const b = r.doc<Board>("gc:1");
+    expect(b).toBe(a);                    // same handle, refcounted
+    await a.ready;
+    expect(host.names()).toContain("gc:1");
+
+    a.close();                            // one handle still live — doc stays
+    b.apply([{ op: "add", path: "/cards/9", value: { id: 9, title: "still here", done: false } }]);
+    await until(() => b.peek()!.cards["9"] !== undefined);
+
+    b.close();                            // last handle — server evicts
+    await until(() => !host.names().includes("gc:1"));
+    expect(built).toBe(1);
+
+    const again = client().doc<Board>("gc:1");
+    await again.ready;                    // factory re-hosts on the next open
+    expect(built).toBe(2);
+  });
+
+  test("a doc stays hosted while ANY socket watches it", async () => {
+    const x = client().doc<Board>("gc:2");
+    const y = client().doc<Board>("gc:2");
+    await Promise.all([x.ready, y.ready]);
+
+    x.close();
+    // y still watches — the doc must not evict; give the close a beat to land.
+    await new Promise((r) => setTimeout(r, 50));
+    expect(host.names()).toContain("gc:2");
+
+    y.close();
+    await until(() => !host.names().includes("gc:2"));
+  });
+
+  test("a dead socket unsubscribes everything it watched", async () => {
+    const r = connect(url);               // closed here, not in afterAll
+    const d = r.doc<Board>("gc:3");
+    await d.ready;
+    expect(host.names()).toContain("gc:3");
+    r.close();                            // socket death IS the unsubscribe
+    await until(() => !host.names().includes("gc:3"));
+  });
+
+  test("static docs survive their last watcher; closed handles refuse writes", async () => {
+    const r = client();
+    const d = r.doc<Board>("board");
+    await d.ready;
+    d.close();
+    await new Promise((res) => setTimeout(res, 50));
+    expect(host.names()).toContain("board");   // registered, not dynamic — lives on
+
+    expect(() => d.apply([{ op: "replace", path: "/cards/1/title", value: "nope" }]))
+      .toThrow("closed");
+    const fresh = r.doc<Board>("board");
+    expect(fresh).not.toBe(d);                 // a later ask starts fresh
+    await fresh.ready;
+  });
+});
+
 describe("dynamic docs — names are data, hosted on first open", () => {
   test("a prefix factory hosts room:<x> on demand; unknown prefixes still 404", async () => {
     let built = 0;

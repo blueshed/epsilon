@@ -41,6 +41,7 @@ Any line not paying one of these taxes is deletable.
 - No optimistic apply — the echo renders the write (delta's rule).
 - Contiguous `v` per doc: replay ignored, gap → re-open, reconnect → re-open all.
 - `call()` for RPC (queued until the socket opens); auth methods set the socket's user; `requireAuth` hosts refuse doc traffic until one has.
+- Lifetime: `remote.doc()` handles are refcounted; the last `close()` unsubscribes and stops re-opens. The host counts watchers per socket and evicts an unwatched DYNAMIC doc — its factory re-hosts (and recomposes) on the next open. Static docs live for the process.
 - Postgres tier (pg.ts): TS applies ops, one guarded UPDATE persists, doc_ops is the log. Cross-process fan-out is real push — LISTEN/NOTIFY via the optional `pg` peer (a dedicated connection with reconnect + catch-up), because Bun's SQL client has no LISTEN callbacks yet (verified, 1.3.14). Decision (Peter, 2026-07-28): carry `pg` for this one job and RETIRE it the day `sql.listen` ships — the seam and tests don't change. Without `pg` installed, `pgSync` degrades to polling.
 
 ## The pixels (v0 — ui.ts)
@@ -159,11 +160,10 @@ must hold ONE reserved connection.
 
 ## Open items
 
-- Doc GC: a deleted doc's hosted signal lingers until process restart.
 - Sharing: boards are owner-or-public; a members table is the next
   migration when needed (the `board_may` seam is where it goes).
-- Client doc handles accumulate per visited board (no per-doc close yet —
-  delta grew one; epsilon will too).
+- Doc GC covers the unwatched case; a deleted doc that still has watchers
+  lingers until they leave (no "doc deleted" push yet).
 - Prune cadence: `epsilon_prune(keep)` (006) runs at boot only — long-lived
   deployments should cron it.
 

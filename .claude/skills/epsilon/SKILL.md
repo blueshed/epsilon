@@ -101,6 +101,10 @@ stored function with the identity the socket authenticated.
   is threaded from the socket's authenticated user).
 - **`list()` for collections, lenses for content.** No effects that rebuild
   rows from `doc.data`.
+- **Close what you leave.** `remote.doc()` handles are refcounted — call
+  `.close()` when a view is done with a doc (see `openBoard`). The last
+  close unsubscribes; the host evicts unwatched dynamic docs and their
+  factories re-host on the next open. Writes through a closed handle throw.
 - **Auth before docs** on `requireAuth` hosts; store the session token; a
   refused doc handle re-opens when asked again. Re-auth belongs in
   `onConnect` — it runs on every reconnect, before docs re-open.

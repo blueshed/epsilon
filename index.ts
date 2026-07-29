@@ -3,7 +3,7 @@
 // With auth on, you get YOUR boards (mine:<uid>): creating one is an op on
 // that doc; opening one is just another doc name.
 import { connect, list, text, effect, pushDisposeScope, popDisposeScope } from "./epsilon";
-import type { OpSignal, Dispose } from "./epsilon";
+import type { OpSignal, Dispose, DocHandle } from "./epsilon";
 import type { Board, Card } from "./types";
 
 interface BoardRef { id: number | string; name: string }
@@ -41,6 +41,7 @@ const remote = connect(
 // --- the board on screen ---------------------------------------------------
 
 let disposeBoard: Dispose | null = null;
+let boardDoc: DocHandle<Board> | null = null;
 let currentBoard: string | null = null;
 
 function openBoard(name: string): void {
@@ -48,7 +49,12 @@ function openBoard(name: string): void {
   disposeBoard?.();
   log.replaceChildren();
   location.hash = `#/${name}`;
-  const doc = remote.doc<Board>(name);
+  // Acquire before releasing: a same-name re-open keeps the handle alive
+  // (refcount), a switch lets the old doc close — the server unsubscribes
+  // and can evict it. No leak per visited board.
+  const prev = boardDoc;
+  const doc = (boardDoc = remote.doc<Board>(name));
+  prev?.close();
   const cards = doc.at<Record<string, Card>>("/cards") as OpSignal<Record<string, Card> | null>;
   pushDisposeScope();
   effect(() => { boardName.textContent = doc.get()?.name ?? ""; });
