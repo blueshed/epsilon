@@ -45,6 +45,10 @@ will ship.
 
 ### Fixed
 
+- Back/forward navigate boards: the client now listens for `hashchange`
+  (the hash was written but never read back), so browser history — and a
+  hand-edited `#/board:<id>` — opens the board. Pinned by a real
+  history.back()/forward() round trip in app.test.ts.
 - The client websocket URL follows the page protocol (`wss:` on HTTPS) —
   the hardcoded `ws://` was blocked as mixed content behind TLS.
 - A refused doc open (`unknown doc`, `unauthenticated`) now REJECTS
