@@ -81,6 +81,12 @@ front — mirror only into docs you pre-locked.
   writers); `board_open(name)` composes the doc at open only. Glue:
   `pgDoc(host, sql, "board:1", null, { apply: "board_apply" })`. Auth comes
   on with it: `createHost({ requireAuth: true })` + `pgAuth(host, sql)`.
+- **Embedded** (set `EPSILON_PG_DIR=./data`): the SAME relational tier on
+  in-process Postgres (PGlite) — no database service; migrations, stored
+  functions, and auth run unchanged. One app process owns the directory
+  (mount a volume); pgSync is skipped — no sibling processes exist.
+  Deploying with it? `bun add @electric-sql/pglite`. Outgrowing it?
+  pg_dump, set `EPSILON_PG_URL` — a config change, same schema.
 - To add a doc type, use the DOC KIT (`db/007-doc-kit.sql`): a table,
   `<x>_open` (ONE composition query), and `<x>_apply` =
   `doc_begin(p_doc, <permit>)` → your dispatch loop (`doc_path(v_op)` to

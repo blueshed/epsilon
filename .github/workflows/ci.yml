@@ -35,6 +35,7 @@ jobs:
       - run: bun run check
       - run: bun run test
       - run: bun run test:migrate
+      - run: bun run test:pglite
       - run: bun run test:pg
       # ubuntu-24.04 restricts unprivileged user namespaces (AppArmor), which
       # kills Chrome's sandbox at launch and hangs Bun.WebView. Same cure as

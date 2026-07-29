@@ -9,15 +9,18 @@
     "check": "bunx tsc --noEmit",
     "test": "bun test epsilon/signal.test.ts epsilon/doc.test.ts epsilon/ui.test.ts epsilon/cli.test.ts",
     "test:migrate": "bun test epsilon/migrate.test.ts",
+    "test:pglite": "bun test --timeout 30000 epsilon/pglite.test.ts",
     "test:pg": "bun test epsilon/pg.test.ts epsilon/rel.test.ts",
     "test:app": "bun test --timeout 30000 app.test.ts",
     "db:up": "docker compose up -d --wait",
     "db:down": "docker compose down -v",
-    "ci": "bun run db:up && bun run check && bun run test && bun run test:migrate && bun run test:pg && bun run test:app; code=$?; bun run db:down; exit $code"
+    "ci": "bun run db:up && bun run check && bun run test && bun run test:migrate && bun run test:pglite && bun run test:pg && bun run test:app; code=$?; bun run db:down; exit $code"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.4",
     "@happy-dom/global-registrator": "^20.11.1",
     "@types/bun": "^1.3.14",
+    "@types/emscripten": "^1.41.5",
     "@types/pg": "^8.20.0",
     "pg": "^8.22.0",
     "typescript": "^5.9.3"

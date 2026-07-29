@@ -6,17 +6,23 @@
 // inject their own database.
 import index from "./index.html";
 import { createHost, type Host } from "./epsilon";
+import type { Sql } from "./epsilon/pg";
 import type { Board } from "./types";
 
 export interface StartOpts {
   port?: number;
   pgUrl?: string;
+  /** EMBEDDED Postgres (PGlite): a data directory instead of a server —
+   *  one deployable service, no separate database process. Ignored when a
+   *  pgUrl is set; single app process only (see epsilon/pglite.ts). */
+  pgDir?: string;
   /** Migration directory (tests point this at the repo's db/). */
   dbDir?: string;
 }
 
 export async function startServer(opts: StartOpts = {}) {
   const pgUrl = opts.pgUrl ?? process.env.EPSILON_PG_URL;
+  const pgDir = opts.pgDir ?? (pgUrl ? undefined : process.env.EPSILON_PG_DIR);
 
   // Presence: being ON a board is WATCHING its presence doc — an ordinary
   // in-memory doc keyed by socket, written by the subscribe hooks and
@@ -26,7 +32,7 @@ export async function startServer(opts: StartOpts = {}) {
   const presenceOf = (name: string) =>
     host.names().includes(name) ? host.doc<Record<string, { name: string }>>(name, {}) : null;
   const host: Host = createHost({
-    requireAuth: !!pgUrl,
+    requireAuth: !!(pgUrl || pgDir),
     onSubscribe(doc, ws) {
       if (!doc.startsWith("presence:")) return;
       ws.data.sid ??= ++sid;
@@ -39,12 +45,15 @@ export async function startServer(opts: StartOpts = {}) {
       presenceOf(doc)?.apply([{ op: "remove", path: `/${ws.data.sid}` }]);
     },
   });
-  let sql: import("bun").SQL | undefined;
+  let sql: Sql | undefined;
 
-  if (pgUrl) {
-    const { SQL } = await import("bun");
+  if (pgUrl || pgDir) {
     const { migrate, pgDoc, pgSync, pgAuth } = await import("./epsilon/pg");
-    const db = new SQL(pgUrl);
+    // Same schema, two engines: a wire server (EPSILON_PG_URL), or EMBEDDED
+    // Postgres in this process (EPSILON_PG_DIR) — one service, no db process.
+    const db: Sql = pgUrl
+      ? new (await import("bun")).SQL(pgUrl)
+      : await (await import("./epsilon/pglite")).openPglite(pgDir!);
     sql = db;
     await migrate(db, { dir: opts.dbDir ?? "db" });    // db/*.sql, in order, hash-recorded
     await db`SELECT epsilon_prune()`;                  // bounded tables: old ops, dead sessions
@@ -94,7 +103,10 @@ export async function startServer(opts: StartOpts = {}) {
       host.doc(name, {});
     });
 
-    await pgSync(host, db, { url: pgUrl });            // cross-process fan-out
+    // Fan-out exists for SIBLING processes. Embedded Postgres has none by
+    // construction — this process owns the directory, and the host's own
+    // broadcast already reaches every subscriber.
+    if (pgUrl) await pgSync(host, db, { url: pgUrl });
   } else {
     host.doc<Board>("board:1", { name: "main", cards: {} });
     host.docs("presence:", (name) => { host.doc(name, {}); });
@@ -117,9 +129,10 @@ export async function startServer(opts: StartOpts = {}) {
 if (import.meta.main) {
   const g = globalThis as { __epsilon_app?: Promise<Awaited<ReturnType<typeof startServer>>> };
   g.__epsilon_app ??= startServer().then((app) => {
-    console.log(
-      `epsilon-app → http://localhost:${app.server.port} (${app.sql ? "relational Postgres + auth" : "in-memory, open"})`,
-    );
+    const mode = process.env.EPSILON_PG_URL ? "relational Postgres + auth"
+      : app.sql ? "embedded Postgres (PGlite) + auth"
+      : "in-memory, open";
+    console.log(`epsilon-app → http://localhost:${app.server.port} (${mode})`);
     return app;
   });
 }

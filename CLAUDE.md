@@ -13,7 +13,7 @@ schema-native users. Merges the ideas of `../delta` and `../railroad`.
 
 ## Rules
 
-- **Bun only** — never npm/npx/node. No build step. Zero runtime deps (`pg` is optional dev-time, retires when Bun ships `sql.listen`).
+- **Bun only** — never npm/npx/node. No build step. Zero runtime deps (`pg` and `@electric-sql/pglite` are optional dev-time; `pg` retires when Bun ships `sql.listen`).
 - **Db-first**: schema is the source of truth; the database mints identity — every tier, server-side.
 - **Small language**: three verbs (`add`/`replace`/`remove`), JSON-Pointer paths. Never invent verbs.
 - The law: ops are the fast path; recompute-from-state must always be correct on its own.
@@ -25,6 +25,7 @@ schema-native users. Merges the ideas of `../delta` and `../railroad`.
 
 ```sh
 bun test           # unit + wire + DOM suites (no DB needed)
+bun run test:pglite  # the relational tier on EMBEDDED Postgres (no DB needed)
 bun run db:up      # compose Postgres on :5599
 bun run test:pg    # durability, fan-out, users (needs db:up)
 bun run check      # tsc --noEmit, strict

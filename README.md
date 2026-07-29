@@ -16,6 +16,7 @@ folder in your app — ~1.7k lines of TypeScript you own, with its own tests.
 - **Users are first-class.** `users` and `sessions` ship in the schema; register/login work on day one.
 - **Multi-user is in the box.** Share a board by email — it appears in the member's own list in the same transaction; presence shows who's looking; unwatched docs evict and re-host on demand.
 - **Postgres, db-first.** Migrations in `db/` (numbered, hash-recorded, forward-only). Set `EPSILON_PG_URL` and the doc is durable — state and versions survive restarts. Identity is minted by the database and carried everywhere, never re-derived.
+- **Or Postgres with no database process.** Set `EPSILON_PG_DIR=./data` and the SAME schema runs embedded, in-process ([PGlite](https://pglite.dev)) — one deployable service, state on a volume, every migration and stored function unchanged. Outgrow it? `pg_dump`, set `EPSILON_PG_URL`: scaling up is a config change. (Single app process only; add `@electric-sql/pglite` when deploying with it.)
 - **Bun, simple.** One runtime, TypeScript on both sides, no build step, zero dependencies (`pg` is optional, dev-time, and retires when Bun ships `sql.listen`).
 - **The UX is the same stream.** Signals carry ops; `list()` routes them; nothing diffs.
 
@@ -40,6 +41,7 @@ EPSILON_PG_URL=postgres://epsilon:epsilon@localhost:5599/epsilon bun dev
 | `doc.ts` | The wire — one Signal class both sides; `apply()` hides the WebSocket |
 | `ui.ts` | `list()` routes membership ops; row content flows through lenses |
 | `pg.ts` | Durability, LISTEN/NOTIFY fan-out, wire adapter for the SQL auth contract |
+| `pglite.ts` | The same `Sql` seam over in-process Postgres — the embedded engine |
 | `migrate.ts` | Numbered migrations: ordered, hash-recorded, forward-only, transactional |
 | `cli.ts` | The wire from a terminal — auth-aware one-shot commands + `watch`, JSON out (humans, scripts, AIs) |
 

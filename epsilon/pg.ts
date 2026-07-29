@@ -20,10 +20,23 @@
  *   await pgSync(host, sql);      // cross-process fan-out (LISTEN/NOTIFY)
  */
 
-import { SQL } from "bun";
 import type { Host } from "./doc";
 import type { Op } from "./op";
 import type { Signal } from "./signal";
+
+/**
+ * The slice of a Postgres client epsilon actually uses. Bun's `SQL`
+ * satisfies it structurally (wire Postgres); `pglite.ts` implements it over
+ * an IN-PROCESS database. Everything in this file — and migrate.ts, and the
+ * stored functions themselves — runs unchanged on either engine.
+ */
+export interface Sql {
+  (strings: TemplateStringsArray, ...values: unknown[]): PromiseLike<any>;
+  unsafe(query: string, params?: any): PromiseLike<any>;
+  /** One session for the whole call — advisory locks are session-scoped. */
+  reserve?(): PromiseLike<any>;
+  end?(): PromiseLike<void> | void;
+}
 
 const CHANNEL = "epsilon_ops";
 
@@ -45,7 +58,7 @@ export { migrate, migrationStatus, migrationFiles } from "./migrate";
  */
 export async function pgDoc<T>(
   host: Host,
-  sql: SQL,
+  sql: Sql,
   name: string,
   empty: T,
   opts?: {
@@ -138,7 +151,7 @@ export async function pgDoc<T>(
 
 /** Bring one hosted doc up to the database's version. Idempotent — receive()
  *  drops stale versions, so overlapping calls can't double-apply. */
-async function catchUp(host: Host, sql: SQL, name: string): Promise<void> {
+async function catchUp(host: Host, sql: Sql, name: string): Promise<void> {
   let current: number;
   try { current = host.v(name); } catch { return; }        // not hosted here
   const missed = await sql`
@@ -170,7 +183,7 @@ export interface Sync {
  */
 export async function pgSync(
   host: Host,
-  sql: SQL,
+  sql: Sql,
   opts?: { ms?: number; url?: string; mode?: "listen" | "poll" },
 ): Promise<Sync> {
   const url = opts?.url ?? process.env.EPSILON_PG_URL;
@@ -278,7 +291,7 @@ function asUser(row: any): User {
 
 export async function pgAuth(
   host: Host,
-  sql: SQL,
+  sql: Sql,
   opts?: { maxAttempts?: number; windowMs?: number },
 ): Promise<void> {
   // bcrypt (cost 12) is deliberately expensive, which makes register/login a

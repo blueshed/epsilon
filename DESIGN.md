@@ -68,6 +68,17 @@ The boundary: **SQL owns composition and multi-table transactions; TS owns
 the op vocabulary, transport, and UI.** A tier uses stored functions exactly
 when the model is relational.
 
+Two ENGINES, one schema (2026-07-29): the relational tier also runs on
+EMBEDDED Postgres — PGlite (WASM, in-process) behind the same `Sql` seam
+(`epsilon/pglite.ts`). Every migration, the doc kit, and the auth contract
+run unchanged; `EPSILON_PG_DIR` selects it. The deal: ONE app process owns
+the directory — no horizontal scaling, and pgSync is unnecessary by
+construction (no sibling processes exist; the host's own broadcast reaches
+every subscriber). Outgrow it → pg_dump into a wire server, set
+`EPSILON_PG_URL`: scaling up is a config change because both engines speak
+the same schema. Measured: WASM boot ~7s (once, at start), bcrypt cost 12
+~350ms — on par with native.
+
 ## Delivered (Peter-driven, 2026-07-28 evening)
 
 1. **Server mints ids — every tier.** Clients send `add /coll/-`; the host
