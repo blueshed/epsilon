@@ -7,6 +7,16 @@ will ship.
 
 ## [Unreleased]
 
+### Added
+
+- Deploy-ready: `server.ts` honors `PORT` (PaaS routers assign it), a
+  `start` script, `railway.json` (start command + healthcheck), and a
+  README recipe for Railway's one-service deploy — volume at `/data`,
+  `EPSILON_PG_DIR=/data`, `bun add @electric-sql/pglite` in the app.
+  Found by scaffolding a real app (`bun create`) and simulating the
+  deploy: production install, `PORT` boot, CLI drive, restart-with-
+  volume durability — all verified.
+
 ## [0.2.2] — 2026-07-29
 
 ### Added
