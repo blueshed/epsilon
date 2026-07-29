@@ -7,6 +7,8 @@ will ship.
 
 ## [Unreleased]
 
+## [0.2.2] — 2026-07-29
+
 ### Added
 
 - **Embedded Postgres** (`epsilon/pglite.ts`) — the relational tier with NO
