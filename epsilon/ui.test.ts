@@ -102,7 +102,7 @@ describe("postgres to pixel (minus postgres)", () => {
     const hosted = host.doc<{ cards: Cards }>("board", { cards: two() });
     const server = Bun.serve({
       port: 0,
-      fetch: (req, srv) => host.fetch(req, srv) ?? new Response("", { status: 404 }),
+      fetch: host.fetch,
       websocket: host.websocket,
     });
     host.setServer(server);

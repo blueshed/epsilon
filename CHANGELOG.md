@@ -7,6 +7,8 @@ will ship.
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-07-29
+
 ### Added
 
 - **The doc kit** (`db/007-doc-kit.sql`) — the reusable skeleton of a
@@ -45,6 +47,10 @@ will ship.
 
 ### Fixed
 
+- Back/forward navigate boards: the client now listens for `hashchange`
+  (the hash was written but never read back), so browser history — and a
+  hand-edited `#/board:<id>` — opens the board. Pinned by a real
+  history.back()/forward() round trip in app.test.ts.
 - The client websocket URL follows the page protocol (`wss:` on HTTPS) —
   the hardcoded `ws://` was blocked as mixed content behind TLS.
 - A refused doc open (`unknown doc`, `unauthenticated`) now REJECTS
@@ -65,6 +71,12 @@ will ship.
 - Persistence muting during `hydrate`/`receive` is per-doc: a synchronous
   cascade that writes ANOTHER doc during the apply persists that doc
   normally instead of being silently skipped.
+
+### Removed
+
+- `applySql` (pg.ts) — unused since migrations became the one schema path.
+- The `mintIds` export (doc.ts) — internal to the host's write path; nothing
+  outside doc.ts used it.
 
 ### Security
 

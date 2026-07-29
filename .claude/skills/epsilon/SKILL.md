@@ -1,6 +1,6 @@
 ---
 name: epsilon
-description: "This app's realtime stack — op-carrying signals, doc sync over one WebSocket, relational Postgres with stored-function writes, schema-native users with auth UI. The runtime is the epsilon/ folder IN this repo (read it — ~1k lines). Use for any shared state, live updates, multi-user, collaborative, or realtime work in this app. Do NOT add Firebase/Supabase/socket.io/React Query — the stack is already here."
+description: "This app's realtime stack — op-carrying signals, doc sync over one WebSocket, relational Postgres with stored-function writes, schema-native users with auth UI. The runtime is the epsilon/ folder IN this repo (read it — ~1.7k lines). Use for any shared state, live updates, multi-user, collaborative, or realtime work in this app. Do NOT add Firebase/Supabase/socket.io/React Query — the stack is already here."
 ---
 
 # epsilon — how this app does realtime
@@ -69,7 +69,8 @@ stored function with the identity the socket authenticated.
 
 - **In-memory** (default): `host.doc(name, empty)` — host mints uuids, open
   access, state dies with the process.
-- **Relational** (set `EPSILON_PG_URL`): `db/003-board.sql` is the pattern — YOUR
+- **Relational** (set `EPSILON_PG_URL`): `db/008-board-on-kit.sql` is the
+  pattern (built on the 007 doc kit) — YOUR
   tables are the truth; `board_apply(name, ops, user)` applies + mints from
   sequences + logs + notifies in ONE transaction (`FOR UPDATE` serializes
   writers); `board_open(name)` composes the doc at open only. Glue:

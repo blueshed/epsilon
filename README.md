@@ -8,7 +8,7 @@ cd my-app && bun dev     # two tabs, type in one, watch the other
 ```
 
 **There is no library to install.** The runtime is the [`epsilon/`](epsilon/)
-folder in your app — ~1k lines of TypeScript you own, with its own tests.
+folder in your app — ~1.7k lines of TypeScript you own, with its own tests.
 `bun test` verifies your stack, in your repo, forever. Edit it; it's yours.
 
 ## The knowns
@@ -23,7 +23,7 @@ folder in your app — ~1k lines of TypeScript you own, with its own tests.
 - [`server.ts`](server.ts) — the authority. In-memory out of the box; Postgres (with auth + ownership) via one env var.
 - [`index.ts`](index.ts) — the pixels. A remote doc is a signal whose writes go over the wire; the echo renders them.
 - [`index.html`](index.html) / [`index.css`](index.css) — Bun serves and bundles them.
-- [`db/`](db/) — your schema: numbered migrations, applied at boot, forward-only. `003-board.sql` is the worked relational doc type — tables, composition, transactional writes, ownership.
+- [`db/`](db/) — your schema: numbered migrations, applied at boot, forward-only. `007-doc-kit.sql` is the reusable skeleton of a relational doc type; `008-board-on-kit.sql` is the worked example — tables, composition, transactional writes, ownership.
 
 ```sh
 bun run db:up            # compose Postgres (or use your own)

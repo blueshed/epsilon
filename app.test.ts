@@ -90,6 +90,19 @@ describe("the app, end to end", () => {
       () => view.evaluate<string>("document.querySelector('#log').textContent"),
       (t) => t.includes("first step"),
     );
+
+    // The hash is navigation truth: back returns to the shared board,
+    // forward to mine — real history, no reload.
+    await view.evaluate("history.back()");
+    await waitFor(
+      () => view.evaluate<string>("document.querySelector('#board-name').textContent"),
+      (t) => t === "main",
+    );
+    await view.evaluate("history.forward()");
+    await waitFor(
+      () => view.evaluate<string>("document.querySelector('#board-name').textContent"),
+      (t) => t === "my project",
+    );
     const [myBoard] = await db`SELECT b.id, b.owner_id FROM boards b JOIN users u ON u.id = b.owner_id WHERE b.name = ${"my project"}`;
     expect(myBoard).toBeDefined();                                 // owned, in the tables
     const [myCard] = await db`SELECT text FROM cards WHERE board_id = ${myBoard.id}`;

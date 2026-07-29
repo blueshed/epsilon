@@ -41,8 +41,10 @@ const remote = connect(
 // --- the board on screen ---------------------------------------------------
 
 let disposeBoard: Dispose | null = null;
+let currentBoard: string | null = null;
 
 function openBoard(name: string): void {
+  currentBoard = name;
   disposeBoard?.();
   log.replaceChildren();
   location.hash = `#/${name}`;
@@ -71,6 +73,14 @@ function openBoard(name: string): void {
 }
 
 const hashBoard = () => /^#\/(board:\d+)$/.exec(location.hash)?.[1];
+
+// The hash is navigation truth: openBoard writes it; back/forward (and a
+// hand-edited URL) land here. Only a real change opens — openBoard's own
+// hash write echoes back with currentBoard already set.
+addEventListener("hashchange", () => {
+  const name = hashBoard() ?? "board:1";
+  if (name !== currentBoard) openBoard(name);
+});
 
 // --- your boards (authenticated mode) --------------------------------------
 

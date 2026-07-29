@@ -14,10 +14,10 @@
  * Uses Bun's built-in SQL client — zero dependencies, one language.
  *
  *   const sql = new SQL(process.env.EPSILON_PG_URL!);
- *   await ensureSchema(sql);
+ *   await migrate(sql);           // db/*.sql, in order, hash-recorded
  *   const board = await pgDoc<Board>(host, sql, "board", empty);
  *   await pgAuth(host, sql);      // register/login/authenticate/logout
- *   await pgListen(host, sql);    // cross-process fan-out (LISTEN/NOTIFY)
+ *   await pgSync(host, sql);      // cross-process fan-out (LISTEN/NOTIFY)
  */
 
 import { SQL } from "bun";
@@ -26,11 +26,6 @@ import type { Op } from "./op";
 import type { Signal } from "./signal";
 
 const CHANNEL = "epsilon_ops";
-
-/** Run a whole SQL file in one call (multi-statement, plpgsql-safe). */
-export async function applySql(sql: SQL, file: URL | string): Promise<void> {
-  await sql.unsafe(await Bun.file(file).text());
-}
 
 export { migrate, migrationStatus, migrationFiles } from "./migrate";
 
