@@ -34,6 +34,20 @@ will ship.
   boards. Host `open`/pgDoc `guard` hooks may now be async, so the open
   gate is `SELECT board_may(...)` — membership changes bite on the next
   open. Cards gain a `done` boolean (dispatch + composition).
+- **Presence** — being on a board IS watching its presence doc.
+  `presence:board:<id>` is an ordinary in-memory doc keyed by socket,
+  maintained by the new host hooks `onSubscribe`/`onUnsubscribe` (fired on
+  a socket's first successful open — after the snapshot, so the new watcher
+  sees itself appear as a contiguous op — and on release or death) and
+  evicted with its last watcher. The template shows "here: …" under the
+  board name: guests before auth, names after. Ephemeral and per-process
+  by design.
+
+### Fixed
+
+- The in-memory app test waits for the first snapshot before typing —
+  keystrokes racing module evaluation could native-submit the form and
+  navigate away (an intermittent CI-class flake).
 
 ## [0.2.0] — 2026-07-29
 

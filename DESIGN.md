@@ -178,6 +178,16 @@ must hold ONE reserved connection.
   already-subscribed socket keeps receiving broadcasts until it closes the
   doc (the per-subscriber limit above).
 
+## Presence — being there is watching a doc
+
+`presence:board:<id>` is an ordinary in-memory doc keyed by socket: the
+host's `onSubscribe`/`onUnsubscribe` hooks (a socket's first successful
+open; its release or death) write watchers in and out, and the doc evicts
+with its last watcher. Hooks fire AFTER the snapshot send, so a new
+subscriber sees itself appear as a contiguous op. Ephemeral and
+PER-PROCESS by design — nothing persists, nothing fans out across
+processes.
+
 ## Open items
 
 - Doc GC covers the unwatched case; a deleted doc that still has watchers

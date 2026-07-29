@@ -94,6 +94,10 @@ front — mirror only into docs you pre-locked.
 - Dynamic docs: `host.docs(prefix, (name, userId) => ...)` — the factory sees
   the asking user; throw `unknown doc` BEFORE hosting/seeding so probes cost
   nothing (see server.ts's `mine:` factory).
+- Presence: `presence:board:<id>` is an in-memory doc the host's
+  `onSubscribe`/`onUnsubscribe` hooks maintain (see server.ts) — being
+  present IS watching the doc; it evicts with its last watcher. Ephemeral,
+  per-process. Follow this shape for any who's-here / typing / cursor state.
 
 ## Rules — in order of importance
 

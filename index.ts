@@ -16,6 +16,7 @@ const boardName = document.getElementById("board-name")!;
 const log = document.getElementById("log")!;
 const share = document.getElementById("share")!;
 const membersUl = document.getElementById("members")!;
+const who = document.getElementById("who")!;
 
 const remote = connect(
   // wss on https — a hardcoded ws:// is blocked as mixed content behind TLS.
@@ -44,6 +45,7 @@ const remote = connect(
 
 let disposeBoard: Dispose | null = null;
 let boardDoc: DocHandle<Board> | null = null;
+let presenceDoc: DocHandle<Record<string, { name: string }>> | null = null;
 let currentBoard: string | null = null;
 
 function openBoard(name: string): void {
@@ -55,13 +57,23 @@ function openBoard(name: string): void {
   // (refcount), a switch lets the old doc close — the server unsubscribes
   // and can evict it. No leak per visited board.
   const prev = boardDoc;
+  const prevPresence = presenceDoc;
   const doc = (boardDoc = remote.doc<Board>(name));
+  // Presence: watching this doc IS being on the board — the server's
+  // subscribe hooks write us in and out.
+  const pres = (presenceDoc = remote.doc<Record<string, { name: string }>>(`presence:${name}`));
   prev?.close();
+  prevPresence?.close();
   const cards = doc.at<Record<string, Card>>("/cards") as OpSignal<Record<string, Card> | null>;
   const members = doc.at<Record<string, Member>>("/members") as OpSignal<Record<string, Member> | null>;
   membersUl.replaceChildren();
   pushDisposeScope();
   effect(() => { boardName.textContent = doc.get()?.name ?? ""; });
+  effect(() => {
+    const here = pres.get();
+    const names = here ? Object.values(here).map((p) => p?.name ?? "?") : [];
+    who.textContent = names.length ? `here: ${names.join(", ")}` : "";
+  });
   log.appendChild(
     list(cards, (card) => {
       const li = document.createElement("li");

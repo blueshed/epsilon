@@ -125,6 +125,14 @@ export function createHost(opts?: {
   path?: string;
   /** When set, open/ops require ws.data.user (set by an auth method). */
   requireAuth?: boolean;
+  /** Fired after a socket's FIRST successful open of a doc (snapshot already
+   *  sent, so ops applied here reach the new subscriber in order). Presence
+   *  is built on this pair — see server.ts. */
+  onSubscribe?: (doc: string, ws: any) => void;
+  /** Fired when a socket releases a doc — close action or socket death —
+   *  after any eviction, so writes back into an unwatched doc can check
+   *  host.names() first. */
+  onUnsubscribe?: (doc: string, ws: any) => void;
 }): Host {
   const path = opts?.path ?? "/ws";
   // muted: this entry's ops came FROM storage (hydrate/receive), so its
@@ -173,6 +181,8 @@ export function createHost(opts?: {
     try { ws.unsubscribe(name); } catch { /* socket already gone */ }
     const entry = docs.get(name);
     if (entry && --entry.subs <= 0 && entry.dynamic) docs.delete(name);
+    try { opts?.onUnsubscribe?.(name, ws); }
+    catch (err) { console.error("[epsilon/doc] onUnsubscribe hook threw:", err); }
   }
 
   return {
@@ -304,7 +314,8 @@ export function createHost(opts?: {
           }
           ws.subscribe(msg.doc);
           // Count each socket once — a gap-triggered re-open isn't a new sub.
-          if (!ws.data.docs.has(msg.doc)) {
+          const isNew = !ws.data.docs.has(msg.doc);
+          if (isNew) {
             ws.data.docs.add(msg.doc);
             entry.subs++;
           }
@@ -313,6 +324,11 @@ export function createHost(opts?: {
             doc: msg.doc, v: entry.v,
             ops: [{ op: "replace", path: "", value: snapshot }],
           } satisfies ServerMsg));
+          // After the send: ops the hook applies follow the snapshot in order.
+          if (isNew) {
+            try { opts?.onSubscribe?.(msg.doc, ws); }
+            catch (err) { console.error("[epsilon/doc] onSubscribe hook threw:", err); }
+          }
         } else if (msg.action === "ops") {
           try {
             if (entry.write) {

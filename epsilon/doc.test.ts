@@ -238,6 +238,52 @@ describe("dynamic docs — the factory sees the asking identity", () => {
   });
 });
 
+describe("presence — subscribe hooks drive an ephemeral doc (server.ts's pattern)", () => {
+  test("watchers appear on open, vanish on socket death, and the doc dies with its last watcher", async () => {
+    type Here = Record<string, { name: string }>;
+    let sid = 0;
+    let h!: ReturnType<typeof createHost>;
+    const presenceOf = (name: string) =>
+      h.names().includes(name) ? h.doc<Here>(name, {}) : null;
+    h = createHost({
+      onSubscribe(doc, ws) {
+        if (!doc.startsWith("presence:")) return;
+        ws.data.sid ??= ++sid;
+        presenceOf(doc)?.apply([{ op: "add", path: `/${ws.data.sid}`, value: { name: ws.data.user?.name ?? "guest" } }]);
+      },
+      onUnsubscribe(doc, ws) {
+        if (!doc.startsWith("presence:") || !ws.data?.sid) return;
+        presenceOf(doc)?.apply([{ op: "remove", path: `/${ws.data.sid}` }]);
+      },
+    });
+    h.docs("presence:", (name) => { h.doc(name, {}); });
+    const srv = Bun.serve({
+      port: 0,
+      fetch: (req, s) => h.fetch(req, s) ?? new Response("", { status: 404 }),
+      websocket: h.websocket,
+    });
+    h.setServer(srv);
+    const wsUrl = `ws://localhost:${srv.port}${h.path}`;
+
+    const a = connect(wsUrl);
+    const b = connect(wsUrl);
+    remotes.push(a);
+    const pa = a.doc<Here>("presence:room");
+    const pb = b.doc<Here>("presence:room");
+    await Promise.all([pa.ready, pb.ready]);
+    // Both see both — including themselves, added AFTER their snapshot.
+    await until(() => Object.keys(pa.peek() ?? {}).length === 2);
+    await until(() => Object.keys(pb.peek() ?? {}).length === 2);
+
+    b.close();                     // socket death removes b's entry
+    await until(() => Object.keys(pa.peek() ?? {}).length === 1);
+
+    pa.close();                    // last watcher — the doc evicts entirely
+    await until(() => !h.names().includes("presence:room"));
+    srv.stop(true);
+  });
+});
+
 describe("persistence muting is per-doc", () => {
   test("a cascade writing doc B during doc A's receive still persists B", () => {
     const h = createHost();
