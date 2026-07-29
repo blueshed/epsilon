@@ -35,8 +35,12 @@ const remote = connect(
     },
     onError(_doc, error) {
       // A requireAuth host refuses docs until an auth method vouches for us.
-      if (error === "unauthenticated") authDialog.showModal();
-      else console.error("[app]", error);
+      if (error === "unauthenticated") {
+        if (!authDialog.open) {
+          authDialog.showModal();
+          void offerPasskeys();   // autofill offers a passkey IF the browser holds one
+        }
+      } else console.error("[app]", error);
     },
   },
 );
@@ -197,10 +201,20 @@ let mineFor: number | string | null = null;
 
 function afterAuth(user: { id: number | string }): void {
   authDialog.close();
+  if (supported) addPasskeyBtn.hidden = false;
+  signoutBtn.hidden = false;
   if (mineFor === user.id) return;  // reconnect — the docs re-open themselves
   mineFor = user.id;
   showMine(user.id);
 }
+
+const signoutBtn = document.getElementById("signout") as HTMLButtonElement;
+signoutBtn.onclick = async () => {
+  const token = localStorage.getItem("epsilon-token");
+  localStorage.removeItem("epsilon-token");
+  try { if (token) await remote.call("logout", { token }); } catch { /* session already gone */ }
+  location.reload();   // clean teardown — docs close with the page; the gate meets the next load
+};
 
 async function auth(method: "login" | "register") {
   const params = {
@@ -218,6 +232,113 @@ async function auth(method: "login" | "register") {
 }
 document.getElementById("auth-login")!.onclick = (e) => { e.preventDefault(); auth("login"); };
 document.getElementById("auth-register")!.onclick = (e) => { e.preventDefault(); auth("register"); };
+
+// --- passkeys — passwordless sign-in over the same wire ---------------------
+// The server runs the ceremony (epsilon/passkey.ts); this side only ferries
+// bytes between navigator.credentials and remote.call, base64url both ways.
+
+const toB64u = (b: ArrayBuffer) =>
+  btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+const fromB64u = (s: string) =>
+  Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0));
+
+const passkeyBtn = document.getElementById("auth-passkey") as HTMLButtonElement;
+const addPasskeyBtn = document.getElementById("add-passkey") as HTMLButtonElement;
+const supported = !!window.PublicKeyCredential;
+passkeyBtn.hidden = !supported;
+
+async function finishAssertion(cred: PublicKeyCredential): Promise<void> {
+  const r = cred.response as AuthenticatorAssertionResponse;
+  const { token, user } = await remote.call<{ token: string; user: { id: number } }>("passkey_login_finish", {
+    id: cred.id,
+    clientDataJSON: toB64u(r.clientDataJSON),
+    authenticatorData: toB64u(r.authenticatorData),
+    signature: toB64u(r.signature),
+    userHandle: r.userHandle ? toB64u(r.userHandle) : undefined,
+  });
+  localStorage.setItem("epsilon-token", token);
+  afterAuth(user);
+}
+
+// Conditional UI: while the dialog is open, the email field's AUTOFILL
+// offers a passkey — but only when the browser actually holds one for this
+// site, so a first run never meets an empty passkey sheet. Aborted when
+// the dialog closes or the explicit button takes over.
+let conditionalAbort: AbortController | null = null;
+async function offerPasskeys(): Promise<void> {
+  if (!supported) return;
+  try {
+    if (!(await PublicKeyCredential.isConditionalMediationAvailable?.())) return;
+  } catch { return; }
+  conditionalAbort?.abort();
+  const ac = (conditionalAbort = new AbortController());
+  try {
+    const o = await remote.call<{ challenge: string }>("passkey_login_begin", {});
+    const cred = (await navigator.credentials.get({
+      mediation: "conditional",
+      signal: ac.signal,
+      publicKey: { challenge: fromB64u(o.challenge), allowCredentials: [], userVerification: "preferred" },
+    })) as PublicKeyCredential | null;
+    if (cred) await finishAssertion(cred);
+  } catch { /* aborted, dismissed, or superseded — the other doors still work */ }
+}
+authDialog.addEventListener("close", () => conditionalAbort?.abort());
+
+passkeyBtn.onclick = async (e) => {
+  e.preventDefault();
+  conditionalAbort?.abort();
+  try {
+    // An email in the form narrows to that account; empty = the browser
+    // offers whatever resident passkeys it holds for this site.
+    const email = (document.getElementById("auth-email") as HTMLInputElement).value.trim();
+    const o = await remote.call<{ challenge: string; allowCredentials: { id: string }[] }>(
+      "passkey_login_begin", email ? { email } : {});
+    const cred = (await navigator.credentials.get({
+      publicKey: {
+        challenge: fromB64u(o.challenge),
+        allowCredentials: o.allowCredentials.map((c) => ({ type: "public-key" as const, id: fromB64u(c.id) })),
+        userVerification: "preferred",
+      },
+    })) as PublicKeyCredential | null;
+    if (cred) await finishAssertion(cred);
+  } catch (err) {
+    authError.textContent = String(err instanceof Error ? err.message : err);
+  }
+};
+
+addPasskeyBtn.onclick = async () => {
+  try {
+    const o = await remote.call<{
+      challenge: string;
+      rp: { name: string };
+      user: { id: string; name: string; displayName: string };
+      pubKeyCredParams: PublicKeyCredentialParameters[];
+      authenticatorSelection: AuthenticatorSelectionCriteria;
+    }>("passkey_register_begin");
+    const cred = (await navigator.credentials.create({
+      publicKey: {
+        challenge: fromB64u(o.challenge),
+        rp: o.rp,
+        user: { id: fromB64u(o.user.id), name: o.user.name, displayName: o.user.displayName },
+        pubKeyCredParams: o.pubKeyCredParams,
+        authenticatorSelection: o.authenticatorSelection,
+        attestation: "none",
+      },
+    })) as PublicKeyCredential | null;
+    if (!cred) return;
+    const r = cred.response as AuthenticatorAttestationResponse;
+    await remote.call("passkey_register_finish", {
+      id: cred.id,
+      clientDataJSON: toB64u(r.clientDataJSON),
+      attestationObject: toB64u(r.attestationObject),
+      transports: r.getTransports?.() ?? undefined,
+    });
+    addPasskeyBtn.textContent = "passkey added ✓";
+    addPasskeyBtn.disabled = true;
+  } catch (err) {
+    addPasskeyBtn.textContent = String(err instanceof Error ? err.message : err);
+  }
+};
 
 // --- boot ------------------------------------------------------------------
 

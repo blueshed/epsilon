@@ -4,6 +4,7 @@
 //
 // Exported as a factory (bun-route convention) so tests bind port 0 and
 // inject their own database.
+import { unlinkSync } from "node:fs";
 import index from "./index.html";
 import { createHost, type Host, type Signal } from "./epsilon";
 import type { Sql } from "./epsilon/pg";
@@ -58,6 +59,10 @@ export async function startServer(opts: StartOpts = {}) {
     await migrate(db, { dir: opts.dbDir ?? "db" });    // db/*.sql, in order, hash-recorded
     await db`SELECT epsilon_prune()`;                  // bounded tables: old ops, dead sessions
     await pgAuth(host, db);                            // wire adapter over the SQL contract
+    // Passkeys: register one while signed in, sign in with it ever after.
+    // Ceremonies bind to the socket's own origin; pin { origins } in prod.
+    const { pgPasskey } = await import("./epsilon/passkey");
+    pgPasskey(host, db, { rpName: "epsilon-app" });
 
     // Docs are DYNAMIC — names are data, hosted on first open.
     // board:<id> — public when owner_id is NULL (the seeded board:1),
@@ -134,11 +139,21 @@ export async function startServer(opts: StartOpts = {}) {
 // pool and resets doc versions under connected clients.
 if (import.meta.main) {
   const g = globalThis as { __epsilon_app?: Promise<Awaited<ReturnType<typeof startServer>>> };
-  g.__epsilon_app ??= startServer().then((app) => {
+  g.__epsilon_app ??= startServer().then(async (app) => {
     const mode = process.env.EPSILON_PG_URL ? "relational Postgres + auth"
       : app.sql ? "embedded Postgres (PGlite) + auth"
       : "in-memory, open";
     console.log(`epsilon-app → http://localhost:${app.server.port} (${mode})`);
+    // The pid file: `bun run stop` (or any script) knows what to kill.
+    // Real boots only — tests spawn many servers and must not fight over
+    // it. Removed on a clean exit; a crash can leave it stale.
+    await Bun.write(".epsilon.pid", `${process.pid}\n`);
+    const bye = () => {
+      try { unlinkSync(".epsilon.pid"); } catch { /* already gone */ }
+      process.exit(0);
+    };
+    process.on("SIGINT", bye);
+    process.on("SIGTERM", bye);
     return app;
   });
 }

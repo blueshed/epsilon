@@ -7,6 +7,36 @@ will ship.
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-07-29
+
+### Added
+
+- **Passkeys — passwordless sign-in by default** (`db/002-auth.sql` +
+  `epsilon/passkey.ts`, zero dependencies). Register with a password once
+  (the identity anchor, and the CLI's door), click "add a passkey" while
+  signed in, and sign in without a password ever after — Touch ID, Windows
+  Hello, security keys. The boundary rule applied to auth: SQL owns
+  identity and state (credentials beside users and sessions; the clone-
+  detecting counter policy inside `credential_use`), TS owns the ceremony
+  — pgcrypto has no ECDSA, so WebCrypto verifies, and the attestation
+  CBOR is read by a ~60-line vendored decoder. Challenges live on the
+  socket (single-use, die with the connection — no table); ceremonies
+  bind to the socket's own Origin by default, `pgPasskey(host, sql,
+  { origins })` pins it in production. The dialog gains "use a passkey"
+  (an email narrows to that account; empty offers the browser's resident
+  keys) plus CONDITIONAL UI: while the dialog is open, the email field's
+  autofill offers a passkey only when the browser actually holds one — a
+  first run never meets the empty cross-device sheet. The header gains a
+  quiet "sign out" (the `logout` method existed; the button didn't).
+  Pinned by a SOFTWARE authenticator suite — real CBOR
+  attestations, DER-wrapped P-256 assertions, the full tamper matrix
+  (challenge, origin, signature, replay, counter regression) — no browser
+  required. TOTP was considered and declined: passkeys supersede
+  password+TOTP, and pgcrypto-hmac TOTP can be a later recipe if wanted.
+- **`.epsilon.pid`** — a real boot (`bun dev`, production) writes its pid
+  and removes it on SIGINT/SIGTERM; `bun run stop` kills exactly that
+  process. Tests spawn many servers and deliberately don't touch it.
+
 ## [0.3.2] — 2026-07-29
 
 ### Security

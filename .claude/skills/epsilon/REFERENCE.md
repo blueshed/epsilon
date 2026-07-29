@@ -41,6 +41,21 @@ day-zero files pre-1.0 — apps never edit applied files.)
 the wire adapter. To change auth policy, write a migration that replaces
 the function — no runtime change.
 
+**Passkeys** (`db/002-auth.sql` + `epsilon/passkey.ts`): the boundary
+rule applied to auth — SQL owns identity and state (credentials beside
+users/sessions, counter policy in `credential_use`), TS owns the CEREMONY
+(pgcrypto has no ECDSA; WebCrypto verifies). Zero dependencies — the CBOR
+reader is vendored. `pgPasskey(host, sql, { rpName, origins? })` registers
+four begin/finish methods; challenges live ON THE SOCKET (single-use, die
+with the connection — no table). Ceremonies bind to the socket's own
+Origin by default; pin `{ origins: ["https://app.example"] }` in
+production. Flow: password registers the account (the identity anchor and
+the CLI's door), "add a passkey" while signed in, passwordless sign-in
+ever after. The CLI can't run WebAuthn — passkey-only users paste a
+browser-minted token into `EPSILON_TOKEN`. HTTPS required (localhost
+exempt). Tested by a SOFTWARE authenticator (passkey.test.ts) — no
+browser needed to pin the contract.
+
 ## Ownership — users mean something
 
 `board_may(board, user)` gates BOTH `board_open` (NULL for refused

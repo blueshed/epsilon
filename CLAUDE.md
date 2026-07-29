@@ -31,7 +31,8 @@ bun run db:up      # compose Postgres on :5599
 bun run test:pg    # durability, fan-out, users (needs db:up)
 bun run check      # tsc --noEmit, strict
 bun run ci         # db up → check + everything → db down
-bun dev            # the app, in-memory
+bun dev            # the app, in-memory (writes .epsilon.pid)
+bun run stop       # kill the server the pid file points at
 ```
 
 ## Testing in a Claude container (no Docker)

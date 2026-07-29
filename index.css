@@ -41,14 +41,30 @@ body {
 }
 
 /* Wordmark: small, quiet, the glyph carries the accent. */
+header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin: 0 0 2rem;
+}
 h1 {
   font-size: 0.9rem;
   font-weight: 500;
   letter-spacing: 0.08em;
-  margin: 0 0 2rem;
+  margin: 0;
   color: var(--muted);
 }
 h1::before { content: "ε "; color: var(--accent); font-weight: 700; }
+#signout {
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 0.78rem;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0;
+}
+#signout:hover { color: var(--danger); }
 
 /* The board title is EDITABLE (blur or Enter renames) — say so on hover. */
 #board-name {
@@ -153,6 +169,17 @@ ul button {
 ul button:hover { color: var(--danger); }
 
 #mine { margin-bottom: 2rem; }
+#add-passkey {
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 0.78rem;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0;
+}
+#add-passkey:hover:enabled { color: var(--accent); }
+#add-passkey:disabled { color: var(--accent); cursor: default; }
 #boards li span { cursor: pointer; flex: 1; }
 #boards li span:hover { color: var(--accent); }
 
@@ -181,7 +208,6 @@ dialog input { margin-bottom: 0.6rem; }
 dialog button {
   font: inherit;
   padding: 0.5rem 1rem;
-  margin-right: 0.5rem;
   border: 1px solid var(--line);
   border-radius: 6px;
   background: var(--paper);
@@ -189,6 +215,11 @@ dialog button {
   cursor: pointer;
 }
 dialog button:hover { border-color: var(--accent); color: var(--accent); }
+.auth-actions { display: flex; gap: 0.5rem; }
+.auth-actions button { flex: 1; }
+/* The passwordless door: full-width, beneath the password pair. */
+#auth-passkey { display: block; width: 100%; margin-top: 0.5rem; color: var(--accent); }
+#auth-passkey[hidden] { display: none; }
 #auth-error {
   margin: 0.1rem 0 0.6rem;
   min-height: 1.3em;

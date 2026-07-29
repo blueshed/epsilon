@@ -8,11 +8,15 @@
     <link rel="stylesheet" href="./index.css" />
   </head>
   <body>
-    <h1>epsilon</h1>
+    <header>
+      <h1>epsilon</h1>
+      <button id="signout" hidden>sign out</button>
+    </header>
 
     <section id="mine" hidden>
       <form id="board-form"><input id="new-board" placeholder="new board name, press enter" /></form>
       <ul id="boards"></ul>
+      <button id="add-passkey" hidden>add a passkey — sign in without a password next time</button>
     </section>
 
     <h2 id="board-name"></h2>
@@ -30,11 +34,14 @@
       <form method="dialog">
         <h2>sign in</h2>
         <input id="auth-name" placeholder="name (register only)" autocomplete="name" />
-        <input id="auth-email" type="email" placeholder="email" autocomplete="email" />
+        <input id="auth-email" type="email" placeholder="email" autocomplete="username webauthn" />
         <input id="auth-password" type="password" placeholder="password" autocomplete="current-password" />
         <p id="auth-error"></p>
-        <button id="auth-login">log in</button>
-        <button id="auth-register">register</button>
+        <div class="auth-actions">
+          <button id="auth-login">log in</button>
+          <button id="auth-register">register</button>
+        </div>
+        <button id="auth-passkey" hidden>use a passkey</button>
       </form>
     </dialog>
 

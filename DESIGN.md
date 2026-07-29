@@ -253,6 +253,34 @@ Its §1 was a live security defect; all three rules below are its asks.
   copy deep-equals compose-from-tables after every op shape a board
   supports.
 
+## Passkeys — the boundary rule, applied to auth (2026-07-29)
+
+Browsers ship passwordless (WebAuthn); epsilon supports it by default with
+ZERO dependencies. The split honors the existing boundary: SQL owns
+identity and state — `credentials` beside users and sessions (db/002),
+counter policy inside `credential_use` — and TS owns the CEREMONY
+(`epsilon/passkey.ts`): pgcrypto has no ECDSA, so WebCrypto verifies, the
+way TS already owns transport. The attestation CBOR needs only four fixed
+shapes — a ~60-line vendored reader, not a package.
+
+Decisions:
+- **Passkey-first, password-fallback.** The password stays as the
+  register-time identity anchor and the CLI's door (a terminal has no
+  authenticator; `EPSILON_TOKEN` takes a browser-minted session). A
+  passkey is added while signed in and signs you in ever after.
+- **Challenges live on the socket** — single-use, per-connection,
+  ephemeral. The wire is the session context; no challenge table.
+- **Ceremonies bind to the socket's own Origin** by default (the browser's
+  own scoping is the phishing resistance); `origins` pins it in
+  production. The RP ID is that origin's hostname — never sent, browsers
+  default to the same.
+- **TOTP declined**: pgcrypto's hmac() could do RFC 6238 in pure SQL, but
+  passkeys supersede password+TOTP — yesterday's second factor fails the
+  line budget once tomorrow's first factor is in.
+- The contract is pinned by a SOFTWARE authenticator (passkey.test.ts
+  mints P-256 keys, builds CBOR attestations, DER-wraps signatures) — the
+  ceremony is tested without a browser, like everything else.
+
 ## Open items
 
 - Doc GC covers the unwatched case; a deleted doc that still has watchers

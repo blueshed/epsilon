@@ -13,7 +13,7 @@ folder in your app — ~1.7k lines of TypeScript you own, with its own tests.
 
 ## The knowns
 
-- **Users are first-class.** `users` and `sessions` ship in the schema; register/login work on day one.
+- **Users are first-class.** `users` and `sessions` ship in the schema; register/login work on day one — and so do **passkeys**: add one while signed in, sign in without a password ever after (WebAuthn, zero dependencies — the ceremony is ~350 lines you own, `epsilon/passkey.ts`).
 - **Multi-user is in the box.** Share a board by email — it appears in the member's own list in the same transaction; presence shows who's looking; unwatched docs evict and re-host on demand.
 - **Postgres, db-first.** Migrations in `db/` (numbered, hash-recorded, forward-only). Set `EPSILON_PG_URL` and the doc is durable — state and versions survive restarts. Identity is minted by the database and carried everywhere, never re-derived.
 - **Undo is in the schema.** `doc_ops` records each write's inverse; `remote.call("undo", { doc })` reverts *your* last one — refused, never clobbered, when someone wrote after you. The audit log and the undo log are the same table.

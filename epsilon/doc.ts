@@ -244,13 +244,15 @@ export function createHost(opts?: {
 
     fetch(req: Request, srv: any) {
       const url = new URL(req.url);
-      if (url.pathname === path && srv.upgrade(req)) return undefined;
+      // The socket remembers where it came from — passkey ceremonies bind
+      // to this origin by default (epsilon/passkey.ts).
+      if (url.pathname === path && srv.upgrade(req, { data: { origin: req.headers.get("origin") } })) return undefined;
       return new Response("not found", { status: 404 });
     },
 
     websocket: {
       open(ws: any) {
-        ws.data ??= {};
+        ws.data ??= {};                     // upgrade data (origin) rides along
         ws.data.docs = new Set<string>();   // this socket's subscriptions
       },
       close(ws: any) {
