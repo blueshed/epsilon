@@ -7,6 +7,16 @@ will ship.
 
 ## [Unreleased]
 
+### Changed
+
+- **Migrations squashed to day-zero truth** (pre-1.0, no deployed
+  databases): `db/` is now 001 core, 002 auth, 003 the doc kit, 004
+  housekeeping, 005 the app's doc types (board/mine/sharing, final form) —
+  five files instead of nine, no superseded function versions replayed.
+  The development narrative lives in git and DESIGN.md. Databases that
+  applied the old files upgrade cleanly: the renamed files re-apply
+  idempotently; orphaned ledger rows are ignored by the runner.
+
 ### Added
 
 - Deploy-ready: `server.ts` honors `PORT` (PaaS routers assign it);
