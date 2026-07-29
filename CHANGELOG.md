@@ -7,6 +7,15 @@ will ship.
 
 ## [Unreleased]
 
+### Fixed
+
+- CI: the app tests hung at the default 5s test timeout — ubuntu-24.04
+  runners restrict unprivileged user namespaces (AppArmor), which kills
+  Chrome's sandbox at launch and stalls `Bun.WebView`. The workflow now
+  wraps Chrome with `--no-sandbox` (the container recipe from CLAUDE.md,
+  applied to CI), and `test:app` runs with a 30s per-test timeout — cold
+  Chrome plus the full auth flow doesn't fit in 5s on a slow runner.
+
 ## [0.2.1] — 2026-07-29
 
 ### Added

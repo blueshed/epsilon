@@ -36,6 +36,14 @@ jobs:
       - run: bun run test
       - run: bun run test:migrate
       - run: bun run test:pg
+      # ubuntu-24.04 restricts unprivileged user namespaces (AppArmor), which
+      # kills Chrome's sandbox at launch and hangs Bun.WebView. Same cure as
+      # the container recipe in CLAUDE.md: wrap Chrome with --no-sandbox —
+      # fine in CI, where the whole runner is disposable.
+      - name: Wrap Chrome without its sandbox
+        run: |
+          printf '#!/bin/sh\nexec /usr/bin/google-chrome --no-sandbox "$@"\n' | sudo tee /usr/local/bin/chrome-no-sandbox >/dev/null
+          sudo chmod +x /usr/local/bin/chrome-no-sandbox
       - run: bun run test:app
         env:
-          BUN_CHROME_PATH: /usr/bin/google-chrome # preinstalled on the runner
+          BUN_CHROME_PATH: /usr/local/bin/chrome-no-sandbox
