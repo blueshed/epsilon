@@ -74,10 +74,22 @@ function openBoard(name: string): void {
     const names = here ? Object.values(here).map((p) => p?.name ?? "?") : [];
     who.textContent = names.length ? `here: ${names.join(", ")}` : "";
   });
+  // Each row shows all three verbs: the checkbox REPLACES /done, the text
+  // rides the lens, ✕ REMOVES the card. No local mutation — echoes render.
   log.appendChild(
-    list(cards, (card) => {
+    list(cards, (card, id) => {
       const li = document.createElement("li");
-      li.appendChild(text(card.map((c) => c?.text)));
+      const done = document.createElement("input");
+      done.type = "checkbox";
+      effect(() => { done.checked = !!card.get()?.done; });
+      done.onchange = () => card.at("/done").set(done.checked);
+      const label = document.createElement("span");
+      label.appendChild(text(card.map((c) => c?.text)));
+      effect(() => { label.style.textDecoration = card.get()?.done ? "line-through" : ""; });
+      const del = document.createElement("button");
+      del.textContent = "✕";
+      del.onclick = () => cards.apply([{ op: "remove", path: `/${id}` }]);
+      li.append(done, " ", label, " ", del);
       return li;
     }),
   );
@@ -116,6 +128,18 @@ function openBoard(name: string): void {
     // No local append — the echo (with the server-minted id) renders it.
     cards.apply([{ op: "add", path: "/-", value: { text: input.value } }]);
     input.value = "";
+  };
+
+  // Rename in place: edit the title, blur (or Enter) sends one replace op.
+  // The echo — and its mirror into every mine list — renders the change.
+  boardName.contentEditable = "true";
+  boardName.onblur = () => {
+    const v = boardName.textContent?.trim();
+    if (v && v !== doc.peek()?.name) doc.at<string>("/name").set(v);
+    else boardName.textContent = doc.peek()?.name ?? "";
+  };
+  boardName.onkeydown = (e) => {
+    if (e.key === "Enter") { e.preventDefault(); boardName.blur(); }
   };
 }
 

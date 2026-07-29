@@ -133,6 +133,28 @@ describe("the app, end to end", () => {
     expect(Number(audit.by_user)).toBe(Number(user.id));          // the log is the audit
     expect(audit.ops[0].path).toBe(`/cards/${row.id}`);           // sequence id, resolved
 
+    // The OTHER two verbs, through the UI. Checkbox → replace /done:
+    await view.click("#log li input");
+    await waitFor(
+      async () => (await db`SELECT done FROM cards WHERE board_id = ${myBoard.id}`)[0]?.done as boolean,
+      (d) => d === true,
+    );
+    // ✕ → remove; the row leaves the table AND the pixels.
+    await view.click("#log li button");
+    await waitFor(
+      async () => Number((await db`SELECT count(*) AS n FROM cards WHERE board_id = ${myBoard.id}`)[0]!.n),
+      (n) => n === 0,
+    );
+    // Rename in place → replace /name; the mirror renames it in the mine
+    // list too — two docs, one transaction, both on screen.
+    await view.evaluate(
+      "(() => { const h = document.querySelector('#board-name'); h.textContent = 'renamed plan'; h.dispatchEvent(new Event('blur')); return 1; })()",
+    );
+    await waitFor(
+      () => view.evaluate<string>("document.querySelector('#boards').textContent"),
+      (t) => t.includes("renamed plan"),
+    );
+
     server.stop(true);
     await sql?.end?.();
     await db.end();

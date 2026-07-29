@@ -42,6 +42,11 @@ will ship.
   evicted with its last watcher. The template shows "here: …" under the
   board name: guests before auth, names after. Ephemeral and per-process
   by design.
+- **The demo speaks all three verbs.** Each card row has a done checkbox
+  (`replace /cards/<id>/done`, strikethrough when done) and a ✕
+  (`remove /cards/<id>`); the board title renames in place — blur or Enter
+  sends one `replace /name` and the mirror renames it in every mine list
+  live. The app test drives all three through a real browser.
 
 ### Fixed
 

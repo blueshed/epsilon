@@ -14,6 +14,7 @@ folder in your app — ~1.7k lines of TypeScript you own, with its own tests.
 ## The knowns
 
 - **Users are first-class.** `users` and `sessions` ship in the schema; register/login work on day one.
+- **Multi-user is in the box.** Share a board by email — it appears in the member's own list in the same transaction; presence shows who's looking; unwatched docs evict and re-host on demand.
 - **Postgres, db-first.** Migrations in `db/` (numbered, hash-recorded, forward-only). Set `EPSILON_PG_URL` and the doc is durable — state and versions survive restarts. Identity is minted by the database and carried everywhere, never re-derived.
 - **Bun, simple.** One runtime, TypeScript on both sides, no build step, zero dependencies (`pg` is optional, dev-time, and retires when Bun ships `sql.listen`).
 - **The UX is the same stream.** Signals carry ops; `list()` routes them; nothing diffs.
