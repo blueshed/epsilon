@@ -7,6 +7,12 @@
  *   { op: "replace", path: "/field",    value: v }   — set at path
  *   { op: "add",     path: "/items/-",  value: v }   — set, or append with /-
  *   { op: "remove",  path: "/items/0" }              — delete by path
+ *
+ * NOT RFC 6902, despite the verb names: `add` SETS (an existing array index
+ * is overwritten, never shifted — only `/-` appends) and `replace` creates
+ * a missing record key. Ops assert state, they don't negotiate it — the
+ * authority's echo is the truth (LWW). Batches are atomic: a throw unwinds
+ * the applied prefix.
  */
 
 export type Op =
@@ -57,31 +63,57 @@ function walk(
 }
 
 /**
+ * Apply ONE non-root op IN PLACE and return an undo that restores exactly
+ * what changed — the atomicity primitive: appliers stack undos and unwind
+ * on a mid-batch throw. @internal (Signal.apply and applyOps build on it)
+ */
+export function applyOp(doc: any, op: Op): () => void {
+  const segments = parsePath(op.path);
+  if (segments.length === 0) {
+    throw new Error(
+      "[epsilon/op] root ops are handled by Signal.apply, not applyOps",
+    );
+  }
+  const { parent, key } = walk(doc, segments);
+  switch (op.op) {
+    case "replace":
+    case "add": {
+      if (Array.isArray(parent) && key === "-") {
+        parent.push(op.value);
+        return () => { parent.pop(); };
+      }
+      const had = Object.prototype.hasOwnProperty.call(parent, key);
+      const prev = parent[key];
+      parent[key] = op.value;
+      return had ? () => { parent[key] = prev; } : () => { delete parent[key]; };
+    }
+    case "remove": {
+      if (Array.isArray(parent) && typeof key === "number") {
+        const removed = parent.splice(key, 1);
+        return () => { parent.splice(key, 0, ...removed); };
+      }
+      const had = Object.prototype.hasOwnProperty.call(parent, key);
+      const prev = parent[key];
+      delete parent[key];
+      return had ? () => { parent[key] = prev; } : () => {};
+    }
+  }
+}
+
+/**
  * Apply ops to a container IN PLACE (the ref stays stable — that's the point:
- * no clone per change). Root ops (path "" / "/") are NOT handled here — the
- * signal layer owns root replacement, where reassigning the value is correct.
+ * no clone per change), ATOMICALLY: a throw mid-batch unwinds the applied
+ * prefix, so the container never holds a half-applied batch. Root ops
+ * (path "" / "/") are NOT handled here — the signal layer owns root
+ * replacement, where reassigning the value is correct.
  */
 export function applyOps(doc: any, ops: Op[]): void {
-  for (const op of ops) {
-    const segments = parsePath(op.path);
-    if (segments.length === 0) {
-      throw new Error(
-        "[epsilon/op] root ops are handled by Signal.apply, not applyOps",
-      );
-    }
-    const { parent, key } = walk(doc, segments);
-    switch (op.op) {
-      case "replace":
-      case "add":
-        if (Array.isArray(parent) && key === "-") parent.push(op.value);
-        else parent[key] = op.value;
-        break;
-      case "remove":
-        if (Array.isArray(parent) && typeof key === "number")
-          parent.splice(key, 1);
-        else delete parent[key];
-        break;
-    }
+  const undos: (() => void)[] = [];
+  try {
+    for (const op of ops) undos.push(applyOp(doc, op));
+  } catch (err) {
+    for (let i = undos.length - 1; i >= 0; i--) undos[i]!();
+    throw err;
   }
 }
 

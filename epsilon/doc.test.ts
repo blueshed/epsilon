@@ -97,6 +97,20 @@ describe("the wire", () => {
     expect(nope.peek()).toBeNull();
   });
 
+  test("a refused open REJECTS ready; a later successful open re-arms it", async () => {
+    const r = client();
+    const late = r.doc<Board>("late");
+    let err: Error | undefined;
+    try { await late.ready; } catch (e) { err = e as Error; }
+    expect(err?.message).toContain("unknown doc");
+
+    host.doc("late", { cards: {} } satisfies Board);   // now it exists
+    const again = r.doc<Board>("late");                // same handle, re-asks
+    expect(again).toBe(late);
+    await again.ready;                                 // fresh promise — resolves
+    expect(again.peek()).toEqual({ cards: {} });
+  });
+
   test("a bad op is rejected by the authority and pollutes nothing", async () => {
     const errors: string[] = [];
     const board = client((_doc, err) => errors.push(err)).doc<Board>("board");
@@ -121,6 +135,122 @@ describe("decision 1: the server mints ids", () => {
     expect(id).not.toBe("-");
     expect(id.length).toBe(36);                          // uuid — not client-invented
     expect(b.peek()!.cards[id]!.title).toBe("minted");   // same id everywhere
+  });
+});
+
+describe("reconnect — onConnect re-authenticates before docs re-open", () => {
+  test("a dropped socket recovers its auth and its docs on its own", async () => {
+    const h = createHost({ requireAuth: true });
+    h.doc<Board>("secret", structuredClone(empty));
+    let becomes = 0;
+    h.method("become", (_p, ws) => { ws.data ??= {}; ws.data.user = { id: 7 }; becomes++; return { id: 7 }; });
+    h.method("kick", (_p, ws) => { ws.close(); });
+    const srv = Bun.serve({
+      port: 0,
+      fetch: (req, s) => h.fetch(req, s) ?? new Response("", { status: 404 }),
+      websocket: h.websocket,
+    });
+    h.setServer(srv);
+
+    const r = connect(`ws://localhost:${srv.port}${h.path}`, {
+      onConnect: async (remote) => { await remote.call("become"); },
+    });
+    remotes.push(r);
+
+    const doc = r.doc<Board>("secret");
+    await doc.ready;                          // the hook authed the first connect
+    expect(doc.peek()!.cards["1"]!.title).toBe("one");
+
+    r.call("kick").catch(() => {});           // server drops the socket
+    await until(() => becomes >= 2, 3000);    // hook ran again on the NEW socket
+    doc.at("/cards/1/done").set(true);        // write through the new socket
+    await until(() => doc.peek()!.cards["1"]!.done === true, 3000);
+    srv.stop(true);
+  });
+
+  test("writes made while the socket is DOWN queue and flush, not drop", async () => {
+    const h = createHost({ requireAuth: true });
+    const authority = h.doc<Board>("secret", structuredClone(empty));
+    h.method("become", (_p, ws) => { ws.data ??= {}; ws.data.user = { id: 7 }; return { id: 7 }; });
+    h.method("hang", () => new Promise(() => {}));   // pending until the drop
+    h.method("kick", (_p, ws) => { ws.close(); });
+    const srv = Bun.serve({
+      port: 0,
+      fetch: (req, s) => h.fetch(req, s) ?? new Response("", { status: 404 }),
+      websocket: h.websocket,
+    });
+    h.setServer(srv);
+
+    const r = connect(`ws://localhost:${srv.port}${h.path}`, {
+      onConnect: async (remote) => { await remote.call("become"); },
+    });
+    remotes.push(r);
+    const doc = r.doc<Board>("secret");
+    await doc.ready;
+
+    const dropped = r.call("hang").catch(() => {});  // rejects when onclose fires
+    r.call("kick").catch(() => {});
+    await dropped;                                   // socket is definitely down
+    doc.at("/cards/1/title").set("offline write");   // queued, not lost
+    await until(() => doc.peek()!.cards["1"]!.title === "offline write", 3000);
+    expect(authority.peek().cards["1"]!.title).toBe("offline write");
+    srv.stop(true);
+  });
+});
+
+describe("dynamic docs — the factory sees the asking identity", () => {
+  test("a probe is refused BEFORE anything is hosted; the owner still opens", async () => {
+    const h = createHost({ requireAuth: true });
+    h.method("become", (p: { id: number }, ws) => { ws.data ??= {}; ws.data.user = { id: p.id }; return ws.data.user; });
+    let built = 0;
+    h.docs("mine:", (name, userId) => {
+      if (name !== `mine:${userId}`) throw new Error(`unknown doc: ${name}`);
+      built++;
+      h.doc(name, { cards: {} } satisfies Board);
+    });
+    const srv = Bun.serve({
+      port: 0,
+      fetch: (req, s) => h.fetch(req, s) ?? new Response("", { status: 404 }),
+      websocket: h.websocket,
+    });
+    h.setServer(srv);
+    const wsUrl = `ws://localhost:${srv.port}${h.path}`;
+
+    const errors: string[] = [];
+    const stranger = connect(wsUrl, {
+      onConnect: async (remote) => { await remote.call("become", { id: 9 }); },
+      onError: (_d, e) => errors.push(e),
+    });
+    remotes.push(stranger);
+    stranger.doc("mine:7");
+    await until(() => errors.length > 0, 3000);
+    expect(errors[0]).toContain("unknown doc");
+    expect(built).toBe(0);                    // the probe hosted NOTHING
+
+    const owner = connect(wsUrl, {
+      onConnect: async (remote) => { await remote.call("become", { id: 7 }); },
+    });
+    remotes.push(owner);
+    const mine = owner.doc<Board>("mine:7");
+    await mine.ready;
+    expect(built).toBe(1);
+    srv.stop(true);
+  });
+});
+
+describe("persistence muting is per-doc", () => {
+  test("a cascade writing doc B during doc A's receive still persists B", () => {
+    const h = createHost();
+    const persisted: string[] = [];
+    const a = h.doc<{ n: number }>("a", { n: 0 }, { persist: () => { persisted.push("a"); } });
+    h.doc<{ n: number }>("b", { n: 0 }, { persist: () => { persisted.push("b"); } });
+    const b = h.doc<{ n: number }>("b", { n: 0 });   // same entry back
+    // A server-side cascade: whenever A changes, derive into B.
+    a.onOps((ops) => { if (ops) b.apply([{ op: "replace", path: "/n", value: 1 }]); });
+
+    // A's ops came FROM storage — A must not re-persist; B's write is new.
+    expect(h.receive("a", 1, [{ op: "replace", path: "/n", value: 1 }])).toBe("ok");
+    expect(persisted).toEqual(["b"]);
   });
 });
 

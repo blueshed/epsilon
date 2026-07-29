@@ -170,4 +170,27 @@ describe("safety", () => {
     expect(() => s.at("/")).toThrow();
     expect(() => s.at("cards")).toThrow();
   });
+
+  test("apply is ATOMIC — a bad op mid-batch unwinds and notifies nothing", () => {
+    const s = signal<any>({ a: { x: 1 }, list: [1, 2] });
+    let opsSeen = 0;
+    s.onOps(() => opsSeen++);
+    let effects = 0;
+    const dispose = effect(() => { s.get(); effects++; });   // runs once now
+
+    expect(() =>
+      s.apply([
+        { op: "replace", path: "/a/x", value: 2 },           // applies…
+        { op: "add", path: "/list/-", value: 3 },            // applies…
+        { op: "remove", path: "/list/0" },                   // applies…
+        { op: "replace", path: "/missing/deep", value: 1 },  // …throws
+      ]),
+    ).toThrow(/path not found/);
+
+    // The applied prefix rolled back; neither channel heard a thing.
+    expect(s.peek()).toEqual({ a: { x: 1 }, list: [1, 2] });
+    expect(opsSeen).toBe(0);
+    expect(effects).toBe(1);
+    dispose();
+  });
 });

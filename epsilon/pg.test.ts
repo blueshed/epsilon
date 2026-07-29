@@ -144,6 +144,21 @@ describe("cross-process fan-out (LISTEN/NOTIFY)", () => {
     await until(() => browserB.peek()!.cards["9"] !== undefined);       // B's browser
     expect(b.v("blob:x")).toBe(a.v("blob:x"));
   });
+
+  test("poll fallback sweeps every hosted doc in one query", async () => {
+    const a = createHost();
+    const c = createHost();
+    const sqlA = freshSql();
+    const sqlC = freshSql();
+    const boardA = await pgDoc<Board>(a, sqlA, "blob:p", structuredClone(empty));
+    const boardC = await pgDoc<Board>(c, sqlC, "blob:p", structuredClone(empty));
+    const sync = await pgSync(c, sqlC, { ms: 50, mode: "poll" });
+    stops.push(sync.stop);
+    expect(sync.mode).toBe("poll");
+
+    boardA.apply([{ op: "add", path: "/cards/7", value: { id: 7, title: "polled" } }]);
+    await until(() => boardC.peek().cards["7"] !== undefined);
+  });
 });
 
 describe("schema-native users", () => {
@@ -169,6 +184,22 @@ describe("schema-native users", () => {
     expect(me.email).toBe("pete@blueshed.co.uk");
   });
 
+  test("register/login are rate limited per client — bcrypt is expensive", async () => {
+    const host = createHost();
+    await pgAuth(host, sql, { maxAttempts: 2, windowMs: 60_000 });
+    const url = serve(host);
+    const r = client(url);
+
+    await r.call("login", { email: "nobody@x.test", password: "a" }).catch(() => {});
+    await r.call("login", { email: "nobody@x.test", password: "a" }).catch(() => {});
+    // The third attempt is refused BEFORE bcrypt runs.
+    await expect(r.call("login", { email: "nobody@x.test", password: "a" }))
+      .rejects.toThrow(/too many attempts/);
+    // authenticate stays unthrottled — every reconnect re-auths through it.
+    await expect(r.call("authenticate", { token: "not-a-token" }))
+      .rejects.toThrow(/invalid or expired/);
+  });
+
   test("requireAuth: docs are closed until an auth method vouches for the socket", async () => {
     const host = createHost({ requireAuth: true });
     await pgAuth(host, sql);
@@ -187,5 +218,29 @@ describe("schema-native users", () => {
     const after = r.doc<Board>("private");
     await after.ready;
     expect(after.peek()).not.toBeNull();
+  });
+});
+
+describe("housekeeping", () => {
+  test("epsilon_prune drops old ops and dead sessions, keeps the rest", async () => {
+    await sql`INSERT INTO docs (name, v, data) VALUES ('prune:1', 2, '{}'::jsonb)
+              ON CONFLICT (name) DO NOTHING`;
+    await sql`INSERT INTO doc_ops (name, v, ops, at) VALUES
+      ('prune:1', 1, '[]'::jsonb, now() - interval '40 days'),
+      ('prune:1', 2, '[]'::jsonb, now())`;
+    const [u] = await sql`SELECT register('Pruned', 'pruned@x.test', 'pw') AS u`;
+    const uid = Number((u.u as { id: number }).id);
+    await sql`INSERT INTO sessions (token, user_id, expires_at) VALUES
+      ('dead-token', ${uid}, now() - interval '1 hour'),
+      ('live-token', ${uid}, now() + interval '1 hour')`;
+
+    const [r] = await sql`SELECT epsilon_prune(${"30 days"}::interval) AS r`;
+    expect(Number(r.r.doc_ops)).toBeGreaterThanOrEqual(1);
+    expect(Number(r.r.sessions)).toBeGreaterThanOrEqual(1);
+
+    const ops = await sql`SELECT v FROM doc_ops WHERE name = 'prune:1' ORDER BY v`;
+    expect(ops.map((o: { v: unknown }) => Number(o.v))).toEqual([2]);   // recent op survives
+    const sess = await sql`SELECT token FROM sessions WHERE user_id = ${uid}`;
+    expect(sess.map((s: { token: string }) => s.token)).toEqual(["live-token"]);
   });
 });

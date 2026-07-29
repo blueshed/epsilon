@@ -26,17 +26,20 @@ export async function startServer(opts: StartOpts = {}) {
     const db = new SQL(pgUrl);
     sql = db;
     await migrate(db, { dir: opts.dbDir ?? "db" });    // db/*.sql, in order, hash-recorded
+    await db`SELECT epsilon_prune()`;                  // bounded tables: old ops, dead sessions
     await pgAuth(host, db);                            // wire adapter over the SQL contract
 
     // Docs are DYNAMIC — names are data, hosted on first open.
     // board:<id> — shared when owner_id is NULL (the seeded board:1),
     // otherwise the owner's alone, decided by the tables.
-    host.docs("board:", async (name) => {
+    host.docs("board:", async (name, userId) => {
       const id = Number(name.split(":")[1]);
       if (!Number.isFinite(id)) throw new Error(`unknown doc: ${name}`);
       const [b] = await db`SELECT owner_id FROM boards WHERE id = ${id}`;
       if (!b) throw new Error(`unknown doc: ${name}`);
       const owner = b.owner_id == null ? null : Number(b.owner_id);
+      // An owned board refuses strangers BEFORE hosting — probes cost nothing.
+      if (owner != null && Number(userId) !== owner) throw new Error(`unknown doc: ${name}`);
       await pgDoc<Board>(host, db, name, null as unknown as Board, {
         apply: "board_apply",
         openAs: owner,
@@ -44,10 +47,11 @@ export async function startServer(opts: StartOpts = {}) {
       });
     });
 
-    // mine:<uid> — YOUR board list; creating a board is an op on it.
-    host.docs("mine:", async (name) => {
+    // mine:<uid> — YOUR board list; creating a board is an op on it. Only its
+    // owner's open may host (and seed) it — probes can't mint docs rows.
+    host.docs("mine:", async (name, userId) => {
       const uid = Number(name.split(":")[1]);
-      if (!Number.isFinite(uid)) throw new Error(`unknown doc: ${name}`);
+      if (!Number.isFinite(uid) || Number(userId) !== uid) throw new Error(`unknown doc: ${name}`);
       await pgDoc(host, db, name, null, {
         apply: "mine_apply",
         seed: { open_fn: "mine_open" },
