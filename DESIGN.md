@@ -158,10 +158,28 @@ must hold ONE reserved connection.
   and notified. Delivery is the ordinary fan-out (pgSync).
 - **Delete cascades.** Cards via FK; the doc row and its log explicitly.
 
+## Sharing (009) — members, mirrored
+
+- `board_members` + `board_may`: public, owner, or member — one predicate,
+  both directions, asked again on every open (guards may be async: the
+  membership check is one SQL call).
+- Share BY EMAIL: `add /members/-` on the board (owner only); the echo
+  carries the resolved member row and the member's mine doc gains the board
+  in the SAME transaction. `remove /members/<uid>`: the owner removes
+  anyone; a member removes themselves. On your own list, `remove
+  /boards/<id>` DELETES what you own and LEAVES what you don't.
+- Lock order, generalized from 005: ALL mine docs in ascending uid order,
+  THEN board docs in ascending id order. Both apply functions pre-scan the
+  batch and take every lock up front; mirrors only ever target pre-locked
+  docs. A membership change racing the pre-scan can only SKIP a mirror —
+  never lock out of order — and recompute-from-state heals the stale entry
+  at the next open.
+- Known limit: revocation bites at the write boundary and the next open; an
+  already-subscribed socket keeps receiving broadcasts until it closes the
+  doc (the per-subscriber limit above).
+
 ## Open items
 
-- Sharing: boards are owner-or-public; a members table is the next
-  migration when needed (the `board_may` seam is where it goes).
 - Doc GC covers the unwatched case; a deleted doc that still has watchers
   lingers until they leave (no "doc deleted" push yet).
 - Prune cadence: `epsilon_prune(keep)` (006) runs at boot only — long-lived

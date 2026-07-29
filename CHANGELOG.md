@@ -21,6 +21,19 @@ will ship.
   board it leaves.
 - CI (`.github/workflows/ci.yml`) — tsc + every suite, including the
   real-browser app test, against a postgres:16 service container.
+- **Sharing** (`db/009-sharing.sql`) — `board_members`, and `board_may`
+  grown to public/owner/MEMBER. Share by email: `add /members/-` on the
+  board (owner only) mints the member row and mirrors the board into the
+  member's own list in the same transaction; `remove /members/<uid>` is the
+  owner removing anyone or a member leaving; on your own list, `remove
+  /boards/<id>` deletes what you own and LEAVES what you don't. Renames
+  now mirror path-precisely (`/boards/<id>/name`) into every list showing
+  the board. Lock order generalized from 005: all mine docs ascending uid,
+  then board docs ascending id, pre-scanned and locked up front. The
+  template grows a members panel on owned boards; `mine` rows mark shared
+  boards. Host `open`/pgDoc `guard` hooks may now be async, so the open
+  gate is `SELECT board_may(...)` — membership changes bite on the next
+  open. Cards gain a `done` boolean (dispatch + composition).
 
 ## [0.2.0] — 2026-07-29
 

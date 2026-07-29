@@ -4,9 +4,9 @@
 // that doc; opening one is just another doc name.
 import { connect, list, text, effect, pushDisposeScope, popDisposeScope } from "./epsilon";
 import type { OpSignal, Dispose, DocHandle } from "./epsilon";
-import type { Board, Card } from "./types";
+import type { Board, Card, Member } from "./types";
 
-interface BoardRef { id: number | string; name: string }
+interface BoardRef { id: number | string; name: string; shared?: boolean }
 interface Mine { boards: Record<string, BoardRef> }
 
 const authDialog = document.getElementById("auth") as HTMLDialogElement;
@@ -14,6 +14,8 @@ const authError = document.getElementById("auth-error")!;
 const mineSection = document.getElementById("mine")!;
 const boardName = document.getElementById("board-name")!;
 const log = document.getElementById("log")!;
+const share = document.getElementById("share")!;
+const membersUl = document.getElementById("members")!;
 
 const remote = connect(
   // wss on https — a hardcoded ws:// is blocked as mixed content behind TLS.
@@ -56,6 +58,8 @@ function openBoard(name: string): void {
   const doc = (boardDoc = remote.doc<Board>(name));
   prev?.close();
   const cards = doc.at<Record<string, Card>>("/cards") as OpSignal<Record<string, Card> | null>;
+  const members = doc.at<Record<string, Member>>("/members") as OpSignal<Record<string, Member> | null>;
+  membersUl.replaceChildren();
   pushDisposeScope();
   effect(() => { boardName.textContent = doc.get()?.name ?? ""; });
   log.appendChild(
@@ -65,7 +69,32 @@ function openBoard(name: string): void {
       return li;
     }),
   );
+  // Sharing lives on OWNED boards (relational tier composes owner_id).
+  effect(() => { share.hidden = doc.get()?.owner_id == null; });
+  membersUl.appendChild(
+    list(members, (m, uid) => {
+      const li = document.createElement("li");
+      li.appendChild(text(m.map((x) => (x ? `${x.name} <${x.email}>` : ""))));
+      const del = document.createElement("button");
+      del.textContent = "✕";
+      del.onclick = () => members.apply([{ op: "remove", path: `/${uid}` }]);
+      li.append(" ", del);
+      return li;
+    }),
+  );
   disposeBoard = popDisposeScope();
+
+  const memberForm = document.getElementById("member-form") as HTMLFormElement;
+  const memberInput = document.getElementById("new-member") as HTMLInputElement;
+  memberForm.onsubmit = (e) => {
+    e.preventDefault();
+    const email = memberInput.value.trim();
+    if (!email) return;
+    // Minted by email — the echo carries the member's id, name, and the
+    // board appears in THEIR list via the mine-doc mirror.
+    members.apply([{ op: "add", path: "/-", value: { email } }]);
+    memberInput.value = "";
+  };
 
   const form = document.getElementById("form") as HTMLFormElement;
   const input = document.getElementById("input") as HTMLInputElement;
@@ -100,7 +129,7 @@ function showMine(userId: number | string): void {
     list(boards, (row, id) => {
       const li = document.createElement("li");
       const name = document.createElement("span");
-      name.appendChild(text(row.map((b) => b?.name)));
+      name.appendChild(text(row.map((b) => (b ? b.name + (b.shared ? " · shared" : "") : ""))));
       name.onclick = () => openBoard(`board:${id}`);
       const del = document.createElement("button");
       del.textContent = "✕";

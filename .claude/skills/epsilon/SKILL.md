@@ -63,7 +63,12 @@ function — no runtime change.
 `board_may(board, user)` gates BOTH `board_open` (NULL for outsiders) and
 `board_apply` (RAISE "not found" — never confirm a doc exists). Follow that
 shape for every doc type: one predicate, both directions, checked inside the
-stored function with the identity the socket authenticated.
+stored function with the identity the socket authenticated. Since 009 the
+predicate admits MEMBERS too: share by email with `add /members/-` on the
+board (owner only); the member's own list mirrors it in the same
+transaction. Multi-doc mirrors must follow 009's lock order: all mine docs
+ascending uid, then board docs ascending id, pre-scanned and locked up
+front — mirror only into docs you pre-locked.
 
 ## Server — two tiers, one wire
 

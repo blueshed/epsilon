@@ -30,20 +30,25 @@ export async function startServer(opts: StartOpts = {}) {
     await pgAuth(host, db);                            // wire adapter over the SQL contract
 
     // Docs are DYNAMIC — names are data, hosted on first open.
-    // board:<id> — shared when owner_id is NULL (the seeded board:1),
-    // otherwise the owner's alone, decided by the tables.
+    // board:<id> — public when owner_id is NULL (the seeded board:1),
+    // otherwise the owner's and their members', decided by board_may IN THE
+    // TABLES — the same predicate the stored functions enforce.
+    const may = async (id: number, u?: number | string) => {
+      const [r] = await db`SELECT board_may(${id}, ${u == null ? null : Number(u)}) AS ok`;
+      return !!r?.ok;
+    };
     host.docs("board:", async (name, userId) => {
       const id = Number(name.split(":")[1]);
       if (!Number.isFinite(id)) throw new Error(`unknown doc: ${name}`);
       const [b] = await db`SELECT owner_id FROM boards WHERE id = ${id}`;
-      if (!b) throw new Error(`unknown doc: ${name}`);
+      // A stranger is refused BEFORE hosting — probes cost nothing.
+      if (!b || !(await may(id, userId))) throw new Error(`unknown doc: ${name}`);
       const owner = b.owner_id == null ? null : Number(b.owner_id);
-      // An owned board refuses strangers BEFORE hosting — probes cost nothing.
-      if (owner != null && Number(userId) !== owner) throw new Error(`unknown doc: ${name}`);
       await pgDoc<Board>(host, db, name, null as unknown as Board, {
         apply: "board_apply",
         openAs: owner,
-        guard: owner == null ? undefined : (u) => Number(u) === owner,
+        // Membership changes bite on the next open — the guard asks SQL.
+        guard: owner == null ? undefined : (u) => may(id, u),
       });
     });
 

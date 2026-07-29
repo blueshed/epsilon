@@ -65,10 +65,10 @@ export interface DocOpts {
   /**
    * Identity gate for the OPEN snapshot: return the snapshot for this user,
    * or null/undefined to refuse (the client sees "not found" and is NOT
-   * subscribed). Docs without it serve the hosted signal to any socket the
-   * host admits.
+   * subscribed). May be async — a membership check belongs in SQL. Docs
+   * without it serve the hosted signal to any socket the host admits.
    */
-  open?: (userId?: number | string) => unknown;
+  open?: (userId?: number | string) => unknown | Promise<unknown>;
 }
 
 /**
@@ -291,7 +291,13 @@ export function createHost(opts?: {
           // Identity-gated docs choose their snapshot per user — a refusal
           // reads exactly like a missing doc (no existence oracle) and does
           // NOT subscribe the socket.
-          const snapshot = entry.open ? entry.open(ws.data?.user?.id) : entry.sig.peek();
+          let snapshot: unknown;
+          try {
+            snapshot = entry.open ? await entry.open(ws.data?.user?.id) : entry.sig.peek();
+          } catch (err) {
+            ws.send(JSON.stringify({ doc: msg.doc, error: String(err) } satisfies ServerMsg));
+            return;
+          }
           if (entry.open && snapshot == null) {
             ws.send(JSON.stringify({ doc: msg.doc, error: `unknown doc: ${msg.doc}` } satisfies ServerMsg));
             return;
