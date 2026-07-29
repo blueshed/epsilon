@@ -49,12 +49,14 @@ export { migrate, migrationStatus, migrationFiles } from "./migrate";
  * UPDATE persists, NOTIFY fans out.
  *
  * Relational (`opts.apply` = a stored function name): the TABLES are the
- * truth. Client ops go to `<apply>(name, ops)` in ONE transaction — it mints
- * ids from sequences, updates tables, recomposes the doc into docs.data,
- * logs doc_ops, bumps v, NOTIFYs — and returns `{v, ops}` with resolved
- * paths/rows, which re-enter through host.receive(). Composition and
- * multi-table writes live in SQL, where they're optimal; hydrate, catch-up,
- * fan-out, wire, and UI are IDENTICAL to the doc-native tier.
+ * truth. Client ops go to `<apply>(name, ops, user)` in ONE transaction — it
+ * mints ids from sequences, updates tables, logs doc_ops (with the undo),
+ * bumps v, NOTIFYs — and returns `{v, ops}` with resolved paths/rows, which
+ * re-enter through pgReceive. A write never recomposes the doc: composition
+ * is open-time (`doc_open`), and the host composes AS ITSELF — doc_open with
+ * no user is the full copy (001's rule). Multi-table writes and composition
+ * live in SQL, where they're optimal; hydrate, catch-up, fan-out, wire, and
+ * UI are IDENTICAL to the doc-native tier.
  */
 export async function pgDoc<T>(
   host: Host,
@@ -65,12 +67,13 @@ export async function pgDoc<T>(
     apply?: string;
     /** Create the docs row on first host (dynamic docs — mine:<uid>). */
     seed?: { open_fn: string };
-    /** Identity the hosted composition runs AS (an owner/uid derived from the
-     *  name). The hosted signal holds THAT view; pair with `guard`. */
-    openAs?: number | null;
-    /** Who may receive the hosted snapshot over the wire. May be async —
-     *  e.g. `SELECT board_may(...)`, so membership changes take effect on
-     *  the next open. Refusals read as "unknown doc" — no existence oracle. */
+    /** Who may receive the hosted snapshot over the wire. DEFAULT (relational
+     *  docs): `doc_open(name, user) IS NOT NULL` — the composition function
+     *  IS the permit (001's rule), asked fresh at every open, so ownership
+     *  and membership changes bite at the next open with no app code.
+     *  Override only to skip that SQL round trip — and never capture mutable
+     *  row state at hosting time: a doc can be claimed while hosted.
+     *  Refusals read as "unknown doc" — no existence oracle. */
     guard?: (userId?: number | string) => boolean | Promise<boolean>;
   },
 ): Promise<Signal<T>> {
@@ -79,7 +82,6 @@ export async function pgDoc<T>(
       throw new Error(`[epsilon/pg] apply must be a plain function name: ${opts.apply}`);
     }
     const applyFn = opts.apply;
-    const openAs = opts.openAs ?? null;
     const guard = opts.guard;
     let sig!: Signal<T>;
     sig = host.doc<T>(name, empty, {
@@ -90,22 +92,22 @@ export async function pgDoc<T>(
           `SELECT ${applyFn}($1, $2, $3) AS r`,
           [name, ops as unknown, userId ?? null],
         );
-        const r = rows[0]!.r as { v: number | string; ops: Op[] };
-        if (host.receive(name, Number(r.v), r.ops) === "gap") {
-          const [doc] = await sql`SELECT v, doc_open(name, ${openAs}) AS data FROM docs WHERE name = ${name}`;
-          if (doc) host.hydrate(name, Number(doc.v), doc.data);
-        }
+        await pgReceive(host, sql, name, rows[0]!.r as { v: number | string; ops: Op[] });
       },
-      open: guard ? async (userId) => ((await guard(userId)) ? sig.peek() : null) : undefined,
+      async open(userId) {
+        if (guard) return (await guard(userId)) ? sig.peek() : null;
+        const [r] = await sql`SELECT doc_open(${name}, ${userId == null ? null : Number(userId)}) IS NOT NULL AS ok`;
+        return r?.ok ? sig.peek() : null;
+      },
     });
     if (opts.seed) {
       await sql`INSERT INTO docs (name, v, data, open_fn) VALUES (${name}, 0, NULL, ${opts.seed.open_fn})
                 ON CONFLICT (name) DO NOTHING`;
     }
-    // Composition happens HERE, at open — never per write. `openAs` lets an
-    // identity-scoped doc compose its owner's view into the hosted signal;
-    // `guard` keeps that view from anyone else.
-    const [row] = await sql`SELECT v, doc_open(name, ${openAs}) AS data FROM docs WHERE name = ${name}`;
+    // Composition happens HERE, at open — never per write. The host composes
+    // AS ITSELF: doc_open with no user is the full copy (001's rule), and the
+    // open gate above decides who may receive it.
+    const [row] = await sql`SELECT v, doc_open(name) AS data FROM docs WHERE name = ${name}`;
     if (!row) throw new Error(`[epsilon/pg] relational doc ${name} not seeded — your SQL file should INSERT its docs row`);
     host.hydrate(name, Number(row.v), row.data);
     return sig;
@@ -148,6 +150,53 @@ export async function pgDoc<T>(
   return sig;
 }
 
+
+/**
+ * Re-enter a stored write's `{v, ops}` into the hosted doc — the same dance
+ * pgDoc's write hook does. Use it after calling a stored function OUTSIDE
+ * that hook (doc_undo, scheduled jobs): apply in order; on a gap, reload the
+ * host's own composition. No-op when this process doesn't host the doc —
+ * the NOTIFY the commit already rang reaches whoever does.
+ */
+export async function pgReceive(
+  host: Host,
+  sql: Sql,
+  name: string,
+  r: { v: number | string; ops: Op[] },
+): Promise<void> {
+  try { host.v(name); } catch { return; }   // not hosted here
+  if (host.receive(name, Number(r.v), r.ops) === "gap") {
+    const [doc] = await sql`SELECT v, doc_open(name) AS data FROM docs WHERE name = ${name}`;
+    if (doc) host.hydrate(name, Number(doc.v), doc.data);
+  }
+}
+
+/**
+ * Undo as a host method: `remote.call("undo", { doc, v? })` reverts version
+ * v — or the CALLER's latest undoable write when v is omitted — by applying
+ * the inverse doc_commit recorded (003), dispatched through the type's own
+ * apply function: the permit is re-checked there, and the undo of an undo
+ * is the redo. Refuses (the caller's promise rejects) when nothing was
+ * recorded or later ops touched the same paths. `applyOf` names the
+ * dispatch function per doc; return undefined for docs that don't undo.
+ */
+export function pgUndo(host: Host, sql: Sql, applyOf: (doc: string) => string | undefined): void {
+  host.method("undo", async (params: { doc?: string; v?: number }, ws) => {
+    const name = String(params?.doc ?? "");
+    const applyFn = name ? applyOf(name) : undefined;
+    if (!applyFn) throw new Error(`no undo: ${name || "(no doc)"}`);
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(applyFn)) {
+      throw new Error(`[epsilon/pg] apply must be a plain function name: ${applyFn}`);
+    }
+    const rows = await sql.unsafe(
+      `SELECT doc_undo($1, $2, $3, $4) AS r`,
+      [name, params?.v ?? null, ws.data?.user?.id ?? null, applyFn],
+    );
+    const r = rows[0]!.r as { v: number | string; ops: Op[] };
+    await pgReceive(host, sql, name, r);
+    return r;
+  });
+}
 
 /** Bring one hosted doc up to the database's version. Idempotent — receive()
  *  drops stale versions, so overlapping calls can't double-apply. */

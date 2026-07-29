@@ -8,4 +8,4 @@ export {
 export type { OpSignal, ReadonlySignal, SignalOptions, Dispose } from "./signal";
 export { createHost, connect } from "./doc";
 export type { Host, Remote, DocHandle } from "./doc";
-export { list, text } from "./ui";
+export { list, text, bind } from "./ui";

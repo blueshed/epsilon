@@ -2,7 +2,7 @@
 // lens. Adds go to "/-" — the SERVER mints ids (Postgres sequences here).
 // With auth on, you get YOUR boards (mine:<uid>): creating one is an op on
 // that doc; opening one is just another doc name.
-import { connect, list, text, effect, pushDisposeScope, popDisposeScope } from "./epsilon";
+import { connect, list, text, bind, effect, pushDisposeScope, popDisposeScope } from "./epsilon";
 import type { OpSignal, Dispose, DocHandle } from "./epsilon";
 import type { Board, Card, Member } from "./types";
 
@@ -76,16 +76,19 @@ function openBoard(name: string): void {
   });
   // Each row shows all three verbs: the checkbox REPLACES /done, the text
   // rides the lens, ✕ REMOVES the card. No local mutation — echoes render.
+  // bind() is the precise path: an op into ANOTHER card never re-runs these.
   log.appendChild(
     list(cards, (card, id) => {
       const li = document.createElement("li");
       const done = document.createElement("input");
       done.type = "checkbox";
-      effect(() => { done.checked = !!card.get()?.done; });
-      done.onchange = () => card.at("/done").set(done.checked);
       const label = document.createElement("span");
-      label.appendChild(text(card.map((c) => c?.text)));
-      effect(() => { label.style.textDecoration = card.get()?.done ? "line-through" : ""; });
+      bind(card.at<boolean>("/done"), (d) => {
+        done.checked = !!d;
+        label.style.textDecoration = d ? "line-through" : "";
+      });
+      bind(card.at<string>("/text"), (t) => { label.textContent = t ?? ""; });
+      done.onchange = () => card.at("/done").set(done.checked);
       const del = document.createElement("button");
       del.textContent = "✕";
       del.onclick = () => cards.apply([{ op: "remove", path: `/${id}` }]);

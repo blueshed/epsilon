@@ -5,6 +5,8 @@ export interface Card {
   id?: number | string;
   text: string;
   done?: boolean;
+  /** Relational tier only: the author, from the echo. */
+  created_by?: number | null;
 }
 
 export interface Member {

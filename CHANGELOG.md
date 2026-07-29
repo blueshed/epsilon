@@ -7,6 +7,92 @@ will ship.
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-07-29
+
+Driven by a field report: a real app (a shared journey planner for eight
+people) built on the template in one sitting and deployed on the embedded
+tier. Its §1 was a live security defect caught in a deploy rehearsal.
+
+### Security
+
+- **The open gate can no longer be forgotten — or go stale.** `pgDoc`'s
+  wire gate now DEFAULTS to `doc_open(name, user) IS NOT NULL`: the
+  composition function is the permit (001's rule), asked fresh at EVERY
+  open, so ownership and membership changes bite at the next open with
+  zero app code. Previously an omitted `guard` served the hosted snapshot
+  to any authenticated socket — and the natural factory for a *claimable*
+  doc (`owner == null ? undefined : …`) fitted no guard while unclaimed,
+  then failed OPEN, silently, once claimed, because options were captured
+  at hosting time. `guard` remains as an override only; never compute one
+  from row state read at hosting time.
+
+### Added
+
+- **Undo**, in the doc kit. `doc_ops.undo` (001) records each write's
+  inverse, built by the dispatch loop (one before-read per mutating op —
+  O(change), no snapshots); `doc_commit` (003) grows the parameter.
+  `doc_undo(doc, v|NULL, user, apply)` reverts a version — NULL means the
+  asker's LATEST undoable write — by dispatching the stored inverse
+  through the type's own apply: the permit is re-checked, mirrors re-fire,
+  and the commit it makes records the redo (undo the undo). It REFUSES,
+  never clobbers: later ops on the same paths, nothing recorded (types
+  that opt out), or a pruned version (`epsilon_prune` bounds undo depth)
+  all raise. `pgUndo(host, sql, applyOf)` exposes it as
+  `remote.call("undo", { doc, v? })`; `pgReceive` re-enters any stored
+  write made outside the write hook — no pgSync needed, embedded tier
+  included. board_apply records inverses for every branch; mine_apply
+  opts out (its ops create/delete whole docs).
+- **A type's resolved echo is legal input** (the kit's rule):
+  `add /cards/<id> {row}` restores that exact row — `OVERRIDING SYSTEM
+  VALUE` plus the new `doc_restore_id` realigns the sequence so the id
+  can't be re-minted — and `replace /cards/<id> {row}` sets it whole;
+  `add /members/<uid>` restores a membership (owner only: leavers rejoin
+  by invitation, not by undo). Undo, replay, and fork all hang off this
+  one property.
+- **`doc_cascade_remove(table, fk, id, prefix)`** — an FK `ON DELETE
+  CASCADE` is invisible to the op log: the report measured 10 stops still
+  rendering after their base was removed, until reload. The helper deletes
+  the children and returns their remove ops for the echo; the kit and
+  skill now say plainly that cascades must be expanded by hand.
+- **`bind(lens, set)`** (ui.ts) — the ops-driven scalar binding: set()
+  runs only when an op touches the lens's slice, with the same ancestor/
+  snapshot fallback as `list()`. Closes §4 of the report (one keystroke
+  re-ran every state effect on the doc — O(n) at the centre of an
+  O(change) system). The template's card rows use it.
+- **The law is executable.** rel.test.ts drives every op shape a board
+  supports over the real wire and asserts the client copy deep-equals
+  compose-from-tables after each — the test that catches any dispatch
+  whose op stream lies (the cascade bug is the canonical liar).
+
+### Changed
+
+- **Migrations stay day-zero truth, not a diary.** Undo and the NULL-user
+  rule are folded INTO 001/003/005 (pre-1.0, same five files, one version
+  of every function) — no 006 replaying board_apply. Upgrade path proven
+  against a live database: `TRUNCATE migrations` (or
+  `bun run db:down && bun run db:up` for the compose db) and every file
+  re-applies idempotently — 001 carries the one-line `doc_ops.undo`
+  upgrade, data intact. Freshly-scaffolded apps are untouched (they are
+  born at day zero).
+- **The host composes as itself.** `doc_open(name)` with NO user is the
+  host's own full copy; composition functions refuse only a non-NULL user
+  who may not see the doc. `openAs` is DELETED from `pgDoc` — nothing
+  about identity is captured at hosting time anymore. Also fixes a latent
+  bug: gap catch-up composes with no user and used to blank
+  identity-scoped docs (`mine:<uid>`) for everyone watching.
+- The migrate drift error now spells out that the ledger records the hash,
+  not the meaning — a comment-only edit still needs the next numbered file.
+- Claims corrected: PGlite WASM boot is ~2–7s by machine (was "~7s");
+  in-memory mode is documented as a shape preview (uuid ids, no `-`
+  identity resolution, no permits), not a second implementation.
+- Docs restructured for context economy: SKILL.md is the tight core
+  (mental model, client reference, rules); the deep manual moved to
+  `.claude/skills/epsilon/REFERENCE.md`, read on demand. README gained
+  "Choosing an engine" (the three-engines decision table). CLAUDE.md's
+  release ceremony is marked template-repo-only so scaffolds aren't
+  misled. Scaffolds no longer inherit the template's CHANGELOG
+  (`bun-create.postinstall`), alongside `.github`.
+
 ## [0.2.3] — 2026-07-29
 
 ### Changed

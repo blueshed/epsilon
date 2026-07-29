@@ -80,7 +80,8 @@ export async function migrate(
         if (prev !== h) {
           throw new Error(
             `[epsilon/migrate] ${name} changed after it was applied. ` +
-              `Migrations are forward-only — revert it and add the next numbered file.`,
+              `Migrations are forward-only — revert it and add the next numbered file ` +
+              `(the ledger records the hash, not the meaning: even a comment-only edit counts).`,
           );
         }
         continue;

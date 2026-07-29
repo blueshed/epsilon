@@ -18,8 +18,8 @@ schema-native users. Merges the ideas of `../delta` and `../railroad`.
 - **Small language**: three verbs (`add`/`replace`/`remove`), JSON-Pointer paths. Never invent verbs.
 - The law: ops are the fast path; recompute-from-state must always be correct on its own.
 - Budget every line against the four taxes in DESIGN.md (identity, time, lifetime, medium). If it pays none, delete it.
-- For realtime work in the app, follow `.claude/skills/epsilon/SKILL.md` — it ships with every scaffold.
-- **A merge to main IS a release.** Ship it in the branch: bump package.json and roll Unreleased into a dated CHANGELOG section BEFORE the PR — the PR Peter merges is already the release. Tags are Peter's to push (cloud sessions hold branch-scoped credentials).
+- For realtime work in the app, follow `.claude/skills/epsilon/SKILL.md` — it ships with every scaffold; its `REFERENCE.md` is the deep manual, read on demand.
+- **Template repo only** (delete in a scaffolded app): a merge to main IS a release. Ship it in the branch: bump package.json and roll Unreleased into a dated CHANGELOG section BEFORE the PR — the PR Peter merges is already the release. Tags are Peter's to push (cloud sessions hold branch-scoped credentials).
 - Keep docs and reports SHORT.
 
 ## Commands

@@ -12,14 +12,32 @@
 --                        as refused.
 --   express the change   doc_commit bumps v, logs doc_ops (the audit:
 --                        who/when), rings the ~40-byte doorbell. A write
---                        never recomposes the doc.
+--                        never recomposes the doc. FK cascades are
+--                        INVISIBLE to the op log — expand them with
+--                        doc_cascade_remove BEFORE deleting the parent, or
+--                        clients render orphans until recompute.
+--   record the inverse   the dispatch loop builds the batch's undo as it
+--                        goes (one before-read per mutating op, PREPENDED —
+--                        a batch undoes back to front) and hands it to
+--                        doc_commit:
+--                          add /x {v}      ⟵undo⟶  remove /x
+--                          replace /x {v}  ⟵undo⟶  replace /x {before}
+--                          remove /x       ⟵undo⟶  add /x {before}
+--   echoes are input     a type's own RESOLVED echo must be a legal op:
+--                        add /coll/<id> {row} restores that exact row
+--                        (OVERRIDING SYSTEM VALUE + doc_restore_id),
+--                        replace /coll/<id> {row} sets it whole. Undo,
+--                        replay, and fork all hang off this one property.
 --   one vocabulary       op_add / op_replace / op_remove build the resolved
---                        echo — the wire's three verbs, in SQL.
+--                        echo — the wire's three verbs, in SQL. The
+--                        inverses are the same three verbs; never invent a
+--                        fourth.
 --
--- A doc type is then: <t>_open (ONE composition query) and
--- <t>_apply = doc_begin → dispatch loop → RETURN doc_commit.
--- 005-board.sql is board/mine built on it; rel.test.ts's `todo` type is
--- the minimal worked example.
+-- A doc type is then: <t>_open (ONE composition query; NULL user = the
+-- host, full view) and <t>_apply = doc_begin → dispatch loop (echo to
+-- v_out, inverse prepended to v_undo) → RETURN doc_commit. 005-board.sql
+-- is board/mine built on it; rel.test.ts's `todo` type is the minimal
+-- worked example.
 
 -- <type>:<id> — the naming convention, in one place.
 CREATE OR REPLACE FUNCTION doc_id(p_doc text) RETURNS bigint AS $$
@@ -66,19 +84,103 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- Express the change: bump v, log the resolved ops, ring the doorbell.
+-- Upgrade path for databases that predate 0.3.0 (the parameter grew).
+DROP FUNCTION IF EXISTS doc_commit(text, jsonb, bigint);
+
+-- Express the change: bump v, log the resolved ops AND their inverse, ring
+-- the doorbell. p_undo NULL = "not undoable" (doc_undo refuses it).
 -- Returns {v, ops} — or NULL when the doc row does not exist, so a mirror
 -- into a never-seeded doc no-ops safely. Caller holds the row lock
 -- (doc_begin for your own doc, doc_lock first for a mirror's).
-CREATE OR REPLACE FUNCTION doc_commit(p_doc text, p_ops jsonb, p_user bigint DEFAULT NULL)
+CREATE OR REPLACE FUNCTION doc_commit(p_doc text, p_ops jsonb, p_user bigint DEFAULT NULL, p_undo jsonb DEFAULT NULL)
 RETURNS jsonb AS $$
 DECLARE v_v bigint;
 BEGIN
   UPDATE docs SET v = v + 1 WHERE name = p_doc RETURNING v INTO v_v;
   IF v_v IS NULL THEN RETURN NULL; END IF;
-  INSERT INTO doc_ops (name, v, ops, by_user) VALUES (p_doc, v_v, p_ops, p_user);
+  INSERT INTO doc_ops (name, v, ops, by_user, undo) VALUES (p_doc, v_v, p_ops, p_user, p_undo);
   PERFORM pg_notify('epsilon_ops', jsonb_build_object('name', p_doc, 'v', v_v)::text);
   RETURN jsonb_build_object('v', v_v, 'ops', p_ops);
+END;
+$$ LANGUAGE plpgsql;
+
+-- TRUE when any op AFTER v touches a path v's ops wrote (same, ancestor, or
+-- descendant). The undo conflict test — callers hold the doc lock.
+CREATE OR REPLACE FUNCTION doc_touched_since(p_doc text, p_v bigint)
+RETURNS boolean AS $$
+  SELECT EXISTS (
+    SELECT 1
+    FROM doc_ops o
+    CROSS JOIN LATERAL jsonb_array_elements(o.ops) AS later(op)
+    CROSS JOIN LATERAL (SELECT jsonb_array_elements(ops) AS op
+                        FROM doc_ops WHERE name = p_doc AND v = p_v) AS mine
+    WHERE o.name = p_doc AND o.v > p_v
+      AND (later.op->>'path' = mine.op->>'path'
+        OR starts_with(later.op->>'path', (mine.op->>'path') || '/')
+        OR starts_with(mine.op->>'path', (later.op->>'path') || '/'))
+  );
+$$ LANGUAGE sql STABLE;
+
+-- Undo version v of a doc — or, with v NULL, the asking user's LATEST
+-- undoable write ("undo" almost always means undo MY last thing). Applies
+-- the stored inverse through the type's own apply function: permit
+-- re-checked there, ids re-minted there (restores), mirrors re-fired there,
+-- and the resulting commit records ITS undo — the redo. Refuses when the
+-- version is unknown (or pruned — epsilon_prune bounds undo depth),
+-- recorded no undo, or later ops touched the same paths (never clobber a
+-- later edit).
+CREATE OR REPLACE FUNCTION doc_undo(p_doc text, p_v bigint, p_user bigint, p_apply text)
+RETURNS jsonb AS $$
+DECLARE v_v bigint := p_v; v_undo jsonb; v_out jsonb;
+BEGIN
+  IF p_apply !~ '^[A-Za-z_][A-Za-z0-9_]*$' THEN
+    RAISE EXCEPTION 'apply must be a plain function name: %', p_apply;
+  END IF;
+  -- Serialize against writers BEFORE reading the log; the dispatch re-locks
+  -- harmlessly (same transaction).
+  IF NOT doc_lock(p_doc) THEN RAISE EXCEPTION 'unknown doc: %', p_doc; END IF;
+  IF v_v IS NULL THEN
+    SELECT max(v) INTO v_v FROM doc_ops
+      WHERE name = p_doc AND by_user IS NOT DISTINCT FROM p_user AND undo IS NOT NULL;
+    IF v_v IS NULL THEN RAISE EXCEPTION 'nothing to undo: %', p_doc; END IF;
+  END IF;
+  SELECT undo INTO v_undo FROM doc_ops WHERE name = p_doc AND v = v_v;
+  IF NOT FOUND THEN RAISE EXCEPTION 'unknown version: % v%', p_doc, v_v; END IF;
+  IF v_undo IS NULL THEN RAISE EXCEPTION 'no undo recorded: % v%', p_doc, v_v; END IF;
+  IF doc_touched_since(p_doc, v_v) THEN
+    RAISE EXCEPTION 'changed since: % v% — later ops touched these paths; look before you undo', p_doc, v_v;
+  END IF;
+  EXECUTE format('SELECT %I($1, $2, $3)', p_apply) INTO v_out USING p_doc, v_undo, p_user;
+  RETURN v_out;
+END;
+$$ LANGUAGE plpgsql;
+
+-- After INSERT … OVERRIDING SYSTEM VALUE (a restore), realign the identity
+-- sequence so the next minted id cannot collide with the restored one.
+CREATE OR REPLACE FUNCTION doc_restore_id(p_table text, p_column text DEFAULT 'id')
+RETURNS void AS $$
+DECLARE v_max bigint;
+BEGIN
+  EXECUTE format('SELECT COALESCE(max(%I), 0) FROM %I', p_column, p_table) INTO v_max;
+  PERFORM setval(pg_get_serial_sequence(p_table, p_column), GREATEST(v_max, 1));
+END;
+$$ LANGUAGE plpgsql;
+
+-- Turn an FK cascade into ops the log can carry: deletes the children
+-- (p_table rows whose p_fk = p_id) and returns their remove ops, keyed by
+-- id under p_prefix. Append them to the echo BEFORE the parent's remove,
+-- INSTEAD of letting ON DELETE CASCADE fire silently. (A cascade the log
+-- never saw is also a cascade undo can never restore.)
+CREATE OR REPLACE FUNCTION doc_cascade_remove(p_table text, p_fk text, p_id bigint, p_prefix text)
+RETURNS jsonb AS $$
+DECLARE v_ops jsonb;
+BEGIN
+  EXECUTE format(
+    'WITH gone AS (DELETE FROM %I WHERE %I = $1 RETURNING id)
+     SELECT COALESCE(jsonb_agg(jsonb_build_object(''op'', ''remove'', ''path'', $2 || id) ORDER BY id), ''[]''::jsonb)
+     FROM gone', p_table, p_fk)
+    INTO v_ops USING p_id, p_prefix;
+  RETURN v_ops;
 END;
 $$ LANGUAGE plpgsql;
 

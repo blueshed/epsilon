@@ -1,9 +1,9 @@
--- 006 — housekeeping: bounded tables. doc_ops is catch-up AND audit, but
+-- 004 — housekeeping: bounded tables. doc_ops is catch-up AND audit, but
 -- catch-up only ever needs ops newer than a live process's version — a
 -- process further behind hits a gap and re-hydrates from the snapshot, by
--- design. So pruning old ops loses audit history ONLY. Expired sessions are
--- dead weight. server.ts calls this at boot; cron it in long-lived
--- deployments.
+-- design. So pruning old ops loses audit history — and undo depth (a
+-- pruned version is not undoable) — ONLY. Expired sessions are dead
+-- weight. server.ts calls this at boot; cron it in long-lived deployments.
 
 CREATE OR REPLACE FUNCTION epsilon_prune(p_keep interval DEFAULT '30 days')
 RETURNS jsonb AS $$

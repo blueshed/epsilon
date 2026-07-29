@@ -48,7 +48,7 @@ export async function startServer(opts: StartOpts = {}) {
   let sql: Sql | undefined;
 
   if (pgUrl || pgDir) {
-    const { migrate, pgDoc, pgSync, pgAuth } = await import("./epsilon/pg");
+    const { migrate, pgDoc, pgSync, pgAuth, pgUndo } = await import("./epsilon/pg");
     // Same schema, two engines: a wire server (EPSILON_PG_URL), or EMBEDDED
     // Postgres in this process (EPSILON_PG_DIR) — one service, no db process.
     const db: Sql = pgUrl
@@ -61,8 +61,10 @@ export async function startServer(opts: StartOpts = {}) {
 
     // Docs are DYNAMIC — names are data, hosted on first open.
     // board:<id> — public when owner_id is NULL (the seeded board:1),
-    // otherwise the owner's and their members', decided by board_may IN THE
-    // TABLES — the same predicate the stored functions enforce.
+    // otherwise the owner's and their members'. No guard here: pgDoc's
+    // default gate asks doc_open(name, user) at EVERY open — the composition
+    // function is the permit, so a board claimed or shared while hosted is
+    // re-judged on the next open, nothing captured at hosting time.
     const may = async (id: number, u?: number | string) => {
       const [r] = await db`SELECT board_may(${id}, ${u == null ? null : Number(u)}) AS ok`;
       return !!r?.ok;
@@ -70,16 +72,10 @@ export async function startServer(opts: StartOpts = {}) {
     host.docs("board:", async (name, userId) => {
       const id = Number(name.split(":")[1]);
       if (!Number.isFinite(id)) throw new Error(`unknown doc: ${name}`);
-      const [b] = await db`SELECT owner_id FROM boards WHERE id = ${id}`;
+      const [b] = await db`SELECT 1 FROM boards WHERE id = ${id}`;
       // A stranger is refused BEFORE hosting — probes cost nothing.
       if (!b || !(await may(id, userId))) throw new Error(`unknown doc: ${name}`);
-      const owner = b.owner_id == null ? null : Number(b.owner_id);
-      await pgDoc<Board>(host, db, name, null as unknown as Board, {
-        apply: "board_apply",
-        openAs: owner,
-        // Membership changes bite on the next open — the guard asks SQL.
-        guard: owner == null ? undefined : (u) => may(id, u),
-      });
+      await pgDoc<Board>(host, db, name, null as unknown as Board, { apply: "board_apply" });
     });
 
     // mine:<uid> — YOUR board list; creating a board is an op on it. Only its
@@ -90,10 +86,14 @@ export async function startServer(opts: StartOpts = {}) {
       await pgDoc(host, db, name, null, {
         apply: "mine_apply",
         seed: { open_fn: "mine_open" },
-        openAs: uid,
-        guard: (u) => Number(u) === uid,
       });
     });
+
+    // Undo is a write with server-computed ops: your last undoable version
+    // (or an explicit v) reverts through board_apply itself — permit
+    // re-checked, refused if later ops touched the same paths; the undo of
+    // an undo is the redo. remote.call("undo", { doc: "board:2" }).
+    pgUndo(host, db, (doc) => (doc.startsWith("board:") ? "board_apply" : undefined));
 
     // presence:board:<id> — who's looking, visible to whoever may open the
     // board itself. Hosted empty; the subscribe hooks fill it.

@@ -1,16 +1,25 @@
--- 005 — the app's doc types: board:<id> and mine:<uid>, with sharing.
--- THE worked example a new doc type copies: tables are the truth, one
--- composition function per type (open-time only), one dispatch function
--- per type on the doc kit (003). Squashed to the final state pre-1.0 —
--- the development story lives in git and DESIGN.md, not here.
+-- 005 — the app's doc types: board:<id> and mine:<uid>, with sharing and
+-- undo. THE worked example a new doc type copies: tables are the truth, one
+-- composition function per type (open-time only; NULL user = the host's
+-- full view), one dispatch function per type on the doc kit (003).
+-- Squashed to the final state pre-1.0 — the development story lives in git
+-- and DESIGN.md, not here.
 --
 --   ownership     board_may: public (owner_id NULL), owner, or member —
---                 one predicate, enforced in _open (NULL) and _apply
---                 (RAISE 'not found' — no existence oracle).
+--                 one predicate, enforced in _open (NULL for a refused
+--                 NON-NULL user) and _apply (RAISE 'not found' — no
+--                 existence oracle). The wire's default gate asks _open
+--                 per open, so nothing is captured at hosting time.
 --   sharing       add /members/- {email} (owner only, minted by email);
 --                 remove /members/<uid> (owner, or yourself — leaving).
 --                 On your own list, remove /boards/<id> DELETES what you
 --                 own and LEAVES what you don't.
+--   undo          every board_apply branch reads the before value and
+--                 prepends the inverse to v_undo (003's table); the echo
+--                 shapes are legal input — add /cards/<id> {row} and
+--                 add /members/<uid> {row} RESTORE, replace /cards/<id>
+--                 {row} sets whole. mine_apply opts out (its ops create
+--                 and delete whole docs, which no op can invert).
 --   mirrors       member changes, renames, and deletes doc_commit into
 --                 every mine doc that shows the board — same transaction.
 --   LOCK ORDER    every transaction locks ALL the mine docs it will touch
@@ -62,7 +71,8 @@ $$ LANGUAGE sql STABLE;
 CREATE OR REPLACE FUNCTION board_open(p_doc text, p_user bigint DEFAULT NULL) RETURNS jsonb AS $$
 DECLARE v_bid bigint := doc_id(p_doc);
 BEGIN
-  IF NOT COALESCE(board_may(v_bid, p_user), false) THEN RETURN NULL; END IF;
+  -- NULL user = the host composing its own copy (001's rule).
+  IF p_user IS NOT NULL AND NOT COALESCE(board_may(v_bid, p_user), false) THEN RETURN NULL; END IF;
   RETURN (
     SELECT jsonb_build_object(
       'name', b.name,
@@ -90,7 +100,7 @@ CREATE OR REPLACE FUNCTION mine_open(p_doc text, p_user bigint DEFAULT NULL)
 RETURNS jsonb AS $$
 DECLARE v_uid bigint := mine_uid(p_doc);
 BEGIN
-  IF p_user IS NULL OR p_user <> v_uid THEN RETURN NULL; END IF;
+  IF p_user IS NOT NULL AND p_user <> v_uid THEN RETURN NULL; END IF;
   RETURN jsonb_build_object(
     'boards', COALESCE(
       (SELECT jsonb_object_agg(x.id::text, x.ref) FROM (
@@ -111,17 +121,19 @@ RETURNS jsonb AS $$
 DECLARE
   v_bid bigint := doc_id(p_doc);
   v_owner bigint; v_bname text;
-  v_op jsonb; v_p text[]; v_id bigint; v_row jsonb;
+  v_op jsonb; v_p text[]; v_id bigint; v_row jsonb; v_before jsonb;
   v_mid bigint; v_mrow record;
   v_mines bigint[] := '{}';
   v_out jsonb := '[]'::jsonb;
+  v_undo jsonb := '[]'::jsonb;
 BEGIN
   -- Unlocked reads, both stable: owner_id is immutable; name is only used
   -- for mirrors and re-set by any rename in this very batch.
   SELECT owner_id, name INTO v_owner, v_bname FROM boards WHERE id = v_bid;
 
   -- Pre-scan: every mine doc this batch could mirror into. Renames touch
-  -- the owner's and every member's; member ops touch that member's.
+  -- the owner's and every member's; member ops (add by email, restore by
+  -- id, remove) touch that member's.
   FOR v_op IN SELECT jsonb_array_elements(p_ops) LOOP
     v_p := doc_path(v_op);
     IF v_p = ARRAY['name'] AND v_op->>'op' = 'replace' THEN
@@ -131,7 +143,7 @@ BEGIN
     ELSIF v_p = ARRAY['members', '-'] AND v_op->>'op' = 'add' THEN
       SELECT id INTO v_mid FROM users WHERE email = v_op->'value'->>'email';
       IF v_mid IS NOT NULL THEN v_mines := v_mines || v_mid; END IF;
-    ELSIF array_length(v_p, 1) = 2 AND v_p[1] = 'members' AND v_op->>'op' = 'remove' THEN
+    ELSIF array_length(v_p, 1) = 2 AND v_p[1] = 'members' AND v_p[2] ~ '^\d+$' THEN
       v_mines := v_mines || v_p[2]::bigint;
     END IF;
   END LOOP;
@@ -152,27 +164,67 @@ BEGIN
         RETURNING id INTO v_id;
       v_out := v_out || op_add('/cards/' || v_id,
         jsonb_build_object('id', v_id, 'text', v_op->'value'->>'text', 'done', false, 'created_by', p_user));
+      v_undo := op_remove('/cards/' || v_id) || v_undo;
+
+    ELSIF array_length(v_p, 1) = 2 AND v_p[1] = 'cards' AND v_op->>'op' = 'add'
+          AND v_p[2] ~ '^\d+$' THEN
+      -- RESTORE: the echo of an add is an add at the resolved id. The row's
+      -- fields (created_by included) ride the value; doc_ops.by_user still
+      -- records who performed the restore.
+      INSERT INTO cards (id, board_id, text, done, created_by)
+        OVERRIDING SYSTEM VALUE
+        VALUES (v_p[2]::bigint, v_bid, v_op->'value'->>'text',
+                COALESCE((v_op->'value'->>'done')::boolean, false),
+                (v_op->'value'->>'created_by')::bigint)
+        RETURNING jsonb_build_object('id', id, 'text', text, 'done', done, 'created_by', created_by)
+        INTO v_row;
+      PERFORM doc_restore_id('cards');
+      v_out := v_out || op_add('/cards/' || v_p[2], v_row);
+      v_undo := op_remove('/cards/' || v_p[2]) || v_undo;
+
+    ELSIF array_length(v_p, 1) = 2 AND v_p[1] = 'cards' AND v_op->>'op' = 'replace' THEN
+      -- Whole-row replace — the echo shape; created_by is immutable.
+      SELECT jsonb_build_object('id', id, 'text', text, 'done', done, 'created_by', created_by)
+        INTO v_before FROM cards WHERE id = v_p[2]::bigint AND board_id = v_bid;
+      IF NOT FOUND THEN RAISE EXCEPTION 'row not found: %', v_op->>'path'; END IF;
+      UPDATE cards SET text = v_op->'value'->>'text',
+                       done = COALESCE((v_op->'value'->>'done')::boolean, false)
+        WHERE id = v_p[2]::bigint AND board_id = v_bid
+        RETURNING jsonb_build_object('id', id, 'text', text, 'done', done, 'created_by', created_by)
+        INTO v_row;
+      v_out := v_out || op_replace('/cards/' || v_p[2], v_row);
+      v_undo := op_replace('/cards/' || v_p[2], v_before) || v_undo;
 
     ELSIF array_length(v_p, 1) = 3 AND v_p[1] = 'cards' AND v_p[3] = 'text'
           AND v_op->>'op' = 'replace' THEN
+      SELECT to_jsonb(text) INTO v_before FROM cards WHERE id = v_p[2]::bigint AND board_id = v_bid;
+      IF NOT FOUND THEN RAISE EXCEPTION 'row not found: %', v_op->>'path'; END IF;
       UPDATE cards SET text = v_op->>'value'
         WHERE id = v_p[2]::bigint AND board_id = v_bid
         RETURNING jsonb_build_object('id', id, 'text', text, 'done', done, 'created_by', created_by) INTO v_row;
-      IF v_row IS NULL THEN RAISE EXCEPTION 'row not found: %', v_op->>'path'; END IF;
       v_out := v_out || op_replace('/cards/' || v_p[2], v_row);
+      v_undo := op_replace('/cards/' || v_p[2] || '/text', v_before) || v_undo;
 
     ELSIF array_length(v_p, 1) = 3 AND v_p[1] = 'cards' AND v_p[3] = 'done'
           AND v_op->>'op' = 'replace' THEN
+      SELECT to_jsonb(done) INTO v_before FROM cards WHERE id = v_p[2]::bigint AND board_id = v_bid;
+      IF NOT FOUND THEN RAISE EXCEPTION 'row not found: %', v_op->>'path'; END IF;
       UPDATE cards SET done = (v_op->>'value')::boolean
         WHERE id = v_p[2]::bigint AND board_id = v_bid;
-      IF NOT FOUND THEN RAISE EXCEPTION 'row not found: %', v_op->>'path'; END IF;
       v_out := v_out || op_replace(v_op->>'path', v_op->'value');
+      v_undo := op_replace(v_op->>'path', v_before) || v_undo;
 
     ELSIF array_length(v_p, 1) = 2 AND v_p[1] = 'cards' AND v_op->>'op' = 'remove' THEN
+      SELECT jsonb_build_object('id', id, 'text', text, 'done', done, 'created_by', created_by)
+        INTO v_before FROM cards WHERE id = v_p[2]::bigint AND board_id = v_bid;
       DELETE FROM cards WHERE id = v_p[2]::bigint AND board_id = v_bid;
-      IF FOUND THEN v_out := v_out || op_remove('/cards/' || v_p[2]); END IF;
+      IF FOUND THEN
+        v_out := v_out || op_remove('/cards/' || v_p[2]);
+        v_undo := op_add('/cards/' || v_p[2], v_before) || v_undo;
+      END IF;
 
     ELSIF v_p = ARRAY['name'] AND v_op->>'op' = 'replace' THEN
+      v_undo := op_replace('/name', to_jsonb(v_bname)) || v_undo;
       UPDATE boards SET name = v_op->>'value' WHERE id = v_bid;
       v_bname := v_op->>'value';
       v_out := v_out || jsonb_build_array(v_op);
@@ -204,7 +256,32 @@ BEGIN
       INSERT INTO board_members (board_id, user_id) VALUES (v_bid, v_mrow.id);
       v_out := v_out || op_add('/members/' || v_mrow.id,
         jsonb_build_object('id', v_mrow.id, 'name', v_mrow.name, 'email', v_mrow.email));
+      v_undo := op_remove('/members/' || v_mrow.id) || v_undo;
       PERFORM doc_commit('mine:' || v_mrow.id,
+        op_add('/boards/' || v_bid,
+          jsonb_build_object('id', v_bid, 'name', v_bname, 'shared', true)),
+        p_user);
+
+    ELSIF array_length(v_p, 1) = 2 AND v_p[1] = 'members' AND v_op->>'op' = 'add' THEN
+      -- RESTORE a member by id (the echo shape; the undo of a remove).
+      -- Owner only — someone who LEFT is no longer a member, cannot write
+      -- here at all, and rejoins by invitation, not by undo.
+      IF v_owner IS NULL OR p_user IS DISTINCT FROM v_owner THEN
+        RAISE EXCEPTION 'owner only: %', v_op->>'path';
+      END IF;
+      v_mid := v_p[2]::bigint;
+      SELECT id, name, email INTO v_mrow FROM users WHERE id = v_mid;
+      IF v_mrow.id IS NULL THEN RAISE EXCEPTION 'unknown user: %', v_mid; END IF;
+      IF v_mid = v_owner OR EXISTS (
+        SELECT 1 FROM board_members WHERE board_id = v_bid AND user_id = v_mid
+      ) THEN
+        RAISE EXCEPTION 'already a member: %', v_mrow.email;
+      END IF;
+      INSERT INTO board_members (board_id, user_id) VALUES (v_bid, v_mid);
+      v_out := v_out || op_add('/members/' || v_mid,
+        jsonb_build_object('id', v_mid, 'name', v_mrow.name, 'email', v_mrow.email));
+      v_undo := op_remove('/members/' || v_mid) || v_undo;
+      PERFORM doc_commit('mine:' || v_mid,
         op_add('/boards/' || v_bid,
           jsonb_build_object('id', v_bid, 'name', v_bname, 'shared', true)),
         p_user);
@@ -215,9 +292,13 @@ BEGIN
       IF p_user IS DISTINCT FROM v_owner AND p_user IS DISTINCT FROM v_mid THEN
         RAISE EXCEPTION 'owner only: %', v_op->>'path';
       END IF;
+      SELECT jsonb_build_object('id', u.id, 'name', u.name, 'email', u.email) INTO v_before
+        FROM board_members m JOIN users u ON u.id = m.user_id
+        WHERE m.board_id = v_bid AND m.user_id = v_mid;
       DELETE FROM board_members WHERE board_id = v_bid AND user_id = v_mid;
       IF FOUND THEN
         v_out := v_out || op_remove('/members/' || v_mid);
+        v_undo := op_add('/members/' || v_mid, v_before) || v_undo;
         PERFORM doc_commit('mine:' || v_mid, op_remove('/boards/' || v_bid), p_user);
       END IF;
 
@@ -226,10 +307,13 @@ BEGIN
     END IF;
   END LOOP;
 
-  RETURN doc_commit(p_doc, v_out, p_user);
+  RETURN doc_commit(p_doc, v_out, p_user, v_undo);
 END;
 $$ LANGUAGE plpgsql;
 
+-- No undo here on purpose: these ops create and delete whole docs
+-- (doc_drop takes the log with the board), which no op can invert —
+-- doc_commit without p_undo records NULL and doc_undo refuses it.
 CREATE OR REPLACE FUNCTION mine_apply(p_doc text, p_ops jsonb, p_user bigint DEFAULT NULL)
 RETURNS jsonb AS $$
 DECLARE

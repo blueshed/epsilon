@@ -136,4 +136,18 @@ describe("embedded Postgres — same schema, no server", () => {
     expect(cards[0]!.text).toBe("in-process");
     expect(cards[0]!.done).toBe(true);
   });
+
+  test("undo, embedded: the inverse is recorded and doc_undo restores the exact row", async () => {
+    const [card] = await sql`SELECT id FROM cards`;
+    const rm = await sql.unsafe(`SELECT board_apply($1, $2, $3) AS r`,
+      ["board:1", [{ op: "remove", path: `/cards/${card.id}` }] as unknown, null]);
+    expect((await sql`SELECT 1 FROM cards`).length).toBe(0);
+
+    await sql.unsafe(`SELECT doc_undo($1, $2, $3, 'board_apply') AS r`,
+      ["board:1", Number((rm[0]!.r as { v: number }).v), null]);
+    const [back] = await sql`SELECT id, text, done FROM cards`;
+    expect(Number(back.id)).toBe(Number(card.id));          // restored, not re-minted
+    expect(back.text).toBe("in-process");
+    expect(back.done).toBe(true);
+  });
 });

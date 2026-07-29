@@ -15,10 +15,11 @@ board.apply(ops);   // mutate in place + notify, passing the ops along
 
 | Layer | Receives | Does |
 |---|---|---|
-| Postgres | client ops | `delta_apply` → NOTIFY (as delta today) |
-| Doc | broadcast ops | `doc.data.apply(ops)` — no dataVersion, no touch |
+| Postgres | client ops | `<t>_apply` → echo + doorbell NOTIFY |
+| Doc | broadcast ops | `doc.apply(ops)` — no dataVersion, no touch |
 | `at("/cards")` | narrowed ops | lens signal: rebases paths, narrows value |
-| `list()` | row ops | routes: add→create, remove→delete, replace→row signal |
+| `list()` | row ops | routes: add→create, remove→delete; content flows per-row |
+| `bind()` | slice ops | one setter, run only when its slice is touched |
 | `.map()` | — | computed values; falls back to recompute |
 
 ## What this deletes (vs delta + railroad)
@@ -47,8 +48,9 @@ Any line not paying one of these taxes is deletable.
 ## The pixels (v0 — ui.ts)
 
 - `list()` routes **membership only** (add/remove/root-reconcile). Field ops never reach it — each row renders from its own `at()` lens, so content updates flow lens → binding. No diffing anywhere; snapshots diff *key sets*, and surviving rows keep their nodes.
-- `text(sig)` is the state-channel binding — the always-correct fallback, one effect per node.
-- Known v0 looseness: lens `get()` tracks the root, so state effects over-fire on unrelated changes (correct, not minimal). The precise path is the ops channel; tightening the state cut is listed future work.
+- `bind(lens, set)` is the **precise scalar path** (2026-07-29, from the field report's §4): set() runs only when an op touches the lens's slice — sibling writes never reach it; ancestor replaces and snapshots fall through like `list()`'s reconcile. O(change) for field content.
+- `text(sig)` is the state-channel binding — the always-correct fallback, one effect per node, and the only choice for computed/`map()` values (they carry no ops).
+- Known v0 looseness: lens `get()` tracks the root, so state *effects* over-fire on unrelated changes (correct, not minimal) — reach for `bind` where that matters.
 
 ## Storage tiers — where stored functions live (Peter, 2026-07-28)
 
@@ -76,8 +78,8 @@ the directory — no horizontal scaling, and pgSync is unnecessary by
 construction (no sibling processes exist; the host's own broadcast reaches
 every subscriber). Outgrow it → pg_dump into a wire server, set
 `EPSILON_PG_URL`: scaling up is a config change because both engines speak
-the same schema. Measured: WASM boot ~7s (once, at start), bcrypt cost 12
-~350ms — on par with native.
+the same schema. Measured: WASM boot ~2–7s by machine (once, at start),
+bcrypt cost 12 ~350ms — on par with native.
 
 ## Delivered (Peter-driven, 2026-07-28 evening)
 
@@ -104,15 +106,20 @@ Two laws that fell out of Peter's review of the first cut:
 
 The first relational doc types were hand-rolled skeletons: every `_apply`
 re-wrote the same lock prologue, path splitting, echo building, and
-bump-log-notify tail. The kit extracts THAT — nine small functions — and
-leaves the dispatch loop yours:
+bump-log-notify tail. The kit extracts THAT — a baker's dozen of small
+functions — and leaves the dispatch loop yours:
 
 - `doc_begin(doc, permit)` — lock + exist + permit; absence and refusal
   raise indistinguishably (`unknown doc` / `not found`). NULL permit reads
   as refused, so `board_may(...)` passes raw.
-- `doc_commit(doc, ops, user)` — bump v, log, doorbell; returns `{v, ops}`
-  or NULL when the doc row doesn't exist — which makes it the multi-doc
-  MIRROR primitive too (a mirror into a never-seeded doc no-ops).
+- `doc_commit(doc, ops, user, undo)` — bump v, log (echo AND inverse),
+  doorbell; returns `{v, ops}` or NULL when the doc row doesn't exist —
+  which makes it the multi-doc MIRROR primitive too (a mirror into a
+  never-seeded doc no-ops).
+- `doc_undo` (+ `doc_touched_since`, `doc_restore_id`) — see "The host
+  composes as itself; undo" below.
+- `doc_cascade_remove` — an FK cascade, expanded into the ops it silently
+  skipped.
 - `doc_lock` (tolerant, for mirror pre-locks — canonical order per 005),
   `doc_drop` (registry row + log die together), `doc_id`, `doc_path`, and
   `op_add`/`op_replace`/`op_remove` — the wire's three verbs, in SQL.
@@ -158,9 +165,10 @@ must hold ONE reserved connection.
 
 - **Docs are dynamic.** `host.docs(prefix, factory)` — names are data,
   hosted on first open, concurrent opens coalesce.
-- **Per-identity docs.** `mine:<uid>` composes as its owner (`openAs`) and
-  is guarded on the wire (`guard`): strangers get "unknown doc" — no
-  existence oracle. Enforced again inside the stored functions.
+- **Per-identity docs.** `mine:<uid>` refuses strangers on the wire — the
+  same "unknown doc" a missing name gives (no existence oracle) — and again
+  inside the stored functions. (Since 0.3.0 the wire gate is the composition
+  function itself; see "The host composes as itself".)
 - **Creating a doc is an op.** `add /boards/-` on your mine doc creates an
   owned board AND its doc row in one transaction; the echo carries the
   sequence id; the client opens `board:<id>` like any other name.
@@ -199,16 +207,55 @@ subscriber sees itself appear as a contiguous op. Ephemeral and
 PER-PROCESS by design — nothing persists, nothing fans out across
 processes.
 
+## The host composes as itself; undo (2026-07-29)
+
+Driven by a field report — a real app (a shared journey planner, eight
+users, deployed on the embedded tier) built on the template in one sitting.
+Its §1 was a live security defect; all three rules below are its asks.
+
+- **NULL user = the host.** `doc_open(name)` with no user composes the
+  doc's own full copy; composition functions refuse only a NON-NULL user
+  who may not see it. `openAs` is deleted — nothing about identity is
+  captured at hosting time. (The old shape failed OPEN: a factory that
+  computed its guard from a row read at hosting time kept serving a doc
+  that was *claimed* while hosted, and gap catch-up — which composes with
+  no user — blanked identity-scoped docs.)
+- **The composition function IS the permit.** `pgDoc`'s wire gate defaults
+  to `doc_open(name, user) IS NOT NULL`, asked fresh at EVERY open —
+  ownership and membership changes bite at the next open with zero app
+  code. `guard` remains only as an override; never capture mutable row
+  state in one.
+- **The log records what was there.** Each dispatch branch builds the
+  batch's inverse (reversed; one before-read per mutating op — O(change),
+  no snapshots) and `doc_commit` stores it in `doc_ops.undo`.
+  `doc_undo(doc, v|NULL, user, apply)` — NULL = your latest undoable
+  write — applies the inverse THROUGH the type's own apply: permit
+  re-checked, mirrors re-fired, and the resulting commit records the redo.
+  Concurrency REFUSES: undoing under later ops on the same paths raises
+  rather than clobbering someone's edit. Depth is bounded by
+  `epsilon_prune` (pruned = not undoable). `pgUndo` is the wire adapter;
+  `pgReceive` re-enters any stored write made outside the write hook.
+- **A type's resolved echo is legal input.** `add /coll/<id> {row}`
+  restores that exact row (`OVERRIDING SYSTEM VALUE` + `doc_restore_id` so
+  the sequence can't re-mint it); `replace /coll/<id> {row}` sets it whole.
+  Undo, replay, and fork all hang off this one property.
+- **FK cascades are invisible to the op log** — the law's blind spot: the
+  children die in the tables, no op says so, clients render orphans until
+  recompute. Expand the cascade with `doc_cascade_remove` BEFORE deleting
+  the parent. The law is now executable: rel.test.ts asserts the client
+  copy deep-equals compose-from-tables after every op shape a board
+  supports.
+
 ## Open items
 
 - Doc GC covers the unwatched case; a deleted doc that still has watchers
   lingers until they leave (no "doc deleted" push yet).
-- Prune cadence: `epsilon_prune(keep)` (006) runs at boot only — long-lived
+- Prune cadence: `epsilon_prune(keep)` (004) runs at boot only — long-lived
   deployments should cron it.
 
 ## Non-goals
 
-No vdom. No OT/CRDT (model is authoritative; LWW + resync). No offline. No arbitrary live queries — read views without a lawful `put` are read-only, as in delta.
+No vdom. No OT/CRDT (model is authoritative; LWW + resync). No offline. No arbitrary live queries — read views without a lawful `put` are read-only, as in delta. In-memory mode is a SHAPE PREVIEW, not a second implementation: uuid ids, no `-` identity resolution, no permits — keep identity-dependent UI behind auth.
 
 ## Decisions (Peter, 2026-07-28)
 

@@ -4,7 +4,7 @@
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { SQL } from "bun";
 import { createHost, connect, type Host, type Remote } from "./doc";
-import { migrate, pgDoc, pgSync, pgAuth } from "./pg";
+import { migrate, pgDoc, pgSync, pgAuth, pgUndo } from "./pg";
 import type { Card, Board } from "../types";
 
 const ADMIN_URL = "postgres://epsilon:epsilon@localhost:5599/epsilon";
@@ -209,7 +209,7 @@ describe("ownership — users mean something", () => {
   });
 });
 
-// A NEW doc type on the doc kit (007): one table, one composition query,
+// A NEW doc type on the doc kit (003): one table, one composition query,
 // one dispatch function. This is the recipe a real app copies.
 const TODO_SQL = `
 CREATE TABLE IF NOT EXISTS todos (
@@ -219,8 +219,10 @@ CREATE TABLE IF NOT EXISTS todos (
   done boolean NOT NULL DEFAULT false
 );
 
+-- NULL user = the HOST composing its own copy (001's rule); refusal is for
+-- non-NULL strangers. pgDoc's default gate asks THIS function per open.
 CREATE OR REPLACE FUNCTION todo_open(p_doc text, p_user bigint DEFAULT NULL) RETURNS jsonb AS $$
-  SELECT CASE WHEN p_user IS NULL OR p_user <> doc_id(p_doc) THEN NULL ELSE
+  SELECT CASE WHEN p_user IS NOT NULL AND p_user <> doc_id(p_doc) THEN NULL ELSE
     jsonb_build_object('todos', COALESCE(
       (SELECT jsonb_object_agg(t.id::text,
          jsonb_build_object('id', t.id, 'text', t.text, 'done', t.done))
@@ -265,9 +267,9 @@ describe("the doc kit — a new doc type is dispatch + composition only", () => 
     host.docs("todo:", async (name, userId) => {
       const uid = Number(name.split(":")[1]);
       if (!Number.isFinite(uid) || Number(userId) !== uid) throw new Error(`unknown doc: ${name}`);
+      // No guard: the default open gate asks todo_open(name, user) itself.
       await pgDoc(host, sql, name, null, {
         apply: "todo_apply", seed: { open_fn: "todo_open" },
-        openAs: uid, guard: (u) => Number(u) === uid,
       });
     });
     const url = serve(host);
@@ -315,18 +317,15 @@ describe("sharing — members make multi-user real (009)", () => {
       if (!Number.isFinite(uid) || Number(userId) !== uid) throw new Error(`unknown doc: ${name}`);
       await pgDoc(host, sql, name, null, {
         apply: "mine_apply", seed: { open_fn: "mine_open" },
-        openAs: uid, guard: (u) => Number(u) === uid,
       });
     });
     host.docs("board:", async (name, userId) => {
       const id = Number(name.split(":")[1]);
-      const [b] = await sql`SELECT owner_id FROM boards WHERE id = ${id}`;
+      const [b] = await sql`SELECT 1 FROM boards WHERE id = ${id}`;
       if (!b || !(await may(id, userId))) throw new Error(`unknown doc: ${name}`);
-      const owner = b.owner_id == null ? null : Number(b.owner_id);
-      await pgDoc(host, sql, name, null, {
-        apply: "board_apply", openAs: owner,
-        guard: owner == null ? undefined : (u) => may(id, u),
-      });
+      // No guard: the default gate asks board_open(name, user) per open, so
+      // membership granted or revoked while hosted bites at the next open.
+      await pgDoc(host, sql, name, null, { apply: "board_apply" });
     });
     const url = serve(host);
     stops.push((await pgSync(host, sql, { url: PG_URL })).stop);
@@ -434,6 +433,248 @@ describe("sharing — members make multi-user real (009)", () => {
   });
 });
 
+describe("undo — the log knows what was there", () => {
+  let uid: number;
+  let fid: number;
+  let bid: number;
+  let doc: string;
+  const apply = (ops: unknown, user: number) =>
+    sql.unsafe(`SELECT board_apply($1, $2, $3) AS r`, [doc, ops, user]);
+  const undo = (user: number, v?: number) =>
+    sql.unsafe(`SELECT doc_undo($1, $2, $3, 'board_apply') AS r`, [doc, v ?? null, user]);
+  const echoOf = (rows: any) => rows[0]!.r as { v: number | string; ops: { op: string; path: string; value?: any }[] };
+
+  beforeAll(async () => {
+    const [u] = await sql`SELECT register('Undoer', 'undoer@undo.test', 'pw') AS u`;
+    const [f] = await sql`SELECT register('Fellow', 'fellow@undo.test', 'pw') AS u`;
+    uid = Number((u.u as { id: number }).id);
+    fid = Number((f.u as { id: number }).id);
+    const [b] = await sql`INSERT INTO boards (name, owner_id) VALUES ('undoable', ${uid}) RETURNING id`;
+    bid = Number(b.id);
+    doc = `board:${bid}`;
+    await sql`INSERT INTO docs (name, v, data, open_fn) VALUES (${doc}, 0, NULL, 'board_open')`;
+    await sql`INSERT INTO docs (name, v, data, open_fn) VALUES (${"mine:" + uid}, 0, NULL, 'mine_open')
+              ON CONFLICT (name) DO NOTHING`;
+    await sql`INSERT INTO docs (name, v, data, open_fn) VALUES (${"mine:" + fid}, 0, NULL, 'mine_open')
+              ON CONFLICT (name) DO NOTHING`;
+    await apply([{ op: "add", path: "/members/-", value: { email: "fellow@undo.test" } }], uid);
+  });
+
+  test("a remove's undo restores the row — same id, same author; the sequence is repaired", async () => {
+    const add = echoOf(await apply([{ op: "add", path: "/cards/-", value: { text: "precious" } }], uid));
+    const cardPath = add.ops[0]!.path;
+    const cid = Number(cardPath.split("/")[2]);
+    const rm = echoOf(await apply([{ op: "remove", path: cardPath }], uid));
+
+    // The log recorded the inverse: an add AT the id, carrying the row.
+    const [logged] = await sql`SELECT undo FROM doc_ops WHERE name = ${doc} AND v = ${Number(rm.v)}`;
+    expect(logged.undo[0].op).toBe("add");
+    expect(logged.undo[0].path).toBe(cardPath);
+    expect(logged.undo[0].value.text).toBe("precious");
+
+    const back = echoOf(await undo(uid, Number(rm.v)));
+    expect(back.ops[0]!.op).toBe("add");
+    expect(back.ops[0]!.path).toBe(cardPath);              // the exact id, restored
+    const [row] = await sql`SELECT text, created_by FROM cards WHERE id = ${cid}`;
+    expect(row.text).toBe("precious");
+    expect(Number(row.created_by)).toBe(uid);              // authorship rode the value
+    // The restore realigned the sequence — the next mint cannot collide.
+    const next = echoOf(await apply([{ op: "add", path: "/cards/-", value: { text: "after" } }], uid));
+    expect(Number(next.ops[0]!.path.split("/")[2])).toBeGreaterThan(cid);
+  });
+
+  test("no version = undo YOUR last write, not the doc's", async () => {
+    const mine = echoOf(await apply([{ op: "add", path: "/cards/-", value: { text: "mine to undo" } }], uid));
+    const theirs = echoOf(await apply([{ op: "add", path: "/cards/-", value: { text: "theirs stays" } }], fid));
+    expect(Number(theirs.v)).toBeGreaterThan(Number(mine.v));   // theirs IS the doc's last
+
+    const undone = echoOf(await undo(uid));                     // …but this undoes MINE
+    expect(undone.ops[0]).toEqual({ op: "remove", path: mine.ops[0]!.path });
+    const texts = (await sql`SELECT text FROM cards WHERE board_id = ${bid}`).map((r: any) => r.text);
+    expect(texts).not.toContain("mine to undo");
+    expect(texts).toContain("theirs stays");
+  });
+
+  test("refusals: changed since, no undo recorded, unknown version — and undo is a write", async () => {
+    const add = echoOf(await apply([{ op: "add", path: "/cards/-", value: { text: "contested" } }], uid));
+    const path = add.ops[0]!.path;
+    const edit = echoOf(await apply([{ op: "replace", path: `${path}/text`, value: "fellow's edit" }], fid));
+    const last = echoOf(await apply([{ op: "replace", path: `${path}/text`, value: "owner's edit" }], uid));
+
+    // Someone changed it after — refuse rather than clobber their edit.
+    let err = "";
+    try { await undo(fid, Number(edit.v)); } catch (e) { err = String(e); }
+    expect(err).toContain("changed since");
+
+    // mine_apply records no undo (its ops create/delete whole docs).
+    const mk = await sql.unsafe(`SELECT mine_apply($1, $2, $3) AS r`,
+      ["mine:" + uid, [{ op: "add", path: "/boards/-", value: { name: "no undo here" } }] as unknown, uid]);
+    err = "";
+    try {
+      await sql.unsafe(`SELECT doc_undo($1, $2, $3, 'mine_apply') AS r`,
+        ["mine:" + uid, Number((mk[0]!.r as { v: number }).v), uid]);
+    } catch (e) { err = String(e); }
+    expect(err).toContain("no undo recorded");
+
+    err = "";
+    try { await undo(uid, 999999); } catch (e) { err = String(e); }
+    expect(err).toContain("unknown version");
+
+    // Undo is a WRITE: the dispatched apply re-checks the permit. (The
+    // stranger aims at the LATEST version — no conflict in the way — and
+    // still gets the same "not found" a missing board gives.)
+    const [s] = await sql`SELECT register('Stranger', 'stranger@undo.test', 'pw') AS u`;
+    err = "";
+    try { await undo(Number((s.u as { id: number }).id), Number(last.v)); } catch (e) { err = String(e); }
+    expect(err).toContain("not found");
+  });
+
+  test("the undo of an undo is the redo; a second undo of the same v refuses", async () => {
+    const add = echoOf(await apply([{ op: "add", path: "/cards/-", value: { text: "flip" } }], uid));
+    const cid = Number(add.ops[0]!.path.split("/")[2]);
+    const un = echoOf(await undo(uid, Number(add.v)));
+    expect((await sql`SELECT 1 FROM cards WHERE id = ${cid}`).length).toBe(0);
+    await undo(uid, Number(un.v));                              // redo
+    expect((await sql`SELECT 1 FROM cards WHERE id = ${cid}`).length).toBe(1);
+    let err = "";
+    try { await undo(uid, Number(add.v)); } catch (e) { err = String(e); }
+    expect(err).toContain("changed since");                     // the redo touched it
+  });
+
+  test("undoing a member removal restores membership AND fires the mirror again", async () => {
+    const rm = echoOf(await apply([{ op: "remove", path: `/members/${fid}` }], uid));
+    expect((await sql`SELECT 1 FROM board_members WHERE board_id = ${bid}`).length).toBe(0);
+
+    const back = echoOf(await undo(uid, Number(rm.v)));
+    expect(back.ops[0]!.path).toBe(`/members/${fid}`);
+    expect((await sql`SELECT 1 FROM board_members WHERE board_id = ${bid} AND user_id = ${fid}`).length).toBe(1);
+    // The member's own list heard the restore in the same transaction.
+    const [mirror] = await sql`
+      SELECT ops FROM doc_ops WHERE name = ${"mine:" + fid} ORDER BY v DESC LIMIT 1`;
+    expect(mirror.ops[0].path).toBe(`/boards/${bid}`);
+    expect(mirror.ops[0].value.shared).toBe(true);
+  });
+
+  test("doc_cascade_remove turns an FK cascade into ops the log can carry", async () => {
+    await sql.unsafe(`
+      DROP TABLE IF EXISTS cr_stops, cr_legs;
+      CREATE TABLE cr_legs (id bigint PRIMARY KEY);
+      CREATE TABLE cr_stops (
+        id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        leg_id bigint NOT NULL REFERENCES cr_legs(id) ON DELETE CASCADE);
+      INSERT INTO cr_legs VALUES (7), (8);
+      INSERT INTO cr_stops (leg_id) VALUES (7), (7), (7), (8);`);
+    const [r] = await sql`SELECT doc_cascade_remove('cr_stops', 'leg_id', 7, '/stops/') AS ops`;
+    expect(r.ops.map((o: { op: string; path: string }) => o)).toEqual([
+      { op: "remove", path: "/stops/1" },
+      { op: "remove", path: "/stops/2" },
+      { op: "remove", path: "/stops/3" },
+    ]);
+    expect((await sql`SELECT 1 FROM cr_stops WHERE leg_id = 7`).length).toBe(0);   // deleted here…
+    expect((await sql`SELECT 1 FROM cr_stops WHERE leg_id = 8`).length).toBe(1);   // …not there
+  });
+});
+
+describe("undo over the wire — pgUndo re-enters the hosted doc, no pgSync needed", () => {
+  test("call('undo') reverts the caller's last write; undo again = redo", async () => {
+    const host = createHost({ requireAuth: true });
+    await pgAuth(host, sql);
+    host.docs("board:", async (name, userId) => {
+      const id = Number(name.split(":")[1]);
+      const [b] = await sql`SELECT owner_id FROM boards WHERE id = ${id}`;
+      if (!b || Number(userId) !== Number(b.owner_id)) throw new Error(`unknown doc: ${name}`);
+      await pgDoc(host, sql, name, null, { apply: "board_apply" });
+    });
+    pgUndo(host, sql, (d) => (d.startsWith("board:") ? "board_apply" : undefined));
+    const url = serve(host);   // deliberately NO pgSync — pgReceive must deliver
+
+    const r = client(url);
+    const me = await r.call<{ user: { id: number } }>("register", {
+      name: "Wire", email: "wire@undo.test", password: "pw",
+    });
+    const [b] = await sql`INSERT INTO boards (name, owner_id) VALUES ('wire-undo', ${me.user.id}) RETURNING id`;
+    const name = `board:${b.id}`;
+    await sql`INSERT INTO docs (name, v, data, open_fn) VALUES (${name}, 0, NULL, 'board_open')`;
+
+    const doc = r.doc<Board>(name);
+    await doc.ready;
+    doc.at("/cards").apply([{ op: "add", path: "/-", value: { text: "oops" } }]);
+    await until(() => Object.keys(doc.peek()!.cards).length === 1);
+
+    const undone = await r.call<{ ops: { op: string }[] }>("undo", { doc: name });
+    expect(undone.ops[0]!.op).toBe("remove");
+    await until(() => Object.keys(doc.peek()!.cards).length === 0);   // the echo reached us
+
+    await r.call("undo", { doc: name });                              // my last = the undo → redo
+    await until(() => Object.keys(doc.peek()!.cards).length === 1);
+    expect(Object.values(doc.peek()!.cards)[0]!.text).toBe("oops");
+  });
+});
+
+describe("the law, executable — the op stream must equal recompute-from-state", () => {
+  test("after every op shape the client copy equals compose-from-tables", async () => {
+    const host = createHost({ requireAuth: true });
+    await pgAuth(host, sql);
+    host.docs("board:", async (name, userId) => {
+      const id = Number(name.split(":")[1]);
+      const [b] = await sql`SELECT owner_id FROM boards WHERE id = ${id}`;
+      if (!b || Number(userId) !== Number(b.owner_id)) throw new Error(`unknown doc: ${name}`);
+      await pgDoc(host, sql, name, null, { apply: "board_apply" });
+    });
+    const url = serve(host);
+    const r = client(url);
+    const me = await r.call<{ user: { id: number } }>("register", {
+      name: "Law", email: "law@law.test", password: "pw",
+    });
+    const uid = me.user.id;
+    const [b] = await sql`INSERT INTO boards (name, owner_id) VALUES ('law', ${uid}) RETURNING id`;
+    const name = `board:${b.id}`;
+    await sql`INSERT INTO docs (name, v, data, open_fn) VALUES (${name}, 0, NULL, 'board_open')`;
+
+    const doc = r.doc<Board>(name);
+    await doc.ready;
+    // The assertion the whole design hangs on: what the ops built must equal
+    // what the tables compose. An op stream that lies fails HERE.
+    const same = async () => {
+      const [row] = await sql`SELECT doc_open(${name}) AS d`;
+      expect(doc.peek()).toEqual(row.d);
+    };
+    await same();
+
+    doc.at("/cards").apply([{ op: "add", path: "/-", value: { text: "one" } }]);
+    await until(() => Object.keys(doc.peek()!.cards).length === 1);
+    await same();
+    const id = Object.keys(doc.peek()!.cards)[0]!;
+
+    doc.at<string>(`/cards/${id}/text`).set("edited");
+    await until(() => doc.peek()!.cards[id]!.text === "edited");
+    await same();
+
+    doc.at<boolean>(`/cards/${id}/done`).set(true);
+    await until(() => doc.peek()!.cards[id]!.done === true);
+    await same();
+
+    // Whole-row replace — the echo shape as INPUT (the kit's rule).
+    doc.at<Card>(`/cards/${id}`).set({ id: Number(id), text: "whole", done: false });
+    await until(() => doc.peek()!.cards[id]!.text === "whole");
+    await same();
+
+    doc.at<string>("/name").set("law, renamed");
+    await until(() => doc.peek()!.name === "law, renamed");
+    await same();
+
+    const row = doc.peek()!.cards[id]!;
+    doc.at("/cards").apply([{ op: "remove", path: `/${id}` }]);
+    await until(() => doc.peek()!.cards[id] === undefined);
+    await same();
+
+    // Restore at the exact id, over the wire — the other half of the kit's rule.
+    doc.at("/cards").apply([{ op: "add", path: `/${id}`, value: row }]);
+    await until(() => doc.peek()!.cards[id] !== undefined);
+    await same();
+  });
+});
+
 describe("lock order — a rename's mirror and a board delete cannot deadlock", () => {
   test("concurrent board_apply(rename) vs mine_apply(remove) of the same board", async () => {
     // 004 locked board→mine on rename while mine_apply's delete locks
@@ -478,7 +719,6 @@ describe("the vision: per-user docs, creation as an op, multi-doc writes", () =>
       if (!Number.isFinite(uid) || Number(userId) !== uid) throw new Error(`unknown doc: ${name}`);
       await pgDoc(host, sql, name, null, {
         apply: "mine_apply", seed: { open_fn: "mine_open" },
-        openAs: uid, guard: (u) => Number(u) === uid,
       });
     });
     host.docs("board:", async (name, userId) => {
@@ -487,10 +727,7 @@ describe("the vision: per-user docs, creation as an op, multi-doc writes", () =>
       if (!b) throw new Error(`unknown doc: ${name}`);
       const owner = b.owner_id == null ? null : Number(b.owner_id);
       if (owner != null && Number(userId) !== owner) throw new Error(`unknown doc: ${name}`);
-      await pgDoc(host, sql, name, null, {
-        apply: "board_apply", openAs: owner,
-        guard: owner == null ? undefined : (u) => Number(u) === owner,
-      });
+      await pgDoc(host, sql, name, null, { apply: "board_apply" });
     });
     const url = serve(host);
     // The rename mirror is a cross-doc write delivered by the fan-out

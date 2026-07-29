@@ -12,21 +12,29 @@ CREATE TABLE IF NOT EXISTS docs (
   open_fn text
 );
 
--- The event log AND the audit trail (who, what, when). Also why NOTIFY never
--- busts the 8k limit: the payload is a doorbell {name, v}; listeners fetch
--- the ops from here.
+-- The event log, the audit trail (who, what, when), AND the undo log:
+-- `ops` is what happened, `undo` is what was there — the batch's inverse,
+-- reversed, recorded by doc_commit (003). NULL undo = not undoable. Also
+-- why NOTIFY never busts the 8k limit: the payload is a doorbell {name, v};
+-- listeners fetch the ops from here.
 CREATE TABLE IF NOT EXISTS doc_ops (
   name text NOT NULL,
   v bigint NOT NULL,
   ops jsonb NOT NULL,
   by_user bigint,
   at timestamptz NOT NULL DEFAULT now(),
+  undo jsonb,
   PRIMARY KEY (name, v)
 );
 
+-- Upgrade path for databases that predate 0.3.0 (idempotent, like the rest).
+ALTER TABLE doc_ops ADD COLUMN IF NOT EXISTS undo jsonb;
+
 -- The ONE read path for both tiers: stored data, or composed on demand.
--- Composition functions take (doc, user) and return NULL when the user may
--- not see the doc — scoping lives with the data, not in the runtime.
+-- Composition functions take (doc, user); a NULL user is the HOST composing
+-- its own copy (the full view — pgDoc hydrate, gap catch-up), so they return
+-- NULL only for a NON-NULL user who may not see the doc. Scoping lives with
+-- the data, not in the runtime; the wire gate asks this function per open.
 CREATE OR REPLACE FUNCTION doc_open(p_doc text, p_user bigint DEFAULT NULL)
 RETURNS jsonb AS $$
 DECLARE v_fn text; v_data jsonb; v_out jsonb;

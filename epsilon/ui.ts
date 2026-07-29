@@ -1,8 +1,13 @@
 /**
- * UI — ops to pixels. Two primitives, no diffing.
+ * UI — ops to pixels. Three primitives, no diffing.
  *
  *   text(sig)          — a Text node an effect keeps current (state channel:
- *                        always correct, the fallback).
+ *                        always correct, the fallback — and the only choice
+ *                        for computed/map() values, which carry no ops).
+ *   bind(lens, set)    — the PRECISE scalar path: set() runs only when an op
+ *                        TOUCHES the lens's slice (the lens rebases and
+ *                        filters), not on every root change. O(change) for
+ *                        field content, the way list() is for membership.
  *   list(sig, render)  — a keyed region that routes MEMBERSHIP ops only:
  *                        add → create row, remove → drop row, root → reconcile
  *                        key sets. Field and row-content ops never touch
@@ -27,6 +32,24 @@ export function text(sig: ReadonlySignal<unknown>): Text {
   const node = document.createTextNode("");
   effect(() => { node.textContent = String(sig.get() ?? ""); });
   return node;
+}
+
+/**
+ * Ops-driven scalar binding. set() runs once now, then only when an op
+ * touches this slice: sibling writes never reach it (Lens.onOps rebases and
+ * drops them), while ancestor replaces and snapshot/recompute fall through
+ * exactly as list()'s reconcile does. Reads by peek() — the value, not the
+ * op, is what's rendered (the law). Returns the unsubscribe; auto-disposed
+ * inside a dispose scope, like every onOps.
+ */
+export function bind<T>(sig: OpSignal<T>, set: (value: T) => void): () => void {
+  if (!hasActiveDisposeScope()) {
+    console.warn(
+      "[epsilon/ui] bind() created outside a dispose scope — it can never be torn down.",
+    );
+  }
+  set(sig.peek());
+  return sig.onOps(() => set(sig.peek()));
 }
 
 export function list<T>(
