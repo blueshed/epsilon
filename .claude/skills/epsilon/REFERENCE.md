@@ -15,7 +15,11 @@ Read on demand from SKILL.md. Source of truth order: the runtime source
   and auth run unchanged. ONE app process owns the directory (mount a
   volume); pgSync is skipped — no sibling processes exist. Deploying with
   it? `bun add @electric-sql/pglite`. Outgrowing it? pg_dump, set
-  `EPSILON_PG_URL` — a config change, same schema.
+  `EPSILON_PG_URL` — a config change, same schema. `railway.json` at the
+  repo root is the worked deploy example (config-as-code: start command,
+  healthcheck `/`, restart on failure) — volume at `/data`,
+  `EPSILON_PG_DIR=/data`; `server.ts` honors `PORT`. Inert off Railway;
+  the same pattern applies on any host.
 - **Wire Postgres** (`EPSILON_PG_URL`): same schema on a server; pgSync
   (LISTEN/NOTIFY via the optional `pg` peer, polling without it) fans
   writes out across processes.
@@ -107,11 +111,17 @@ echo), so it's embedded-tier safe. Undo is a WRITE — treat it like one.
 - `host.docs(prefix, (name, userId) => ...)` — names are data, hosted on
   first open; the factory sees the asking user: throw `unknown doc` BEFORE
   hosting/seeding so probes cost nothing (see server.ts's `mine:` factory).
+  **A factory refusal guards only the FIRST open** — the doc outlives its
+  opener. Relational docs stay safe because the default gate asks
+  `doc_open(name, user)` per open; an IN-MEMORY doc has no such default,
+  so any permit the factory checks must ALSO be fitted as its `open` gate
+  (`host.doc(name, {}, { open })`) or it fails open while hosted.
 - Presence: `presence:board:<id>` is an in-memory doc the host's
   `onSubscribe`/`onUnsubscribe` hooks maintain (see server.ts) — being
   present IS watching the doc; it evicts with its last watcher. Ephemeral,
-  per-process. Follow this shape for any who's-here / typing / cursor
-  state.
+  per-process, and exactly as private as the board it watches: its open
+  gate re-asks `board_may` per socket (the rule above, applied). Follow
+  this shape for any who's-here / typing / cursor state.
 
 ## The CLI — full commands
 
@@ -143,9 +153,11 @@ in another, and you are watching the fan-out itself.
 - `bun test` (unit/wire/DOM), `bun run test:pglite` (embedded, no server),
   `bun run test:pg` + `test:app` (need `bun run db:up`), `bun run check`
   (strict tsc), `bun run ci` (everything).
-- Each test file owns its OWN database (`epsilon_test_pg`, `_rel`, `_app`,
-  `epsilon_migrate_test`) — they TRUNCATE, and sharing one deadlocks
-  against the migration advisory lock.
+- Each test file owns its OWN database (`<app>_test_pg`, `_rel`, `_app`,
+  `<app>_migrate_test` — `<app>` derived from package.json name, so
+  checkouts sharing one dev Postgres never fight over migration ledgers) —
+  they TRUNCATE, and sharing one deadlocks against the migration advisory
+  lock.
 - The law as a test: after driving ops over the wire, assert the client
   copy `toEqual`s `doc_open(name)` composed from the tables (see
   rel.test.ts "the law, executable"). Add the same assertion for every

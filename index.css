@@ -1,36 +1,197 @@
+/* epsilon — the wire, visible. Mono because the CLI is a first-class
+   client; ONE accent that means "live"; a new row flashes once as its
+   echo lands — type in one tab, watch the flash in the other. */
+
 :root {
-  --bg: #ffffff;
-  --fg: #16181c;
-  --line: #dddddd;
-  --muted: #667;
-  --danger: #b00020;
-  --field: #ffffff;
+  --paper: #f6f7f8;
+  --card: #ffffff;
+  --ink: #202b34;
+  --muted: #66757f;
+  --line: #e2e6e9;
+  --accent: #0e9384;
+  --echo: rgb(14 147 132 / 0.14);
+  --danger: #b42318;
   color-scheme: light dark;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #16181c;
-    --fg: #e8e8ea;
-    --line: #33363c;
-    --muted: #99a;
-    --danger: #ff7b72;
-    --field: #1e2126;
+    --paper: #10161a;
+    --card: #151c22;
+    --ink: #d9e2e8;
+    --muted: #7f8e99;
+    --line: #232e37;
+    --accent: #2fd4bd;
+    --echo: rgb(47 212 189 / 0.16);
+    --danger: #ff8577;
   }
 }
 
-body { font-family: system-ui; max-width: 40rem; margin: 2rem auto; background: var(--bg); color: var(--fg); }
-ul { padding: 0; }
-li { list-style: none; padding: .4rem .6rem; border-bottom: 1px solid var(--line); }
-input { width: 100%; padding: .5rem; font-size: 1rem; box-sizing: border-box; background: var(--field); color: var(--fg); border: 1px solid var(--line); border-radius: .3rem; }
-input::placeholder { color: var(--muted); }
-dialog { border: 1px solid var(--line); border-radius: .5rem; padding: 1.2rem; min-width: 20rem; background: var(--bg); color: var(--fg); }
-dialog::backdrop { background: rgb(0 0 0 / .45); }
-dialog input { margin: .25rem 0 .6rem; }
-dialog button { padding: .45rem .9rem; margin-right: .5rem; font-size: 1rem; background: var(--field); color: var(--fg); border: 1px solid var(--line); border-radius: .3rem; cursor: pointer; }
-#auth-error { color: var(--danger); min-height: 1.2em; font-size: .9rem; }
-#mine { margin-bottom: 1rem; }
-#boards li { display: flex; justify-content: space-between; align-items: center; }
-#boards span { cursor: pointer; flex: 1; }
-#boards button { border: none; background: none; color: var(--danger); cursor: pointer; font-size: 1rem; }
-#board-name { margin: .5rem 0 .3rem; }
+* { box-sizing: border-box; }
+
+body {
+  font-family: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
+  font-size: 15px;
+  line-height: 1.6;
+  max-width: 40rem;
+  margin: 0 auto;
+  padding: 2.5rem 1.25rem 4rem;
+  background: var(--paper);
+  color: var(--ink);
+}
+
+/* Wordmark: small, quiet, the glyph carries the accent. */
+h1 {
+  font-size: 0.9rem;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  margin: 0 0 2rem;
+  color: var(--muted);
+}
+h1::before { content: "ε "; color: var(--accent); font-weight: 700; }
+
+/* The board title is EDITABLE (blur or Enter renames) — say so on hover. */
+#board-name {
+  font-size: 1.35rem;
+  font-weight: 600;
+  line-height: 1.3;
+  min-height: 1.3em;
+  margin: 0;
+  border-bottom: 1px dashed transparent;
+}
+#board-name:hover { border-bottom-color: var(--muted); }
+
+/* Presence: a status line with a live dot; gone when empty. */
+#who {
+  margin: 0.25rem 0 1.25rem;
+  min-height: 1.4em;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+#who:not(:empty)::before {
+  content: "";
+  display: inline-block;
+  width: 0.5em;
+  height: 0.5em;
+  border-radius: 50%;
+  background: var(--accent);
+  margin-right: 0.5em;
+}
+
+input {
+  width: 100%;
+  padding: 0.6rem 0.75rem;
+  font: inherit;
+  background: var(--card);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+input::placeholder { color: var(--muted); opacity: 0.8; }
+
+:is(input, button, #board-name):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Inputs are prompts: + adds, @ shares. */
+#form, #board-form, #member-form { position: relative; }
+:is(#form, #board-form, #member-form)::before {
+  position: absolute;
+  left: 0.75rem;
+  top: 50%;
+  translate: 0 -50%;
+  color: var(--accent);
+  font-weight: 700;
+  pointer-events: none;
+}
+:is(#form, #board-form)::before { content: "+"; }
+#member-form::before { content: "@"; }
+:is(#form, #board-form, #member-form) input { padding-left: 2rem; }
+
+ul { margin: 0.75rem 0; padding: 0; list-style: none; }
+li {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.55rem 0.25rem;
+  border-bottom: 1px solid var(--line);
+  animation: echo 0.7s ease-out;
+}
+
+/* The signature: a row's arrival IS the echo landing. (The first paint
+   flashes too — the snapshot is an op.) */
+@keyframes echo {
+  from { background: var(--echo); }
+  to { background: transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+  li { animation: none; }
+}
+
+#log li span { flex: 1; }
+#log li:has(input:checked) span { color: var(--muted); }
+#members li { justify-content: space-between; }
+
+input[type="checkbox"] {
+  width: auto;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+/* Row actions: quiet until meant. */
+ul button {
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 0.9rem;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0 0.25rem;
+  border-radius: 4px;
+}
+ul button:hover { color: var(--danger); }
+
+#mine { margin-bottom: 2rem; }
+#boards li span { cursor: pointer; flex: 1; }
+#boards li span:hover { color: var(--accent); }
+
+#share { margin-top: 2.5rem; }
+#share h3 {
+  margin: 0 0 0.6rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--muted);
+}
+
+dialog {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 1.5rem;
+  width: min(22rem, 90vw);
+  background: var(--card);
+  color: var(--ink);
+  box-shadow: 0 18px 50px rgb(8 12 14 / 0.25);
+}
+dialog::backdrop { background: rgb(8 12 14 / 0.5); }
+dialog h2 { margin: 0 0 1rem; font-size: 1rem; letter-spacing: 0.04em; }
+dialog input { margin-bottom: 0.6rem; }
+dialog button {
+  font: inherit;
+  padding: 0.5rem 1rem;
+  margin-right: 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--paper);
+  color: var(--ink);
+  cursor: pointer;
+}
+dialog button:hover { border-color: var(--accent); color: var(--accent); }
+#auth-error {
+  margin: 0.1rem 0 0.6rem;
+  min-height: 1.3em;
+  font-size: 0.8rem;
+  color: var(--danger);
+}

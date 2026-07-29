@@ -6,17 +6,23 @@ import { createHost, connect, type Host, type Remote } from "./doc";
 import { migrate, pgDoc, pgSync, pgAuth } from "./pg";
 
 // Tests own a SEPARATE database (created on demand) — the suite TRUNCATEs,
-// and it must never share the app's DB. Point EPSILON_TEST_PG_URL elsewhere
-// to override; it deliberately does NOT read EPSILON_PG_URL.
+// and it must never share the app's DB. NAMESPACED BY APP (package.json
+// name): scaffolds share a dev Postgres with the template — and each other —
+// and identical names ping-pong the migration ledger between checkouts
+// (hash drift). Point EPSILON_TEST_PG_URL elsewhere to override; it
+// deliberately does NOT read EPSILON_PG_URL.
+const APP = ((await Bun.file(new URL("../package.json", import.meta.url)).json()).name as string)
+  .toLowerCase().replace(/[^a-z0-9_]/g, "_").replace(/^(?![a-z_])/, "app_");
+const DB = `${APP}_test_pg`;
 const ADMIN_URL = "postgres://epsilon:epsilon@localhost:5599/epsilon";
-const PG_URL = process.env.EPSILON_TEST_PG_URL ?? "postgres://epsilon:epsilon@localhost:5599/epsilon_test_pg";
+const PG_URL = process.env.EPSILON_TEST_PG_URL ?? `postgres://epsilon:epsilon@localhost:5599/${DB}`;
 const DB_DIR = new URL("../db", import.meta.url).pathname;
 
 async function ensureTestDb(): Promise<void> {
   if (process.env.EPSILON_TEST_PG_URL) return;   // caller owns that DB
   const admin = new SQL(ADMIN_URL);
-  const [exists] = await admin`SELECT 1 FROM pg_database WHERE datname = 'epsilon_test_pg'`;
-  if (!exists) await admin.unsafe("CREATE DATABASE epsilon_test_pg");
+  const [exists] = await admin`SELECT 1 FROM pg_database WHERE datname = ${DB}`;
+  if (!exists) await admin.unsafe(`CREATE DATABASE ${DB}`);
   await admin.end();
 }
 

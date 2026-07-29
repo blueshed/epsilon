@@ -4,11 +4,16 @@
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { SQL } from "bun";
 import { createHost, connect, type Host, type Remote } from "./doc";
+import type { Signal } from "./signal";
 import { migrate, pgDoc, pgSync, pgAuth, pgUndo } from "./pg";
 import type { Card, Board } from "../types";
 
+// Test db namespaced by app (package.json name) — see pg.test.ts's note.
+const APP = ((await Bun.file(new URL("../package.json", import.meta.url)).json()).name as string)
+  .toLowerCase().replace(/[^a-z0-9_]/g, "_").replace(/^(?![a-z_])/, "app_");
+const DB = `${APP}_test_rel`;
 const ADMIN_URL = "postgres://epsilon:epsilon@localhost:5599/epsilon";
-const PG_URL = process.env.EPSILON_TEST_PG_URL ?? "postgres://epsilon:epsilon@localhost:5599/epsilon_test_rel";
+const PG_URL = process.env.EPSILON_TEST_PG_URL ?? `postgres://epsilon:epsilon@localhost:5599/${DB}`;
 const DB_DIR = new URL("../db", import.meta.url).pathname;
 
 let sql: SQL;
@@ -51,8 +56,8 @@ const until = async (cond: () => boolean | Promise<boolean>, ms = 2000) => {
 beforeAll(async () => {
   if (!process.env.EPSILON_TEST_PG_URL) {
     const admin = new SQL(ADMIN_URL);
-    const [exists] = await admin`SELECT 1 FROM pg_database WHERE datname = 'epsilon_test_rel'`;
-    if (!exists) await admin.unsafe("CREATE DATABASE epsilon_test_rel");
+    const [exists] = await admin`SELECT 1 FROM pg_database WHERE datname = ${DB}`;
+    if (!exists) await admin.unsafe(`CREATE DATABASE ${DB}`);
     await admin.end();
   }
   sql = freshSql();
@@ -608,6 +613,71 @@ describe("undo over the wire — pgUndo re-enters the hosted doc, no pgSync need
     await r.call("undo", { doc: name });                              // my last = the undo → redo
     await until(() => Object.keys(doc.peek()!.cards).length === 1);
     expect(Object.values(doc.peek()!.cards)[0]!.text).toBe("oops");
+  });
+});
+
+describe("presence — exactly as private as the board it watches", () => {
+  test("refused while the doc is LIVE, not just at first host; never written in", async () => {
+    // The trap this pins: a factory refusal guards only the FIRST open —
+    // the doc outlives its opener, and an in-memory doc has no doc_open
+    // gate to default to. The open gate must re-ask the board's permit.
+    let sid = 0;
+    const presenceOf = (name: string) =>
+      host.names().includes(name) ? host.doc<Record<string, { name: string }>>(name, {}) : null;
+    const host: Host = createHost({
+      requireAuth: true,
+      onSubscribe(doc, ws) {
+        if (!doc.startsWith("presence:")) return;
+        ws.data.sid ??= ++sid;
+        presenceOf(doc)?.apply([
+          { op: "add", path: `/${ws.data.sid}`, value: { name: ws.data.user?.name ?? "guest" } },
+        ]);
+      },
+      onUnsubscribe(doc, ws) {
+        if (!doc.startsWith("presence:") || !ws.data?.sid) return;
+        presenceOf(doc)?.apply([{ op: "remove", path: `/${ws.data.sid}` }]);
+      },
+    });
+    await pgAuth(host, sql);
+    const may = async (id: number, u?: number | string) => {
+      const [r] = await sql`SELECT board_may(${id}, ${u == null ? null : Number(u)}) AS ok`;
+      return !!r?.ok;
+    };
+    host.docs("presence:", async (name, userId) => {
+      const id = Number(name.split(":")[2]);
+      if (!Number.isFinite(id) || !(await may(id, userId))) throw new Error(`unknown doc: ${name}`);
+      let sig!: Signal<Record<string, { name: string }>>;
+      sig = host.doc<Record<string, { name: string }>>(name, {}, {
+        open: async (u) => ((await may(id, u)) ? sig.peek() : null),
+      });
+    });
+    const url = serve(host);
+
+    const owner = client(url);
+    const om = await owner.call<{ user: { id: number } }>("register", {
+      name: "Present", email: "present@presence.test", password: "pw",
+    });
+    const [b] = await sql`INSERT INTO boards (name, owner_id) VALUES ('occupied', ${om.user.id}) RETURNING id`;
+    const name = `presence:board:${b.id}`;
+
+    const here = owner.doc<Record<string, { name: string }>>(name);
+    await here.ready;
+    await until(() => Object.keys(here.peek() ?? {}).length === 1);   // the owner, written by the hook
+
+    // The doc is HOSTED now — the stranger's open must still read as a
+    // missing doc, and they must never appear as "here".
+    const errors: string[] = [];
+    const stranger = connect(url, { onError: (_d: string, e: string) => errors.push(e) });
+    remotes.push(stranger);
+    await stranger.call("register", {
+      name: "Lurker", email: "lurker@presence.test", password: "pw",
+    });
+    stranger.doc(name);
+    await until(() => errors.length > 0);
+    expect(errors[0]).toContain("unknown doc");
+    await new Promise((r) => setTimeout(r, 50));                      // any wrongful hook write lands by now
+    expect(Object.keys(here.peek() ?? {}).length).toBe(1);            // still just the owner
+    expect(Object.values(here.peek()!)[0]!.name).toBe("Present");
   });
 });
 

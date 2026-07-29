@@ -5,7 +5,7 @@
 // Exported as a factory (bun-route convention) so tests bind port 0 and
 // inject their own database.
 import index from "./index.html";
-import { createHost, type Host } from "./epsilon";
+import { createHost, type Host, type Signal } from "./epsilon";
 import type { Sql } from "./epsilon/pg";
 import type { Board } from "./types";
 
@@ -95,12 +95,18 @@ export async function startServer(opts: StartOpts = {}) {
     // an undo is the redo. remote.call("undo", { doc: "board:2" }).
     pgUndo(host, db, (doc) => (doc.startsWith("board:") ? "board_apply" : undefined));
 
-    // presence:board:<id> — who's looking, visible to whoever may open the
-    // board itself. Hosted empty; the subscribe hooks fill it.
+    // presence:board:<id> — who's looking. Exactly as private as the board
+    // it watches: the factory refusal only guards the FIRST open (the doc
+    // outlives its opener), so the open gate re-asks board_may for every
+    // socket while it's hosted. In-memory docs have no doc_open to default
+    // to — the gate is ours to fit.
     host.docs("presence:", async (name, userId) => {
       const id = Number(name.split(":")[2]);
       if (!Number.isFinite(id) || !(await may(id, userId))) throw new Error(`unknown doc: ${name}`);
-      host.doc(name, {});
+      let sig!: Signal<Record<string, { name: string }>>;
+      sig = host.doc<Record<string, { name: string }>>(name, {}, {
+        open: async (u) => ((await may(id, u)) ? sig.peek() : null),
+      });
     });
 
     // Fan-out exists for SIBLING processes. Embedded Postgres has none by

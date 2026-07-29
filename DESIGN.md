@@ -207,6 +207,13 @@ subscriber sees itself appear as a contiguous op. Ephemeral and
 PER-PROCESS by design — nothing persists, nothing fans out across
 processes.
 
+And exactly as private as the board it watches (2026-07-29): a factory
+refusal guards only the FIRST open — the doc outlives its opener — and an
+in-memory doc has no `doc_open` gate to default to, so the presence
+factory fits an `open` gate that re-asks `board_may` per socket. The rule
+generalizes: an in-memory doc whose factory checks a permit needs the
+SAME permit in its open gate, or it fails open while occupied.
+
 ## The host composes as itself; undo (2026-07-29)
 
 Driven by a field report — a real app (a shared journey planner, eight

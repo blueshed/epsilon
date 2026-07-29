@@ -7,6 +7,54 @@ will ship.
 
 ## [Unreleased]
 
+## [0.3.2] — 2026-07-29
+
+### Security
+
+- **Presence no longer outlives its permit.** The presence factory checked
+  `board_may` only at FIRST open; while `presence:board:<id>` stayed
+  hosted (its board occupied), any authenticated socket could open it —
+  reading who's on a private board and being written INTO it as "here" by
+  the subscribe hook. The factory now fits an `open` gate that re-asks
+  `board_may` per socket, pinned by a wire test that probes while the doc
+  is live. Stated as a rule (DESIGN, REFERENCE): a factory refusal guards
+  only the first open — an in-memory doc whose factory checks a permit
+  needs the SAME permit as its open gate (relational docs get this by
+  default via `doc_open`).
+
+### Fixed
+
+- Test databases are namespaced by app (package.json name): every scaffold
+  inherited the literal `epsilon_test_*` names, so a scaffold sharing the
+  template's dev Postgres re-applied ITS migrations into the TEMPLATE's
+  test databases — ping-ponging the ledger and failing whichever repo ran
+  second with hash drift (found when a real scaffold did exactly that).
+  The template still uses `epsilon_test_*`; a scaffold now derives
+  `<name>_test_*`. Existing scaffolds: re-copy the three `epsilon/*.test.ts`
+  DB suites and `app.test.ts`, or point `EPSILON_TEST_PG_URL` at your own
+  database.
+
+### Changed
+
+- **The face is designed now, not defaulted.** The demo app goes
+  monospace — the CLI is a first-class client, and the browser drives the
+  same wire — over a cool paper ground with ONE accent that means "live":
+  the ε wordmark, a presence dot, prompt glyphs on the inputs (`+` adds,
+  `@` shares), and the signature: a new row FLASHES once as its echo
+  lands, pure CSS, so the two-tab demo shows the op stream arriving.
+  Done rows mute via `:has()`, the editable title hints on hover, focus
+  is visible everywhere, reduced motion respected, dark mode stays
+  first-class (slate + teal, not black + acid). Structure and ids are
+  untouched — `app.test.ts` drives the same DOM. Plus a viewport meta,
+  `lang`, and an ε favicon (killing the 404).
+
+### Added
+
+- README "Deploying": `railway.json` explained at last — the worked deploy
+  example (config-as-code: start, healthcheck, restart), the volume +
+  `EPSILON_PG_DIR` recipe, inert off Railway. It had only ever been
+  described in this changelog, which is a diary, not a manual.
+
 ## [0.3.1] — 2026-07-29
 
 ### Added

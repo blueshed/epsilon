@@ -8,6 +8,11 @@ import { migrate } from "./epsilon/pg";
 
 const DB_DIR = new URL("./db", import.meta.url).pathname;
 
+// Test db namespaced by app (package.json name) — see epsilon/pg.test.ts.
+const APP = ((await Bun.file(new URL("./package.json", import.meta.url)).json()).name as string)
+  .toLowerCase().replace(/[^a-z0-9_]/g, "_").replace(/^(?![a-z_])/, "app_");
+const TEST_DB = `${APP}_test_app`;
+
 const waitFor = async <T>(fn: () => Promise<T>, pred: (v: T) => boolean, ms = 4000): Promise<T> => {
   const start = Date.now();
   for (;;) {
@@ -48,11 +53,11 @@ describe("the app, end to end", () => {
 
   test("postgres: auth gate → register → card in the TABLE, write in the audit log", async () => {
     const ADMIN_URL = "postgres://epsilon:epsilon@localhost:5599/epsilon";
-    const PG_URL = process.env.EPSILON_TEST_PG_URL ?? "postgres://epsilon:epsilon@localhost:5599/epsilon_test_app";
+    const PG_URL = process.env.EPSILON_TEST_PG_URL ?? `postgres://epsilon:epsilon@localhost:5599/${TEST_DB}`;
     if (!process.env.EPSILON_TEST_PG_URL) {
       const admin = new SQL(ADMIN_URL);
-      const [exists] = await admin`SELECT 1 FROM pg_database WHERE datname = 'epsilon_test_app'`;
-      if (!exists) await admin.unsafe("CREATE DATABASE epsilon_test_app");
+      const [exists] = await admin`SELECT 1 FROM pg_database WHERE datname = ${TEST_DB}`;
+      if (!exists) await admin.unsafe(`CREATE DATABASE ${TEST_DB}`);
       await admin.end();
     }
     const db = new SQL(PG_URL, { max: 3 });

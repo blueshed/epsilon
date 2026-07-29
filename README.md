@@ -36,6 +36,22 @@ Start embedded unless you already run Postgres. In-memory is a preview, not
 a tier — switch on an engine early so auth and permissions are real while
 you build.
 
+## Deploying
+
+[`railway.json`](railway.json) is the worked deploy example, the way
+`db/005-board.sql` is the worked doc type — [Railway](https://railway.com)
+config-as-code: start command, healthcheck, restart policy. The whole
+recipe for one durable service with no database process:
+
+1. mount a volume at `/data`
+2. set `EPSILON_PG_DIR=/data`
+3. `bun add @electric-sql/pglite`
+
+`server.ts` honors `PORT`, so any PaaS router just works. Not on Railway?
+The file is inert (delete it if you like) — the pattern is the same on any
+host: start `bun server.ts`, healthcheck `/`, a volume behind
+`EPSILON_PG_DIR`.
+
 ## The app (three files, yours)
 
 - [`server.ts`](server.ts) — the authority. In-memory out of the box (a shape *preview*: uuid ids, no permits); Postgres — the real implementation, with auth + ownership — via one env var.

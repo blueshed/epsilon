@@ -6,8 +6,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { migrate, migrationStatus, migrationFiles } from "./migrate";
 
+// Test db namespaced by app (package.json name) — see pg.test.ts's note.
+const APP = ((await Bun.file(new URL("../package.json", import.meta.url)).json()).name as string)
+  .toLowerCase().replace(/[^a-z0-9_]/g, "_").replace(/^(?![a-z_])/, "app_");
+const DB = `${APP}_migrate_test`;
 const ADMIN_URL = "postgres://epsilon:epsilon@localhost:5599/epsilon";
-const PG_URL = process.env.EPSILON_TEST_PG_URL ?? "postgres://epsilon:epsilon@localhost:5599/epsilon_migrate_test";
+const PG_URL = process.env.EPSILON_TEST_PG_URL ?? `postgres://epsilon:epsilon@localhost:5599/${DB}`;
 
 let sql: SQL;
 let dir: string;
@@ -16,8 +20,8 @@ const quiet = { log: () => {} };
 beforeAll(async () => {
   if (!process.env.EPSILON_TEST_PG_URL) {
     const admin = new SQL(ADMIN_URL);
-    const [exists] = await admin`SELECT 1 FROM pg_database WHERE datname = 'epsilon_migrate_test'`;
-    if (!exists) await admin.unsafe("CREATE DATABASE epsilon_migrate_test");
+    const [exists] = await admin`SELECT 1 FROM pg_database WHERE datname = ${DB}`;
+    if (!exists) await admin.unsafe(`CREATE DATABASE ${DB}`);
     await admin.end();
   }
   sql = new SQL(PG_URL, { max: 3 });
