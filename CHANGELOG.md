@@ -9,12 +9,11 @@ will ship.
 
 ### Added
 
-- Deploy-ready: `server.ts` honors `PORT` (PaaS routers assign it), a
-  `start` script, `railway.json` (start command + healthcheck), and a
-  README recipe for Railway's one-service deploy — volume at `/data`,
-  `EPSILON_PG_DIR=/data`, `bun add @electric-sql/pglite` in the app.
-  Found by scaffolding a real app (`bun create`) and simulating the
-  deploy: production install, `PORT` boot, CLI drive, restart-with-
+- Deploy-ready: `server.ts` honors `PORT` (PaaS routers assign it);
+  `railway.json` carries the deploy story (start command, healthcheck) —
+  add a volume, set `EPSILON_PG_DIR=/data`, `bun add @electric-sql/pglite`
+  in the deploying app. Found by scaffolding a real app and simulating
+  the deploy: production install, `PORT` boot, CLI drive, restart-with-
   volume durability — all verified.
 - Scaffolds no longer inherit the template's CI workflow: a
   `bun-create.postinstall` removes `.github` from new apps (runs via

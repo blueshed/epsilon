@@ -47,18 +47,6 @@ EPSILON_PG_URL=postgres://epsilon:epsilon@localhost:5599/epsilon bun dev
 
 `*.test.ts` beside each — the tests are the contract. [DESIGN.md](DESIGN.md) is the why.
 
-## Deploy (Railway, one service)
-
-No database service: the embedded tier rides a volume.
-
-1. `bun add @electric-sql/pglite` (a deploying app carries its engine).
-2. Push to GitHub; on Railway: New Project → deploy from the repo.
-3. Add a **volume** mounted at `/data`; set `EPSILON_PG_DIR=/data`.
-
-`railway.json` ships the start command and healthcheck; the server honors
-`PORT`. Outgrown one instance? Provision Postgres, set `EPSILON_PG_URL`,
-drop `EPSILON_PG_DIR` — same schema, nothing else changes.
-
 ## Lineage
 
 [delta](https://github.com/blueshed/delta) proved the document lens; [railroad](https://github.com/blueshed/railroad) proved signals-to-DOM. Epsilon merges them and hands you the source: the delta IS the signal, and the stack IS the app.
