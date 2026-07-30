@@ -141,9 +141,9 @@ beforeAll(async () => {
     await admin.end();
   }
   sql = new SQL(PG_URL, { max: 3 });
-  await migrate(sql, { dir: DB_DIR });
-  await sql.unsafe("TRUNCATE docs, doc_ops, sessions, boards, cards, credentials, migrations RESTART IDENTITY CASCADE");
-  await sql.unsafe("TRUNCATE users RESTART IDENTITY CASCADE");
+  // Fresh schema, fresh ledger — frozen files only re-apply from nothing
+  // (see pg.test.ts).
+  await sql.unsafe("DROP SCHEMA public CASCADE; CREATE SCHEMA public");
   await migrate(sql, { dir: DB_DIR });
 
   const host: Host = createHost({ requireAuth: true });

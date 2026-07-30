@@ -390,3 +390,71 @@ describe("dynamic docs — names are data, hosted on first open", () => {
     expect(errors[0]).toContain("unknown doc");
   });
 });
+
+describe("drop and expel — a subscription never outlives its permit", () => {
+  test("drop: every watcher receives the snapshot of nothing and is unsubscribed", async () => {
+    const doomed = host.doc<Board>("doomed", structuredClone(empty));
+    const d1 = client().doc<Board>("doomed");
+    const d2 = client().doc<Board>("doomed");
+    await Promise.all([d1.ready, d2.ready]);
+    expect(d1.peek()!.cards["1"]!.title).toBe("one");
+
+    host.drop("doomed");
+    await until(() => d1.peek() === null && d2.peek() === null);
+    expect(host.names()).not.toContain("doomed");
+
+    // Unsubscribed for real: a server write to a re-registered doc with the
+    // same name reaches nobody who was evicted.
+    const again = host.doc<Board>("doomed", structuredClone(empty));
+    expect(again).not.toBe(doomed);
+    again.at("/cards/1/title").set("second life");
+    await new Promise((res) => setTimeout(res, 50));
+    expect(d1.peek()).toBeNull();
+
+    // A fresh open reads the doc as missing once it's dropped for good.
+    host.drop("doomed");
+    const errors: string[] = [];
+    client((_d, e) => errors.push(e)).doc("doomed");
+    await until(() => errors.length > 0);
+    expect(errors[0]).toContain("unknown doc");
+  });
+
+  test("expel: the gate is re-asked; only the refused user's sockets go", async () => {
+    const h = createHost({ requireAuth: true });
+    h.method("become", (p: { id: string }, ws) => { ws.data.user = { id: p.id }; return true; });
+    const allowed = new Set(["alice", "bob"]);
+    let club!: Signal<{ n: number }>;
+    club = h.doc<{ n: number }>("club", { n: 1 }, {
+      open: (u) => (allowed.has(String(u)) ? club.peek() : null),
+    });
+    const srv = Bun.serve({
+      port: 0,
+      fetch: (req, s) => h.fetch(req, s) ?? new Response("", { status: 404 }),
+      websocket: h.websocket,
+    });
+    h.setServer(srv);
+    const wsUrl = `ws://localhost:${srv.port}${h.path}`;
+    const as = (id: string) => {
+      const r = connect(wsUrl, { onConnect: async (remote) => { await remote.call("become", { id }); } });
+      remotes.push(r);
+      return r;
+    };
+    const alice = as("alice").doc<{ n: number }>("club");
+    const bob = as("bob").doc<{ n: number }>("club");
+    await Promise.all([alice.ready, bob.ready]);
+
+    // Still allowed — expel is a question, not a command.
+    await h.expel("club", "alice");
+    expect(alice.peek()!.n).toBe(1);
+
+    allowed.delete("bob");
+    await h.expel("club", "bob");
+    await until(() => bob.peek() === null);
+
+    // Alice keeps the live stream; the evicted socket hears nothing more.
+    club.at("/n").set(2);
+    await until(() => alice.peek()?.n === 2);
+    expect(bob.peek()).toBeNull();
+    srv.stop(true);
+  });
+});

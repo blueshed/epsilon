@@ -35,6 +35,18 @@ async function ensureTable(sql: Sql): Promise<void> {
 
 const hash = (text: string) => Bun.hash(text).toString(16);
 
+/** Released core migrations — 001–099 are epsilon's range, frozen once
+ *  released; new core behavior ships as the next number. App migrations
+ *  start at 100, so an upgrade never collides with an app's own files.
+ *  This list upgrades WITH the runtime (epsilon:upgrade). */
+const CORE = new Set([
+  "001-epsilon.sql",
+  "002-auth.sql",
+  "003-doc-kit.sql",
+  "004-housekeeping.sql",
+  "005-gone.sql",
+]);
+
 /** List migration files in order — `NNN-name.sql`, numerically sorted. */
 export function migrationFiles(dir: string): string[] {
   // Conservative charset: these names are inlined as SQL literals below.
@@ -72,6 +84,11 @@ export async function migrate(
 
     const ran: Migration[] = [];
     for (const name of migrationFiles(dir)) {
+      // Cheap tripwire, not a gate: a sub-100 number that isn't upstream's
+      // will collide with a future core file the day you upgrade.
+      if (parseInt(name, 10) < 100 && !CORE.has(name)) {
+        log(`${name}: 001–099 are reserved for epsilon core — start app migrations at 100`);
+      }
       const text = await Bun.file(join(dir, name)).text();
       const h = hash(text);
       const prev = done.get(name);

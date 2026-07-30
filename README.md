@@ -39,7 +39,7 @@ you build.
 ## Deploying
 
 [`railway.json`](railway.json) is the worked deploy example, the way
-`db/005-board.sql` is the worked doc type — [Railway](https://railway.com)
+`db/100-board.sql` is the worked doc type — [Railway](https://railway.com)
 config-as-code: start command, healthcheck, restart policy. The whole
 recipe for one durable service with no database process:
 
@@ -57,7 +57,7 @@ host: start `bun server.ts`, healthcheck `/`, a volume behind
 - [`server.ts`](server.ts) — the authority. In-memory out of the box (a shape *preview*: uuid ids, no permits); Postgres — the real implementation, with auth + ownership — via one env var.
 - [`index.ts`](index.ts) — the pixels. A remote doc is a signal whose writes go over the wire; the echo renders them.
 - [`index.html`](index.html) / [`index.css`](index.css) — Bun serves and bundles them.
-- [`db/`](db/) — your schema: numbered migrations, applied at boot, forward-only. `003-doc-kit.sql` is the reusable skeleton of a relational doc type; `005-board.sql` is the worked example — tables, composition, transactional writes, ownership.
+- [`db/`](db/) — your schema: numbered migrations, applied at boot, forward-only. `003-doc-kit.sql` is the reusable skeleton of a relational doc type; `100-board.sql` is the worked example — tables, composition, transactional writes, ownership. Number your own migrations from 100 up: 001–099 are epsilon core, frozen once released, so an upgrade never collides with your files.
 
 ```sh
 bun run db:up            # compose Postgres (or use your own)
@@ -76,8 +76,17 @@ EPSILON_PG_URL=postgres://epsilon:epsilon@localhost:5599/epsilon bun dev
 | `pglite.ts` | The same `Sql` seam over in-process Postgres — the embedded engine |
 | `migrate.ts` | Numbered migrations: ordered, hash-recorded, forward-only, transactional |
 | `cli.ts` | The wire from a terminal — auth-aware one-shot commands + `watch`, JSON out (humans, scripts, AIs) |
+| `upgrade.ts` | `bun run epsilon:upgrade` — take a newer runtime over your local patches (three-way merge) |
 
 `*.test.ts` beside each — the tests are the contract. [DESIGN.md](DESIGN.md) is the why.
+
+**Owning the source doesn't mean forking forever.** package.json records
+the release you scaffolded from (`"epsilon": { "base": ... }`);
+`bun run epsilon:upgrade` fetches upstream and replays the runtime delta
+over your patches — `epsilon/` and the skill only, never `db/` (released
+core migrations are frozen; you adopt a new one by copying that one file),
+never your app. Conflicts surface as markers exactly where you truly
+diverged, and the vendored tests prove the result in your repo.
 
 ## Lineage
 

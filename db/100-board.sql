@@ -1,9 +1,11 @@
--- 005 — the app's doc types: board:<id> and mine:<uid>, with sharing and
+-- 100 — the app's doc types: board:<id> and mine:<uid>, with sharing and
 -- undo. THE worked example a new doc type copies: tables are the truth, one
 -- composition function per type (open-time only; NULL user = the host's
 -- full view), one dispatch function per type on the doc kit (003).
--- Squashed to the final state pre-1.0 — the development story lives in git
--- and DESIGN.md, not here.
+-- Numbered 100 because 001–099 belong to epsilon core (frozen once
+-- released; new core behavior is a new number a deployed app adopts by
+-- copying one file) — app migrations start here and never collide with an
+-- upgrade. The development story lives in git and DESIGN.md, not here.
 --
 --   ownership     board_may: public (owner_id NULL), owner, or member —
 --                 one predicate, enforced in _open (NULL for a refused
@@ -22,6 +24,9 @@
 --                 and delete whole docs, which no op can invert).
 --   mirrors       member changes, renames, and deletes doc_commit into
 --                 every mine doc that shows the board — same transaction.
+--   gone          a deleted board's doc_drop rings the doorbell and the
+--                 apply result names it (`gone`) — every process un-hosts
+--                 and live watchers receive the snapshot of nothing.
 --   LOCK ORDER    every transaction locks ALL the mine docs it will touch
 --                 in ASCENDING uid order, THEN board docs in ascending id
 --                 order. Both apply functions pre-scan the batch and take
@@ -314,6 +319,8 @@ $$ LANGUAGE plpgsql;
 -- No undo here on purpose: these ops create and delete whole docs
 -- (doc_drop takes the log with the board), which no op can invert —
 -- doc_commit without p_undo records NULL and doc_undo refuses it.
+-- The result carries `gone`: the docs this batch dropped, so the writing
+-- process un-hosts them (siblings hear doc_drop's doorbell instead).
 CREATE OR REPLACE FUNCTION mine_apply(p_doc text, p_ops jsonb, p_user bigint DEFAULT NULL)
 RETURNS jsonb AS $$
 DECLARE
@@ -323,6 +330,7 @@ DECLARE
   v_mines bigint[] := ARRAY[v_uid];
   v_boards bigint[] := '{}';
   v_members bigint[];
+  v_gone text[] := '{}';
   v_out jsonb := '[]'::jsonb;
 BEGIN
   -- Pre-scan: a board removal touches that board's doc and — when we own
@@ -368,7 +376,7 @@ BEGIN
       IF FOUND THEN
         -- Ours: the board dies whole — doc row, log, and every member's
         -- mine entry (cards and memberships cascade via FK).
-        PERFORM doc_drop('board:' || v_bid);
+        v_gone := v_gone || doc_drop('board:' || v_bid);
         v_out := v_out || op_remove('/boards/' || v_bid);
         FOREACH v_mid IN ARRAY v_members LOOP
           PERFORM doc_commit('mine:' || v_mid, op_remove('/boards/' || v_bid), p_user);
@@ -388,7 +396,10 @@ BEGIN
     END IF;
   END LOOP;
 
-  RETURN doc_commit(p_doc, v_out, p_user);
+  RETURN doc_commit(p_doc, v_out, p_user)
+      || CASE WHEN cardinality(v_gone) > 0
+              THEN jsonb_build_object('gone', to_jsonb(v_gone))
+              ELSE '{}'::jsonb END;
 END;
 $$ LANGUAGE plpgsql;
 

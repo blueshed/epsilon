@@ -61,10 +61,10 @@ beforeAll(async () => {
     await admin.end();
   }
   sql = freshSql();
+  // Fresh schema, fresh ledger — frozen files only re-apply from nothing
+  // (see pg.test.ts). Migrating seeds board 1 + its docs row.
+  await sql.unsafe("DROP SCHEMA public CASCADE; CREATE SCHEMA public");
   await migrate(sql, { dir: DB_DIR });
-  await sql.unsafe("TRUNCATE docs, doc_ops, sessions, boards, cards, migrations RESTART IDENTITY CASCADE");
-  await sql.unsafe("TRUNCATE users RESTART IDENTITY CASCADE");
-  await migrate(sql, { dir: DB_DIR });   // re-seed board 1 + its docs row
 });
 
 afterAll(async () => {
@@ -863,5 +863,179 @@ describe("the vision: per-user docs, creation as an op, multi-doc writes", () =>
     const docsLeft = await sql`SELECT 1 FROM docs WHERE name = ${"board:" + bid}`;
     expect(cards.length).toBe(0);
     expect(docsLeft.length).toBe(0);
+  });
+});
+
+describe("gone is a snapshot of nothing — deletion and revocation bite live sockets", () => {
+  interface MineDoc { boards: Record<string, { id: number; name: string; shared?: boolean }> }
+
+  test("the apply result names what it dropped — and leaving drops nothing", async () => {
+    const [u] = await sql`SELECT register('Gone', 'gone@gone.test', 'pw') AS u`;
+    const uid = Number(u.u.id);
+    await sql`INSERT INTO docs (name, v, data, open_fn) VALUES (${"mine:" + uid}, 0, NULL, 'mine_open')`;
+    const [made] = await sql`SELECT mine_apply(${"mine:" + uid},
+      ${[{ op: "add", path: "/boards/-", value: { name: "brief" } }] as any}, ${uid}) AS r`;
+    expect(made.r.gone).toBeUndefined();          // creation drops nothing
+    const bid = Number(made.r.ops[0].value.id);
+
+    const [dropped] = await sql`SELECT mine_apply(${"mine:" + uid},
+      ${[{ op: "remove", path: `/boards/${bid}` }] as any}, ${uid}) AS r`;
+    expect(dropped.r.gone).toEqual([`board:${bid}`]);
+    expect((await sql`SELECT 1 FROM docs WHERE name = ${"board:" + bid}`).length).toBe(0);
+
+    // Leaving a SHARED board removes only the membership — nothing is gone.
+    const [o] = await sql`SELECT register('Keeper', 'keeper@gone.test', 'pw') AS u`;
+    const [b] = await sql`INSERT INTO boards (name, owner_id) VALUES ('kept', ${Number(o.u.id)}) RETURNING id`;
+    await sql`INSERT INTO docs (name, v, data, open_fn) VALUES (${"board:" + b.id}, 0, NULL, 'board_open')`;
+    await sql`INSERT INTO board_members (board_id, user_id) VALUES (${b.id}, ${uid})`;
+    const [left] = await sql`SELECT mine_apply(${"mine:" + uid},
+      ${[{ op: "remove", path: `/boards/${b.id}` }] as any}, ${uid}) AS r`;
+    expect(left.r.gone).toBeUndefined();
+    expect((await sql`SELECT 1 FROM docs WHERE name = ${"board:" + b.id}`).length).toBe(1);
+  });
+
+  test("owner deletes a WATCHED board: watchers null on BOTH processes, nothing re-hosts", async () => {
+    // Two processes: A is the writer (no sync — the apply result's `gone`
+    // un-hosts there), B a sibling hearing doc_drop's doorbell via LISTEN.
+    const a = createHost({ requireAuth: true });
+    const b = createHost({ requireAuth: true });
+    const sqlA = freshSql();
+    const sqlB = freshSql();
+    await pgAuth(a, sqlA);
+    await pgAuth(b, sqlB);
+    const factories = (host: Host, s: SQL) => {
+      host.docs("mine:", async (name, userId) => {
+        const uid = Number(name.split(":")[1]);
+        if (!Number.isFinite(uid) || Number(userId) !== uid) throw new Error(`unknown doc: ${name}`);
+        await pgDoc(host, s, name, null, { apply: "mine_apply", seed: { open_fn: "mine_open" } });
+      });
+      host.docs("board:", async (name, userId) => {
+        const id = Number(name.split(":")[1]);
+        const [row] = await s`SELECT 1 FROM boards WHERE id = ${id}`;
+        const [ok] = await s`SELECT board_may(${id}, ${userId == null ? null : Number(userId)}) AS ok`;
+        if (!row || !ok?.ok) throw new Error(`unknown doc: ${name}`);
+        await pgDoc(host, s, name, null, { apply: "board_apply" });
+      });
+    };
+    factories(a, sqlA);
+    factories(b, sqlB);
+    const urlA = serve(a);
+    const urlB = serve(b);
+    stops.push((await pgSync(b, sqlB, { url: PG_URL })).stop);
+
+    const owner = client(urlA);
+    const om = await owner.call<{ user: { id: number } }>("register", {
+      name: "Own", email: "own@gone.test", password: "pw",
+    });
+    const friend = client(urlB);
+    const fm = await friend.call<{ user: { id: number } }>("register", {
+      name: "Fr", email: "fr@gone.test", password: "pw",
+    });
+
+    const oMine = owner.doc<MineDoc>(`mine:${om.user.id}`);
+    await oMine.ready;
+    oMine.at("/boards").apply([{ op: "add", path: "/-", value: { name: "doomed" } }]);
+    await until(() => Object.keys(oMine.peek()!.boards).length === 1);
+    const bid = Object.values(oMine.peek()!.boards)[0]!.id;
+    const oBoard = owner.doc<Board>(`board:${bid}`);
+    await oBoard.ready;
+    oBoard.at("/members").apply([{ op: "add", path: "/-", value: { email: "fr@gone.test" } }]);
+    await until(() => oBoard.peek()!.members?.[String(fm.user.id)] !== undefined);
+    const fBoard = friend.doc<Board>(`board:${bid}`);
+    await fBoard.ready;
+
+    oMine.at("/boards").apply([{ op: "remove", path: `/${bid}` }]);
+    await until(() => oBoard.peek() === null);                     // the writer's watchers
+    await until(() => fBoard.peek() === null);                     // the sibling's, by doorbell
+    await until(() => !a.names().includes(`board:${bid}`) && !b.names().includes(`board:${bid}`));
+    expect((await sql`SELECT 1 FROM docs WHERE name = ${"board:" + bid}`).length).toBe(0);
+
+    // A later ask reads as a doc that never existed — no existence oracle.
+    const errors: string[] = [];
+    const late = connect(urlB, { onError: (_d: string, e: string) => errors.push(e) });
+    remotes.push(late);
+    await late.call("login", { email: "fr@gone.test", password: "pw" });
+    late.doc(`board:${bid}`);
+    await until(() => errors.length > 0);
+    expect(errors[0]).toContain("unknown doc");
+  });
+
+  test("removing a member evicts their LIVE board and presence watchers (server.ts's wiring)", async () => {
+    let sid = 0;
+    const presenceOf = (name: string) =>
+      host.names().includes(name) ? host.doc<Record<string, { name: string }>>(name, {}) : null;
+    const host: Host = createHost({
+      requireAuth: true,
+      onSubscribe(doc, ws) {
+        if (!doc.startsWith("presence:")) return;
+        ws.data.sid ??= ++sid;
+        presenceOf(doc)?.apply([
+          { op: "add", path: `/${ws.data.sid}`, value: { name: ws.data.user?.name ?? "guest" } },
+        ]);
+      },
+      onUnsubscribe(doc, ws) {
+        if (!doc.startsWith("presence:") || !ws.data?.sid) return;
+        presenceOf(doc)?.apply([{ op: "remove", path: `/${ws.data.sid}` }]);
+      },
+    });
+    await pgAuth(host, sql);
+    const may = async (id: number, u?: number | string) => {
+      const [r] = await sql`SELECT board_may(${id}, ${u == null ? null : Number(u)}) AS ok`;
+      return !!r?.ok;
+    };
+    host.docs("board:", async (name, userId) => {
+      const id = Number(name.split(":")[1]);
+      const [row] = await sql`SELECT 1 FROM boards WHERE id = ${id}`;
+      if (!row || !(await may(id, userId))) throw new Error(`unknown doc: ${name}`);
+      const sig = await pgDoc<Board>(host, sql, name, null as unknown as Board, { apply: "board_apply" });
+      sig.onOps((ops) => ops?.forEach((op) => {
+        const m = op.op === "remove" ? /^\/members\/(\d+)$/.exec(op.path) : null;
+        if (!m) return;
+        void host.expel(name, Number(m[1]));
+        void host.expel(`presence:${name}`, Number(m[1]));
+      }));
+    });
+    host.docs("presence:", async (name, userId) => {
+      const id = Number(name.split(":")[2]);
+      if (!Number.isFinite(id) || !(await may(id, userId))) throw new Error(`unknown doc: ${name}`);
+      let sig!: Signal<Record<string, { name: string }>>;
+      sig = host.doc<Record<string, { name: string }>>(name, {}, {
+        open: async (u) => ((await may(id, u)) ? sig.peek() : null),
+      });
+    });
+    const url = serve(host);
+
+    const owner = client(url);
+    const om = await owner.call<{ user: { id: number } }>("register", {
+      name: "Boss", email: "boss@expel.test", password: "pw",
+    });
+    const member = client(url);
+    const mm = await member.call<{ user: { id: number } }>("register", {
+      name: "Out", email: "out@expel.test", password: "pw",
+    });
+    const [b] = await sql`INSERT INTO boards (name, owner_id) VALUES ('club', ${om.user.id}) RETURNING id`;
+    const name = `board:${b.id}`;
+    await sql`INSERT INTO docs (name, v, data, open_fn) VALUES (${name}, 0, NULL, 'board_open')`;
+    await sql`INSERT INTO board_members (board_id, user_id) VALUES (${b.id}, ${mm.user.id})`;
+
+    const mBoard = member.doc<Board>(name);
+    const mHere = member.doc<Record<string, { name: string }>>(`presence:${name}`);
+    const oBoard = owner.doc<Board>(name);
+    const oHere = owner.doc<Record<string, { name: string }>>(`presence:${name}`);
+    await Promise.all([mBoard.ready, mHere.ready, oBoard.ready, oHere.ready]);
+    await until(() => Object.keys(oHere.peek() ?? {}).length === 2);
+
+    // One op ends the membership AND the live subscriptions — board and
+    // presence both; the owner keeps theirs, and sees the watcher leave.
+    oBoard.at("/members").apply([{ op: "remove", path: `/${mm.user.id}` }]);
+    await until(() => mBoard.peek() === null);
+    await until(() => mHere.peek() === null);
+    await until(() => Object.keys(oHere.peek() ?? {}).length === 1);
+    expect(oBoard.peek()!.name).toBe("club");
+
+    // The stream really ended: a later write reaches the owner, not the evicted.
+    oBoard.at("/cards").apply([{ op: "add", path: "/-", value: { text: "after" } }]);
+    await until(() => Object.keys(oBoard.peek()!.cards).length === 1);
+    expect(mBoard.peek()).toBeNull();
   });
 });
