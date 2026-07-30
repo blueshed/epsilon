@@ -35,13 +35,18 @@ CREATE TABLE IF NOT EXISTS credentials (
 );
 CREATE INDEX IF NOT EXISTS idx_credentials_user ON credentials(user_id);
 
+-- Emails are STORED and COMPARED normalized — lower(trim()) — a field
+-- lesson: an address registered as "Pete@…" on a phone must log in as
+-- "pete@…" on a laptop. Every email door normalizes; nothing else may
+-- compare emails raw.
+
 -- Returns the public user row. Unique-violation bubbles to the caller.
 CREATE OR REPLACE FUNCTION register(p_name text, p_email text, p_password text)
 RETURNS jsonb AS $$
 DECLARE u users;
 BEGIN
   INSERT INTO users (email, name, password_hash)
-  VALUES (p_email, p_name, crypt(p_password, gen_salt('bf', 12)))
+  VALUES (lower(trim(p_email)), p_name, crypt(p_password, gen_salt('bf', 12)))
   RETURNING * INTO u;
   RETURN jsonb_build_object('id', u.id, 'name', u.name, 'email', u.email);
 END;
@@ -53,7 +58,7 @@ CREATE OR REPLACE FUNCTION login(p_email text, p_password text)
 RETURNS jsonb AS $$
 DECLARE u users;
 BEGIN
-  SELECT * INTO u FROM users WHERE email = p_email;
+  SELECT * INTO u FROM users WHERE email = lower(trim(p_email));
   IF NOT FOUND THEN
     PERFORM crypt(p_password, gen_salt('bf', 12));
     RETURN NULL;
@@ -120,5 +125,5 @@ CREATE OR REPLACE FUNCTION credential_list(p_email text)
 RETURNS jsonb AS $$
   SELECT COALESCE(jsonb_agg(jsonb_build_object('id', c.id, 'transports', c.transports)), '[]'::jsonb)
   FROM credentials c JOIN users u ON u.id = c.user_id
-  WHERE u.email = p_email;
+  WHERE u.email = lower(trim(p_email));
 $$ LANGUAGE sql STABLE;

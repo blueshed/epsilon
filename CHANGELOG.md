@@ -7,6 +7,26 @@ will ship.
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-07-30
+
+### Fixed
+
+- **Emails normalize — trimmed and lowercased at every door** (a japan
+  field lesson: an address registered as "Pete@…" on an autocapitalizing
+  phone couldn't log in as "pete@…", and a member shared with a cased
+  email read as an unknown user). `register` STORES `lower(trim(email))`;
+  `login`, passkeys' `credential_list`, and both member-by-email lookups
+  in `board_apply` COMPARE the same way — a cased duplicate registration
+  now refuses as "already registered" instead of minting a second
+  identity. Fixed in place in `002-auth.sql`/`100-board.sql` (a bug fix,
+  not a new migration — CREATE OR REPLACE re-applies cleanly). Deployed
+  apps adopt by copying the four function bodies into their next app
+  migration, plus a one-line heal for existing rows:
+  `UPDATE users SET email = lower(trim(email));` (check first for rows
+  that differ only by case — those are the japan duplicates to merge).
+  Logout was audited on the same pass: the sign-out button, CLI command,
+  and `session_end` are all present and pinned.
+
 ## [0.5.0] — 2026-07-30
 
 ### Security

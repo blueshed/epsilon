@@ -146,7 +146,7 @@ BEGIN
         || COALESCE((SELECT array_agg(user_id) FROM board_members WHERE board_id = v_bid), '{}');
       IF v_owner IS NOT NULL THEN v_mines := v_mines || v_owner; END IF;
     ELSIF v_p = ARRAY['members', '-'] AND v_op->>'op' = 'add' THEN
-      SELECT id INTO v_mid FROM users WHERE email = v_op->'value'->>'email';
+      SELECT id INTO v_mid FROM users WHERE email = lower(trim(v_op->'value'->>'email'));
       IF v_mid IS NOT NULL THEN v_mines := v_mines || v_mid; END IF;
     ELSIF array_length(v_p, 1) = 2 AND v_p[1] = 'members' AND v_p[2] ~ '^\d+$' THEN
       v_mines := v_mines || v_p[2]::bigint;
@@ -249,7 +249,8 @@ BEGIN
       IF v_owner IS NULL OR p_user IS DISTINCT FROM v_owner THEN
         RAISE EXCEPTION 'owner only: %', v_op->>'path';
       END IF;
-      SELECT id, name, email INTO v_mrow FROM users WHERE email = v_op->'value'->>'email';
+      -- Emails compare NORMALIZED (002's rule) — "  Pete@…  " finds pete@….
+      SELECT id, name, email INTO v_mrow FROM users WHERE email = lower(trim(v_op->'value'->>'email'));
       IF v_mrow.id IS NULL THEN
         RAISE EXCEPTION 'unknown user: %', v_op->'value'->>'email';
       END IF;

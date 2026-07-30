@@ -430,6 +430,13 @@ describe("sharing — members make multi-user real (009)", () => {
     catch (e) { err = String(e); }
     expect(err).toContain("already a member");
 
+    // Emails compare normalized: a cased, padded variant is the SAME person
+    // — refused as already-a-member, not mistaken for a stranger.
+    err = "";
+    try { await sql.unsafe(`SELECT board_apply($1, $2, $3)`, [doc, addOp("  MATE@Ref.TEST ") as unknown, boss]); }
+    catch (e) { err = String(e); }
+    expect(err).toContain("already a member");
+
     // The owner removes the member; the row is gone.
     const rm = await sql.unsafe(`SELECT board_apply($1, $2, $3) AS r`,
       [doc, [{ op: "remove", path: `/members/${mate}` }] as unknown, boss]);

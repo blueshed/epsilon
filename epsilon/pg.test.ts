@@ -213,6 +213,31 @@ describe("schema-native users", () => {
     expect(me.email).toBe("pete@blueshed.co.uk");
   });
 
+  test("emails normalize — trimmed and lowercased at every door (the japan lesson)", async () => {
+    const host = createHost();
+    await pgAuth(host, sql);
+    const url = serve(host);
+    const r = client(url);
+
+    // Registered from a phone, with autocapitalize and a stray space…
+    const reg = await r.call<{ user: { email: string } }>("register", {
+      name: "Cased", email: "  Cased.User@Example.TEST ", password: "pw",
+    });
+    expect(reg.user.email).toBe("cased.user@example.test");   // STORED normalized
+
+    // …logs in from a laptop, typed plainly — and shouted, and padded.
+    const plain = await r.call<{ user: { email: string } }>("login",
+      { email: "cased.user@example.test", password: "pw" });
+    expect(plain.user.email).toBe("cased.user@example.test");
+    const shouted = await r.call<{ user: { email: string } }>("login",
+      { email: " CASED.USER@EXAMPLE.TEST  ", password: "pw" });
+    expect(shouted.user.email).toBe("cased.user@example.test");
+
+    // A different casing is the SAME identity — not a second account.
+    await expect(r.call("register", { name: "C", email: "CASED.user@example.test", password: "x" }))
+      .rejects.toThrow(/already registered/);
+  });
+
   test("register/login are rate limited per client — bcrypt is expensive", async () => {
     const host = createHost();
     await pgAuth(host, sql, { maxAttempts: 2, windowMs: 60_000 });

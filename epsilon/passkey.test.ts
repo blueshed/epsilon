@@ -195,10 +195,10 @@ describe("passkeys — passwordless over the same wire", () => {
     expect(who.email).toBe("pete@passkey.test");
   });
 
-  test("login_begin with an email narrows allowCredentials to that account", async () => {
+  test("login_begin with an email narrows allowCredentials to that account — however it's cased", async () => {
     const r = client();
     const o = await r.call<{ allowCredentials: { id: string }[] }>(
-      "passkey_login_begin", { email: "pete@passkey.test" });
+      "passkey_login_begin", { email: "  Pete@Passkey.TEST " });   // normalized at the door
     expect(o.allowCredentials.map((c) => c.id)).toContain(b64uEnc(key.credId));
   });
 
