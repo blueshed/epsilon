@@ -78,8 +78,9 @@ the moment the row changes — the bug that motivated 0.3.0).
 ## Authoring a doc type (the kit — db/003)
 
 A type is ONE composition query + ONE dispatch function (~30 lines of app
-SQL). Copy `db/005-board.sql` (worked example) or rel.test.ts's `todo`
-type (minimal).
+SQL). Copy `db/100-board.sql` (worked example) or rel.test.ts's `todo`
+type (minimal). Number app migrations from 100 up — 001–099 are epsilon
+core, frozen once released; `migrate()` warns if you squat below.
 
 - `<x>_open(doc, user)` — one composition query; NULL user = the host,
   full view; NULL result = refused.
@@ -100,7 +101,13 @@ type (minimal).
   what the log never saw.
 - The kit owns locks, refusals (no existence oracle), versioning, audit,
   NOTIFY, undo (`doc_undo`), conflict detection (`doc_touched_since`);
-  `doc_drop` deletes a doc whole; `doc_commit` on ANOTHER doc is the
+  `doc_drop` deletes a doc whole — and tells the world: it rings the
+  doorbell (`{name, gone}`) and returns the name, which your dispatch
+  collects into the result's `gone` array
+  (`v_gone := v_gone || doc_drop(...)`, returned as
+  `doc_commit(...) || jsonb_build_object('gone', to_jsonb(v_gone))`) so
+  the writing process un-hosts it too — watchers receive the snapshot of
+  nothing (a root replace to null). `doc_commit` on ANOTHER doc is the
   multi-doc mirror. Multi-doc mirrors follow 005's lock order: ALL mine
   docs ascending uid, THEN board docs ascending id, pre-scanned and locked
   up front — mirror only into docs you pre-locked.
@@ -137,6 +144,13 @@ echo), so it's embedded-tier safe. Undo is a WRITE — treat it like one.
   per-process, and exactly as private as the board it watches: its open
   gate re-asks `board_may` per socket (the rule above, applied). Follow
   this shape for any who's-here / typing / cursor state.
+- A subscription never outlives its permit: `host.drop(name)` un-hosts a
+  deleted doc (every watcher gets the null snapshot and is unsubscribed —
+  the relational tier calls it for you via `gone` and the doorbell);
+  `host.expel(name, userId)` re-asks the doc's `open` gate and evicts that
+  user's sockets when it refuses. server.ts wires member-remove echo ops
+  to expel (the board AND its presence) — copy that wiring for any doc
+  type whose membership can be revoked.
 
 ## The CLI — full commands
 

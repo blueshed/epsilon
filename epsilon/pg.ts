@@ -52,7 +52,9 @@ export { migrate, migrationStatus, migrationFiles } from "./migrate";
  * truth. Client ops go to `<apply>(name, ops, user)` in ONE transaction — it
  * mints ids from sequences, updates tables, logs doc_ops (with the undo),
  * bumps v, NOTIFYs — and returns `{v, ops}` with resolved paths/rows, which
- * re-enter through pgReceive. A write never recomposes the doc: composition
+ * re-enter through pgReceive. A dispatch that doc_drops other docs lists
+ * them as `gone` and the hook un-hosts each (watchers receive the snapshot
+ * of nothing); siblings hear the same through doc_drop's doorbell. A write never recomposes the doc: composition
  * is open-time (`doc_open`), and the host composes AS ITSELF — doc_open with
  * no user is the full copy (001's rule). Multi-table writes and composition
  * live in SQL, where they're optimal; hydrate, catch-up, fan-out, wire, and
@@ -93,6 +95,11 @@ export async function pgDoc<T>(
           [name, ops as unknown, userId ?? null],
         );
         await pgReceive(host, sql, name, rows[0]!.r as { v: number | string; ops: Op[] });
+        // Docs this write dropped (`gone` — a board deleted from a mine
+        // list) un-host HERE, watchers included: doc_drop's doorbell only
+        // reaches processes with a listener, and the writer may have none
+        // (PGlite; poll mode).
+        for (const g of (rows[0]!.r as { gone?: string[] }).gone ?? []) host.drop(g);
       },
       async open(userId) {
         if (guard) return (await guard(userId)) ? sig.peek() : null;
@@ -192,8 +199,9 @@ export function pgUndo(host: Host, sql: Sql, applyOf: (doc: string) => string | 
       `SELECT doc_undo($1, $2, $3, $4) AS r`,
       [name, params?.v ?? null, ws.data?.user?.id ?? null, applyFn],
     );
-    const r = rows[0]!.r as { v: number | string; ops: Op[] };
+    const r = rows[0]!.r as { v: number | string; ops: Op[]; gone?: string[] };
     await pgReceive(host, sql, name, r);
+    for (const g of r.gone ?? []) host.drop(g);
     return r;
   });
 }
@@ -224,7 +232,8 @@ export interface Sync {
  * Cross-process fan-out. Prefers real push: when the optional `pg` package
  * is installed, a dedicated connection LISTENs on the channel every persist
  * already NOTIFYs, with reconnect + full catch-up. Without `pg`, falls back
- * to polling hosted docs' versions.
+ * to polling hosted docs' versions. Deletions travel too: a `gone` doorbell
+ * (or, polling, a row that stops coming back) un-hosts the doc here.
  *
  * The pg dependency exists ONLY because Bun's SQL client has no LISTEN
  * callbacks yet (verified, 1.3.14). The day `sql.listen` ships, the listen
@@ -260,7 +269,10 @@ export async function pgSync(
           client.on("notification", (msg: { payload?: string }) => {
             if (stopped || !msg.payload) return;
             try {
-              const { name } = JSON.parse(msg.payload) as { name: string };
+              const { name, gone } = JSON.parse(msg.payload) as { name: string; gone?: boolean };
+              // doc_drop's doorbell: the doc no longer exists anywhere —
+              // un-host it and its watchers hear the snapshot of nothing.
+              if (gone) return host.drop(name);
               void catchUp(host, sql, name).catch((err) =>
                 console.error("[epsilon/pg] catch-up failed:", err));
             } catch { /* malformed payload — ignore */ }
@@ -296,6 +308,10 @@ export async function pgSync(
   // --- poll fallback ------------------------------------------------------
   let stopped = false;
   let inFlight = false;
+  // Names a sweep has seen a row for. A KNOWN name that stops coming back
+  // was doc_dropped under us — un-host it (host.drop). Docs that never had
+  // a row (in-memory presence docs sharing the host) are never eligible.
+  const known = new Set<string>();
   async function tick(): Promise<void> {
     if (stopped || inFlight) return;
     inFlight = true;
@@ -307,10 +323,16 @@ export async function pgSync(
       const rows = await sql`
         SELECT name, v FROM docs
         WHERE name IN (SELECT jsonb_array_elements_text(${names as any}))`;
+      const present = new Set<string>();
       for (const row of rows) {
+        present.add(row.name as string);
         let current: number;
         try { current = host.v(row.name as string); } catch { continue; }
         if (Number(row.v) > current) await catchUp(host, sql, row.name as string);
+      }
+      for (const name of names) {
+        if (present.has(name)) known.add(name);
+        else if (known.delete(name)) host.drop(name);
       }
     } catch (err) {
       console.error("[epsilon/pg] sync tick failed:", err);

@@ -7,6 +7,64 @@ will ship.
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-07-30
+
+### Security
+
+- **A subscription never outlives its permit.** Two lingering shapes, one
+  fix. Deletion: a `doc_drop`ped board stayed hosted wherever it had
+  watchers — rendering forever, no push. Revocation: a removed member kept
+  receiving board (and presence) broadcasts until they closed the doc.
+  The wire needed no new vocabulary — the eviction push is a root replace
+  to **null**, the value every doc holds before its first snapshot, so
+  clients and `ui.ts` already render it and gone reads exactly like
+  never-there. `host.drop(name)` un-hosts a deleted doc (every watcher
+  nulls and is unsubscribed); every process learns — the writer from the
+  apply result (`doc_drop` now returns the name; `mine_apply` lists it as
+  `gone`, which covers PGlite and poll mode), siblings from `doc_drop`'s
+  new doorbell (`{name, gone}`), and a polling host notices a known row
+  that stops coming back. `host.expel(name, user)` re-asks the doc's
+  `open` gate and evicts on refusal — the permit at open time and eviction
+  time is the same question; `server.ts` wires member-remove echoes to
+  expel the board AND its presence, on every process hosting them. The
+  board view on screen falls back to the shared board when its doc goes to
+  nothing. Pinned across doc.test.ts (wire), rel.test.ts (both processes;
+  live revocation), and pg.test.ts (poll).
+
+### Added
+
+- **Upgrades — taking a new epsilon is mechanical** (the japan field
+  report, absorbed into DESIGN.md "Upgrades"). package.json records the
+  release you scaffolded from (`"epsilon": { "base": "v0.5.0" }`, kept in
+  step by the release flow); `bun run epsilon:upgrade`
+  (`epsilon/upgrade.ts`) fetches upstream and three-way applies
+  `git diff <base> <target>` over a whitelist — `epsilon/` and the skill,
+  never `db/`, never app files — so local patches survive and genuine
+  divergence surfaces as conflict markers; it ends by stamping the new
+  base and running the vendored tests. Pinned by upgrade.test.ts with
+  fixture upstream/scaffold repos.
+- **Migration policy, now binding**: released core migrations (001–099)
+  freeze forever; new core behavior ships as the next numbered file, which
+  a deployed app adopts by copying that one file. App migrations start at
+  100 — the board/mine types moved to `db/100-board.sql` (re-applying
+  under the new name is idempotent; the old `005-board.sql` ledger row is
+  inert), and `migrate()` warns when a sub-100 file isn't upstream's.
+  `doc_drop`'s upgrade ships as `db/005-gone.sql` accordingly — 003/004
+  are untouched, so existing ledgers stay clean.
+- **Prune heartbeat**: `epsilon_prune()` runs daily after boot (unref'd
+  timer — tests and short runs exit freely; an external cron remains
+  fine). Closes the last DESIGN.md open item.
+
+### Changed
+
+- A dispatch that `doc_drop`s other docs should collect the return value
+  into its result — before: `PERFORM doc_drop('board:' || v_bid);` after:
+  `v_gone := v_gone || doc_drop('board:' || v_bid);` returned as
+  `doc_commit(...) || jsonb_build_object('gone', to_jsonb(v_gone))` (see
+  `100-board.sql`'s `mine_apply`). Without it, deletion still works — the
+  writing process just relies on the doorbell instead of un-hosting
+  immediately (and PGlite/poll writers keep the doc hosted until eviction).
+
 ## [0.4.0] — 2026-07-29
 
 ### Added

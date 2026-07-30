@@ -58,6 +58,13 @@ export async function startServer(opts: StartOpts = {}) {
     sql = db;
     await migrate(db, { dir: opts.dbDir ?? "db" });    // db/*.sql, in order, hash-recorded
     await db`SELECT epsilon_prune()`;                  // bounded tables: old ops, dead sessions
+    // ...and daily thereafter — long-lived deployments prune without a cron
+    // (an external cron stays fine; prune is idempotent). unref: tests and
+    // short runs exit freely.
+    setInterval(async () => {
+      try { await db`SELECT epsilon_prune()`; }
+      catch (err) { console.error("[epsilon] prune failed:", err); }
+    }, 86_400_000).unref?.();
     await pgAuth(host, db);                            // wire adapter over the SQL contract
     // Passkeys: register one while signed in, sign in with it ever after.
     // Ceremonies bind to the socket's own origin; pin { origins } in prod.
@@ -80,7 +87,17 @@ export async function startServer(opts: StartOpts = {}) {
       const [b] = await db`SELECT 1 FROM boards WHERE id = ${id}`;
       // A stranger is refused BEFORE hosting — probes cost nothing.
       if (!b || !(await may(id, userId))) throw new Error(`unknown doc: ${name}`);
-      await pgDoc<Board>(host, db, name, null as unknown as Board, { apply: "board_apply" });
+      const sig = await pgDoc<Board>(host, db, name, null as unknown as Board, { apply: "board_apply" });
+      // Revocation bites LIVE sockets, not just the next open: a member
+      // removed (or leaving) is expelled from the board and its presence —
+      // expel re-asks the open gate, so a batch that nets to membership
+      // keeps them. Ops arrive here on every process hosting the doc.
+      sig.onOps((ops) => ops?.forEach((op) => {
+        const m = op.op === "remove" ? /^\/members\/(\d+)$/.exec(op.path) : null;
+        if (!m) return;
+        void host.expel(name, Number(m[1]));
+        void host.expel(`presence:${name}`, Number(m[1]));
+      }));
     });
 
     // mine:<uid> — YOUR board list; creating a board is an op on it. Only its

@@ -99,6 +99,24 @@ export interface Host {
   v(name: string): number;
   /** Names of all hosted docs (storage sync iterates these). */
   names(): string[];
+  /**
+   * Un-host a doc that no longer exists: every watcher receives the snapshot
+   * of nothing (root replace → null) and is unsubscribed; the entry is
+   * forgotten. A dynamic name may meet its factory again on a later open —
+   * which refuses now the backing rows are gone. Storage is the caller's
+   * business: drop() only ends the hosting (the relational tier's doc_drop
+   * already deleted the row and rang the doorbell). Unknown names no-op.
+   */
+  drop(name: string): void;
+  /**
+   * Revocation for the already-subscribed: re-ask the doc's `open` gate for
+   * this user and, when it refuses, evict their sockets (snapshot of
+   * nothing + unsubscribe). The gate answering the SAME question at open
+   * time keeps one permit for both moments. No-op on docs without a gate —
+   * an ungated doc has no permit to lose — and on users the gate still
+   * admits (a remove+re-add batch nets to nothing).
+   */
+  expel(name: string, userId?: number | string): Promise<void>;
   /** Register an RPC method, callable from clients via remote.call(). */
   method(name: string, fn: (params: any, ws: any) => unknown | Promise<unknown>): void;
   /**
@@ -138,10 +156,11 @@ export function createHost(opts?: {
   // muted: this entry's ops came FROM storage (hydrate/receive), so its
   // persist must not re-run. PER ENTRY — a synchronous cascade that writes a
   // DIFFERENT doc during the apply still persists that doc normally.
-  // subs: sockets currently subscribed (lifetime tax). dynamic: hosted by a
-  // prefix factory, so it can be re-hosted — and is EVICTED when the last
-  // subscriber leaves; statically registered docs live for the process.
-  type Entry = { sig: Signal<any>; v: number; muted: boolean; subs: number; dynamic: boolean; persist?: DocOpts["persist"]; write?: DocOpts["write"]; open?: DocOpts["open"] };
+  // subs: the sockets currently subscribed (lifetime tax — and the set
+  // drop/expel evict from). dynamic: hosted by a prefix factory, so it can
+  // be re-hosted — and is EVICTED when the last subscriber leaves;
+  // statically registered docs live for the process.
+  type Entry = { sig: Signal<any>; v: number; muted: boolean; subs: Set<any>; dynamic: boolean; persist?: DocOpts["persist"]; write?: DocOpts["write"]; open?: DocOpts["open"] };
   const docs = new Map<string, Entry>();
   const methods = new Map<string, (params: any, ws: any) => unknown | Promise<unknown>>();
   const prefixes = new Map<string, (name: string, userId?: number | string) => unknown | Promise<unknown>>();
@@ -180,9 +199,26 @@ export function createHost(opts?: {
     if (!ws.data?.docs?.delete(name)) return;
     try { ws.unsubscribe(name); } catch { /* socket already gone */ }
     const entry = docs.get(name);
-    if (entry && --entry.subs <= 0 && entry.dynamic) docs.delete(name);
+    if (entry) {
+      entry.subs.delete(ws);
+      if (entry.subs.size === 0 && entry.dynamic) docs.delete(name);
+    }
     try { opts?.onUnsubscribe?.(name, ws); }
     catch (err) { console.error("[epsilon/doc] onUnsubscribe hook threw:", err); }
+  }
+
+  /** End one socket's subscription FROM the server: push the snapshot of
+   *  nothing — a root replace to null, the same value every doc holds before
+   *  its first snapshot, over the one message shape — then release it
+   *  (hooks fire as usual). The client's copy empties reactively. */
+  function evict(name: string, entry: Entry, ws: any): void {
+    try {
+      ws.send(JSON.stringify({
+        doc: name, v: entry.v,
+        ops: [{ op: "replace", path: "", value: null }],
+      } satisfies ServerMsg));
+    } catch { /* socket already gone */ }
+    unsubscribe(ws, name);
   }
 
   return {
@@ -193,7 +229,7 @@ export function createHost(opts?: {
       const existing = docs.get(name);
       if (existing) return existing.sig as Signal<T>;
       const sig = signal<T>(empty);
-      const entry: Entry = { sig, v: 0, muted: false, subs: 0, dynamic: false, persist: docOpts?.persist, write: docOpts?.write, open: docOpts?.open };
+      const entry: Entry = { sig, v: 0, muted: false, subs: new Set(), dynamic: false, persist: docOpts?.persist, write: docOpts?.write, open: docOpts?.open };
       docs.set(name, entry);
       // Broadcast is just the doc's own ops channel piped to subscribers —
       // whether the write came from a client, server code, or storage
@@ -232,6 +268,24 @@ export function createHost(opts?: {
 
     names() {
       return [...docs.keys()];
+    },
+
+    drop(name) {
+      const entry = docs.get(name);
+      if (!entry) return;
+      for (const ws of [...entry.subs]) evict(name, entry, ws);
+      docs.delete(name);
+    },
+
+    async expel(name, userId) {
+      const entry = docs.get(name);
+      if (!entry?.open) return;
+      const targets = [...entry.subs].filter((ws) => ws.data?.user?.id === userId);
+      if (targets.length === 0) return;
+      let snapshot: unknown = null;
+      try { snapshot = await entry.open(userId); } catch { snapshot = null; }
+      if (snapshot != null) return;
+      for (const ws of targets) evict(name, entry, ws);
     },
 
     method(name, fn) {
@@ -319,7 +373,7 @@ export function createHost(opts?: {
           const isNew = !ws.data.docs.has(msg.doc);
           if (isNew) {
             ws.data.docs.add(msg.doc);
-            entry.subs++;
+            entry.subs.add(ws);
           }
           // The snapshot IS an op — same vocabulary, same client code path.
           ws.send(JSON.stringify({

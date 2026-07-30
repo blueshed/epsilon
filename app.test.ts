@@ -4,7 +4,6 @@
 import { describe, test, expect } from "bun:test";
 import { SQL } from "bun";
 import { startServer } from "./server";
-import { migrate } from "./epsilon/pg";
 
 const DB_DIR = new URL("./db", import.meta.url).pathname;
 
@@ -61,9 +60,9 @@ describe("the app, end to end", () => {
       await admin.end();
     }
     const db = new SQL(PG_URL, { max: 3 });
-    await migrate(db, { dir: DB_DIR });
-    await db.unsafe("TRUNCATE docs, doc_ops, sessions, boards, cards, migrations RESTART IDENTITY CASCADE");
-    await db.unsafe("TRUNCATE users RESTART IDENTITY CASCADE");
+    // Fresh schema, fresh ledger — frozen files only re-apply from nothing
+    // (see pg.test.ts).
+    await db.unsafe("DROP SCHEMA public CASCADE; CREATE SCHEMA public");
 
     // startServer runs the migrations itself — that IS the boot path.
     const { server, sql } = await startServer({ port: 0, pgUrl: PG_URL, dbDir: DB_DIR });

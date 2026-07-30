@@ -125,7 +125,7 @@ functions — and leaves the dispatch loop yours:
   `op_add`/`op_replace`/`op_remove` — the wire's three verbs, in SQL.
 
 A doc type is now ~30 lines of app SQL: one composition query + one
-dispatch function. db/005-board.sql is board/mine built on it (behavior-identical,
+dispatch function. db/100-board.sql is board/mine built on it (behavior-identical,
 paths now match exactly); rel.test.ts's `todo` type is the minimal worked
 example, driven over the real wire.
 
@@ -177,7 +177,7 @@ must hold ONE reserved connection.
   and notified. Delivery is the ordinary fan-out (pgSync).
 - **Delete cascades.** Cards via FK; the doc row and its log explicitly.
 
-## Sharing (db/005-board.sql) — members, mirrored
+## Sharing (db/100-board.sql) — members, mirrored
 
 - `board_members` + `board_may`: public, owner, or member — one predicate,
   both directions, asked again on every open (guards may be async: the
@@ -193,9 +193,9 @@ must hold ONE reserved connection.
   docs. A membership change racing the pre-scan can only SKIP a mirror —
   never lock out of order — and recompute-from-state heals the stale entry
   at the next open.
-- Known limit: revocation bites at the write boundary and the next open; an
-  already-subscribed socket keeps receiving broadcasts until it closes the
-  doc (the per-subscriber limit above).
+- Revocation bites LIVE sockets too (0.5.0): the member-remove echo expels
+  the removed user from the board and its presence — see "Gone is a
+  snapshot of nothing".
 
 ## Presence — being there is watching a doc
 
@@ -281,12 +281,67 @@ Decisions:
   mints P-256 keys, builds CBOR attestations, DER-wraps signatures) — the
   ceremony is tested without a browser, like everything else.
 
+## Gone is a snapshot of nothing (2026-07-29)
+
+The last two open items — and the sharing known-limit — were one defect: a
+subscription could outlive its permit. A deleted board lingered on every
+host with watchers (rendering forever, no push); a removed member kept
+receiving broadcasts until they closed the doc.
+
+- **No new vocabulary.** The eviction push is a root replace to null — the
+  value every doc holds before its first snapshot, so clients and ui.ts
+  already render it, and gone reads exactly like never-there (no existence
+  oracle grows).
+- **`host.drop(name)`** un-hosts: each watcher gets the null snapshot and
+  is unsubscribed (hooks fire), the entry is forgotten. Every process
+  learns: the WRITER from the apply result — `doc_drop` returns the name
+  and the dispatch lists it as `gone` (no listener needed: PGlite, poll) —
+  siblings from `doc_drop`'s doorbell (`{name, gone}`); a polling host
+  notices a known row that stops coming back.
+- **`host.expel(name, user)`** re-asks the doc's `open` gate and evicts
+  only on refusal — the permit at open time and eviction time is the same
+  question (0.3.2's presence rule, extended to lifetime). server.ts wires
+  member-remove echo ops to expel the board and its presence; riding
+  `sig.onOps` means every process hosting the doc enforces it on its own
+  sockets.
+- Known nuance: a doc deleted while a client's socket was DOWN re-opens to
+  a refusal (onError), not a null push — the mine mirror's fresh snapshot
+  carries the loss.
+
+## Upgrades — taking a new epsilon is mechanical (2026-07-30)
+
+The second field report (japan; the first became 0.3.0): one month
+deployed, pinned to 0.2.2 plus local patches, `db/` forked permanently
+because 0.3.0's renumbering broke its ledger. Upgrade-by-hand was already
+the most expensive part of owning the stack. The problem splits in three,
+and only the SQL part wanted machinery — which existed:
+
+- **Runtime files are a merge problem; git is the tool.** package.json
+  records the scaffold's upstream base (`"epsilon": { "base": "v0.5.0" }`,
+  kept in step by the release flow, carried by `bun create`). `bun run
+  epsilon:upgrade` fetches upstream and three-way applies
+  `git diff <base> <target>` over a WHITELIST — `epsilon/` and the skill;
+  never `db/`, never app files. Local patches survive; genuine divergence
+  surfaces as conflict markers, which is correct; the vendored tests are
+  the proof. Upstream commits are the upgrade steps, the recorded base is
+  the ledger — no new mechanism.
+- **Released core migrations freeze forever.** The 0.3.0 renumbering was
+  the sin: right for fresh scaffolds, unadoptable by any deployed ledger.
+  Decision 4's "once real deployments exist" moment has passed. New core
+  behavior ships as the next numbered file — `005-gone.sql` is the first —
+  which a deployed app adopts by copying that one file; its ledger stays
+  one history. The range is reserved: **001–099 core, app migrations from
+  100** (the board type moved to `100-board.sql`; `migrate()` warns when a
+  sub-100 file isn't upstream's).
+- **App call-sites: TypeScript is the codemod.** No scripts that edit app
+  code. Every breaking change must fail LOUDLY at `check` or construction
+  time with the one-line fix in the message, and gets a CHANGELOG entry
+  with exact before/after. That is the whole contract.
+
 ## Open items
 
-- Doc GC covers the unwatched case; a deleted doc that still has watchers
-  lingers until they leave (no "doc deleted" push yet).
-- Prune cadence: `epsilon_prune(keep)` (004) runs at boot only — long-lived
-  deployments should cron it.
+- None right now. (`epsilon_prune` runs at boot and daily since 0.5.0; an
+  external cron remains fine.)
 
 ## Non-goals
 
@@ -310,3 +365,6 @@ No vdom. No OT/CRDT (model is authoritative; LWW + resync). No offline. No arbit
    types. The narrative lives in git and this file. Databases that applied
    the old files upgrade cleanly (new names, idempotent statements); once
    real deployments exist, the files freeze and forward-only rules.
+   *Amended 2026-07-30 (japan):* that moment has passed. Released core
+   files are frozen forever; new core behavior is the next number; the
+   range is reserved (001–099 core, app from 100) — see "Upgrades".

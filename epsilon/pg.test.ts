@@ -5,8 +5,8 @@ import { SQL } from "bun";
 import { createHost, connect, type Host, type Remote } from "./doc";
 import { migrate, pgDoc, pgSync, pgAuth } from "./pg";
 
-// Tests own a SEPARATE database (created on demand) — the suite TRUNCATEs,
-// and it must never share the app's DB. NAMESPACED BY APP (package.json
+// Tests own a SEPARATE database (created on demand) — the suite wipes its
+// schema, and it must never share the app's DB. NAMESPACED BY APP (package.json
 // name): scaffolds share a dev Postgres with the template — and each other —
 // and identical names ping-pong the migration ledger between checkouts
 // (hash drift). Point EPSILON_TEST_PG_URL elsewhere to override; it
@@ -76,12 +76,13 @@ const untilDbV = (name: string, v: number) =>
 beforeAll(async () => {
   await ensureTestDb();
   sql = freshSql();
+  // Start from NOTHING: released core files are frozen and only guaranteed
+  // against their ledger (005 upgrades what 003 created — re-applying 003
+  // over the final schema cannot work), so the suite wipes the schema, not
+  // the ledger, and migrates fresh.
+  await sql.unsafe("DROP SCHEMA public CASCADE; CREATE SCHEMA public");
   await migrate(sql, { dir: DB_DIR });
   expect(await migrate(sql, { dir: DB_DIR })).toEqual([]);   // idempotent: nothing re-runs
-  // Wipe data AND the ledger, then re-migrate — the suite starts from seeds.
-  await sql.unsafe("TRUNCATE docs, doc_ops, sessions, boards, cards, migrations RESTART IDENTITY CASCADE");
-  await sql.unsafe("TRUNCATE users RESTART IDENTITY CASCADE");
-  await migrate(sql, { dir: DB_DIR });
 });
 
 afterAll(async () => {
@@ -164,6 +165,28 @@ describe("cross-process fan-out (LISTEN/NOTIFY)", () => {
 
     boardA.apply([{ op: "add", path: "/cards/7", value: { id: 7, title: "polled" } }]);
     await until(() => boardC.peek().cards["7"] !== undefined);
+  });
+
+  test("poll notices a vanished row: the doc un-hosts, watchers get the snapshot of nothing", async () => {
+    const a = createHost();
+    const c = createHost();
+    const sqlA = freshSql();
+    const sqlC = freshSql();
+    const boardA = await pgDoc<Board>(a, sqlA, "blob:gone", structuredClone(empty));
+    const boardC = await pgDoc<Board>(c, sqlC, "blob:gone", structuredClone(empty));
+    const sync = await pgSync(c, sqlC, { ms: 50, mode: "poll" });
+    stops.push(sync.stop);
+    const watcher = client(serve(c)).doc<Board>("blob:gone");
+    await watcher.ready;
+
+    // A write round-trips first, so a sweep has seen the row (it is KNOWN —
+    // docs that never had a row, like in-memory presence, are never dropped).
+    boardA.apply([{ op: "add", path: "/cards/2", value: { id: 2, title: "brief" } }]);
+    await until(() => boardC.peek().cards["2"] !== undefined);
+
+    await sqlA`SELECT doc_drop(${"blob:gone"})`;
+    await until(() => !c.names().includes("blob:gone"));
+    await until(() => watcher.peek() === null);
   });
 });
 

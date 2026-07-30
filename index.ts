@@ -73,6 +73,13 @@ function openBoard(name: string): void {
   membersUl.replaceChildren();
   pushDisposeScope();
   effect(() => { boardName.textContent = doc.get()?.name ?? ""; });
+  // Gone is a snapshot of nothing: a board deleted — or a share revoked —
+  // pushes null (v stays > 0, unlike the pre-snapshot null). Fall back to
+  // the shared board; the mine list already lost its row via the mirror.
+  effect(() => {
+    if (doc.get() != null || doc.v === 0) return;
+    queueMicrotask(() => { if (currentBoard === name) openBoard("board:1"); });
+  });
   effect(() => {
     const here = pres.get();
     const names = here ? Object.values(here).map((p) => p?.name ?? "?") : [];
