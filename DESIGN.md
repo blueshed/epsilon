@@ -41,7 +41,8 @@ Any line not paying one of these taxes is deletable.
 - **Location transparency**: a remote doc is a Signal whose `apply()` *sends*; the echo mutates. `set()`, `update()`, and every `at()` lens work over the wire unchanged, because they only ever call `apply()`.
 - No optimistic apply — the echo renders the write (delta's rule).
 - Contiguous `v` per doc: replay ignored, gap → re-open, reconnect → re-open all.
-- `call()` for RPC (queued until the socket opens); auth methods set the socket's user; `requireAuth` hosts refuse doc traffic until one has.
+- `call()` for RPC (queued until the socket opens); auth methods set the socket's user; `requireAuth` hosts refuse doc traffic until one has. **The connect hook goes first on every open** (2026-07-31): queued calls used to flush ahead of it, so a call issued in the same tick as `connect()` — which is every call a one-shot CLI makes — overtook its own `authenticate` and landed on a session-less socket. The hook's own calls don't queue; the socket is open by the time it runs.
+- `onDisconnect(willRetry)` is the symmetric half of `onConnect`, fired on every close (false only for a deliberate `remote.close()`). Doc signals KEEP their last value across a drop — the reconnect's snapshot is what resets them — so anything rendered as live (presence, a connection dot) must hear the drop from this hook or it goes on testifying to a state nobody is in.
 - Lifetime: `remote.doc()` handles are refcounted; the last `close()` unsubscribes and stops re-opens. The host counts watchers per socket and evicts an unwatched DYNAMIC doc — its factory re-hosts (and recomposes) on the next open. Static docs live for the process.
 - Postgres tier (pg.ts): TS applies ops, one guarded UPDATE persists, doc_ops is the log. Cross-process fan-out is real push — LISTEN/NOTIFY via the optional `pg` peer (a dedicated connection with reconnect + catch-up), because Bun's SQL client has no LISTEN callbacks yet (verified, 1.3.14). Decision (Peter, 2026-07-28): carry `pg` for this one job and RETIRE it the day `sql.listen` ships — the seam and tests don't change. Without `pg` installed, `pgSync` degrades to polling.
 
@@ -74,11 +75,18 @@ Two ENGINES, one schema (2026-07-29): the relational tier also runs on
 EMBEDDED Postgres — PGlite (WASM, in-process) behind the same `Sql` seam
 (`epsilon/pglite.ts`). Every migration, the doc kit, and the auth contract
 run unchanged; `EPSILON_PG_DIR` selects it. The deal: ONE app process owns
-the directory — no horizontal scaling, and pgSync is unnecessary by
-construction (no sibling processes exist; the host's own broadcast reaches
-every subscriber). Outgrow it → pg_dump into a wire server, set
-`EPSILON_PG_URL`: scaling up is a config change because both engines speak
-the same schema. Measured: WASM boot ~2–7s by machine (once, at start),
+the directory — no horizontal scaling. It still runs pgSync, in POLL mode
+(2026-07-31, a japan field lesson): sync was skipped here on the reasoning
+that there are no sibling processes to hear from, which is true and beside
+the point. Sync is the delivery path for every commit made OUTSIDE a doc's
+own write hook, and the commonest of those is a MIRROR — `board_apply`
+writing into `mine:<uid>` in the same transaction. The write hook re-enters
+the doc it wrote; nothing re-enters the sibling, and PGlite has no doorbell
+to ring. Symptom: a share landed in the tables and the member's list never
+moved, refresh included — a doc another socket still watches is served the
+hosted snapshot, not a fresh composition. Outgrow it → pg_dump into a wire
+server, set `EPSILON_PG_URL`: scaling up is a config change because both
+engines speak the same schema. Measured: WASM boot ~2–7s by machine (once, at start),
 bcrypt cost 12 ~350ms — on par with native.
 
 ## Delivered (Peter-driven, 2026-07-28 evening)
@@ -307,6 +315,57 @@ receiving broadcasts until they closed the doc.
 - Known nuance: a doc deleted while a client's socket was DOWN re-opens to
   a refusal (onError), not a null push — the mine mirror's fresh snapshot
   carries the loss.
+
+## Who changed what (2026-07-31)
+
+Eight people editing one plan, mostly while the others are asleep. The
+audit to answer "who moved this?" was already on disk — `doc_ops` has
+recorded who, what and when since 001 — and the only way to read it was
+psql. The answer splits in two, and the split is the design:
+
+- **STATE** — a row's own `updated_by` / `updated_at`, stamped by the
+  type's dispatch on real edits. Lives on the row, composes into the doc,
+  and SURVIVES the op-log prune. This is app schema by nature (the kit
+  cannot know your tables); `100-board.sql`'s cards are the worked example.
+- **HISTORY** — `doc_history`, in the kit beside `doc_undo` (`db/003`),
+  the log read back: newest first,
+  paged by VERSION cursor (`before` walks back, `after` tops up an open
+  panel), names JOINed at read time so a member who has since left is still
+  named honestly and a rename isn't retconned across the past.
+
+The permit is `doc_open` — the same question the wire's default gate asks
+at every open — so history can never be a side door into a doc you may not
+read, and no doc type has to remember to guard it. `pgHistory(host, sql)`
+is the whole wiring; the audit was already being written.
+
+Two costs worth naming. An op that stamps a row changes more columns than
+its path says, so its ECHO has to widen to the whole row — otherwise the
+client's copy stops matching a recompute, which is the law rel.test.ts
+drives (the `done` branch moved from a scalar echo to a row echo for
+exactly this). And a RESTORE must put the old stamp back rather than
+re-attributing the row to whoever pressed undo: the kit's rule is that a
+type's resolved echo is legal input, so `add /cards/<id> {row}` restores
+that row, stamp included.
+
+## The operator's door (2026-07-31)
+
+The embedded tier has no port. PGlite lives inside the app process, so a
+deployment on `EPSILON_PG_DIR` has no psql, no console, and no way to
+inspect or repair itself except the wire it already speaks. `pgAdmin` is
+that door: `call admin {"sql":"…"}`, gated by a list of registered emails
+(`EPSILON_ADMIN`). It was born the night a typo'd registration could be
+neither found nor fixed.
+
+Two deliberate choices against the usual instincts. **No list, no door** —
+with none configured the method is never registered, so a deployment that
+didn't opt in has nothing to attack. And when it IS configured, refusals
+SPEAK ("no session on this socket", "not permitted for …") instead of
+hiding behind a uniform missing-method reply: the no-oracle rule earns its
+keep on doc names, which strangers can probe, but this door is only
+reachable by an authenticated socket, and an operator who cannot tell "not
+signed in" from "not on the list" from "not deployed" spends the evening
+guessing which. Writes here bypass the op log — right for users and
+sessions, reload-worthy for doc tables.
 
 ## Upgrades — taking a new epsilon is mechanical (2026-07-30)
 

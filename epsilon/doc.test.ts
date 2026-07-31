@@ -196,6 +196,61 @@ describe("reconnect — onConnect re-authenticates before docs re-open", () => {
     expect(authority.peek().cards["1"]!.title).toBe("offline write");
     srv.stop(true);
   });
+
+  test("a call queued before the dial lands AFTER the hook, not ahead of it", async () => {
+    // The one-shot shape: every call a CLI command makes is issued in the
+    // same tick as connect(), while the socket is still dialling. Queued
+    // calls used to flush BEFORE the connect hook, so the command ran on a
+    // socket that had not authenticated yet — a valid session, refused.
+    const h = createHost({ requireAuth: true });
+    h.method("become", (_p, ws) => { ws.data ??= {}; ws.data.user = { id: 7 }; return { id: 7 }; });
+    h.method("whoami", (_p, ws) => ({ id: ws.data?.user?.id ?? null }));
+    const srv = Bun.serve({
+      port: 0,
+      fetch: (req, s) => h.fetch(req, s) ?? new Response("", { status: 404 }),
+      websocket: h.websocket,
+    });
+    h.setServer(srv);
+
+    const r = connect(`ws://localhost:${srv.port}${h.path}`, {
+      onConnect: async (remote) => { await remote.call("become"); },
+    });
+    remotes.push(r);
+
+    const who = await r.call<{ id: number | null }>("whoami");
+    expect(who.id).toBe(7);
+    srv.stop(true);
+  });
+
+  test("onDisconnect hears every close — willRetry false only for close()", async () => {
+    const h = createHost();
+    h.doc<Board>("public", structuredClone(empty));
+    h.method("kick", (_p, ws) => { ws.close(); });
+    const srv = Bun.serve({
+      port: 0,
+      fetch: (req, s) => h.fetch(req, s) ?? new Response("", { status: 404 }),
+      websocket: h.websocket,
+    });
+    h.setServer(srv);
+
+    let connects = 0;
+    const seen: boolean[] = [];
+    const r = connect(`ws://localhost:${srv.port}${h.path}`, {
+      onConnect: () => { connects++; },
+      onDisconnect: (willRetry) => { seen.push(willRetry); },
+    });
+    remotes.push(r);
+    await r.doc<Board>("public").ready;
+
+    r.call("kick").catch(() => {});                            // the socket dies under us
+    await until(() => seen.length >= 1 && connects >= 2, 3000); // dropped, then back
+    expect(seen[0]).toBe(true);                                // a retry is coming
+
+    r.close();
+    await until(() => seen.length >= 2, 3000);
+    expect(seen[1]).toBe(false);                               // deliberate — nothing follows
+    srv.stop(true);
+  });
 });
 
 describe("dynamic docs — the factory sees the asking identity", () => {

@@ -7,7 +7,7 @@
 import { unlinkSync } from "node:fs";
 import index from "./index.html";
 import { createHost, type Host, type Signal } from "./epsilon";
-import type { Sql } from "./epsilon/pg";
+import type { Sql, Sync } from "./epsilon/pg";
 import type { Board } from "./types";
 
 export interface StartOpts {
@@ -47,9 +47,10 @@ export async function startServer(opts: StartOpts = {}) {
     },
   });
   let sql: Sql | undefined;
+  let sync: Sync | undefined;
 
   if (pgUrl || pgDir) {
-    const { migrate, pgDoc, pgSync, pgAuth, pgUndo } = await import("./epsilon/pg");
+    const { migrate, pgDoc, pgSync, pgAuth, pgUndo, pgHistory, pgAdmin } = await import("./epsilon/pg");
     // Same schema, two engines: a wire server (EPSILON_PG_URL), or EMBEDDED
     // Postgres in this process (EPSILON_PG_DIR) — one service, no db process.
     const db: Sql = pgUrl
@@ -117,6 +118,17 @@ export async function startServer(opts: StartOpts = {}) {
     // an undo is the redo. remote.call("undo", { doc: "board:2" }).
     pgUndo(host, db, (doc) => (doc.startsWith("board:") ? "board_apply" : undefined));
 
+    // Who changed what: the doc's own op log, read back through the doc's own
+    // permit. remote.call("history", { doc: "board:2" }) — newest first, names
+    // joined at read time, paged by version. Costs a doc type nothing; the
+    // audit was already being written for every op.
+    pgHistory(host, db);
+
+    // The operator's door, only if EPSILON_ADMIN names someone. On the
+    // embedded tier the database has no port, so this is the ONLY way to
+    // look at a live deployment: `bun epsilon/cli.ts call admin '{"sql":"…"}'`.
+    if (pgAdmin(host, db)) console.log("[epsilon] admin door open (EPSILON_ADMIN)");
+
     // presence:board:<id> — who's looking. Exactly as private as the board
     // it watches: the factory refusal only guards the FIRST open (the doc
     // outlives its opener), so the open gate re-asks board_may for every
@@ -131,10 +143,15 @@ export async function startServer(opts: StartOpts = {}) {
       });
     });
 
-    // Fan-out exists for SIBLING processes. Embedded Postgres has none by
-    // construction — this process owns the directory, and the host's own
-    // broadcast already reaches every subscriber.
-    if (pgUrl) await pgSync(host, db, { url: pgUrl });
+    // Sync is not only about SIBLING processes. It is the delivery path for
+    // every commit made outside a doc's own write hook — above all a MIRROR:
+    // board_apply writing into mine:<uid> bumps that doc in the database, and
+    // only sync carries it to the hosted signal here. Wire Postgres hears its
+    // own LISTEN; embedded Postgres has no doorbell to hear, so it polls the
+    // in-process database instead. Skipping it on the embedded tier meant a
+    // share landed in the tables and the member's list never moved — refresh
+    // included, because a doc another socket still watches is never recomposed.
+    sync = await pgSync(host, db, pgUrl ? { url: pgUrl } : { mode: "poll", ms: 250 });
   } else {
     host.doc<Board>("board:1", { name: "main", cards: {} });
     host.docs("presence:", (name) => { host.doc(name, {}); });
@@ -148,7 +165,7 @@ export async function startServer(opts: StartOpts = {}) {
     development: { hmr: true, console: true },
   });
   host.setServer(server);
-  return { server, host, sql };
+  return { server, host, sql, sync };
 }
 
 // `bun --hot` re-evaluates this module on every edit. Boot ONCE per process

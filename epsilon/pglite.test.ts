@@ -6,7 +6,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHost, connect, type Host, type Remote } from "./doc";
-import { migrate, pgDoc, type Sql } from "./pg";
+import { migrate, pgDoc, pgAuth, pgSync, type Sql } from "./pg";
 import { openPglite } from "./pglite";
 import type { Card, Board } from "../types";
 
@@ -121,6 +121,73 @@ describe("embedded Postgres — same schema, no server", () => {
     // And composes for them at open.
     const [mine] = await sql`SELECT doc_open(${"mine:" + friend}, ${friend}) AS d`;
     expect(mine.d.boards[String(bid)].name).toBe("ours");
+  });
+
+  test("a mirror reaches a HOSTED doc — sync is not only for sibling processes", async () => {
+    // The test above proves the mirror lands in the TABLES. This one proves
+    // it reaches a doc already on someone's screen. The write goes to
+    // board:<id>, so board:<id>'s own write hook re-enters its echo; nothing
+    // in that path touches mine:<friend>. Only sync does — and the embedded
+    // tier used to run none, so a share appeared in the database and never on
+    // the member's list, refresh included (a doc another socket still watches
+    // is served the hosted snapshot, not a fresh composition).
+    const [o] = await sql`SELECT register('Own2', 'own2@pg.lite', 'pw') AS u`;
+    const [f] = await sql`SELECT register('Fri2', 'fri2@pg.lite', 'pw') AS u`;
+    const owner = Number(o.u.id);
+    const friend = Number(f.u.id);
+    const [b] = await sql`INSERT INTO boards (name, owner_id) VALUES ('mirrored', ${owner}) RETURNING id`;
+    const bid = Number(b.id);
+    await sql`INSERT INTO docs (name, v, data, open_fn) VALUES (${"board:" + bid}, 0, NULL, 'board_open')`;
+    await sql`INSERT INTO docs (name, v, data, open_fn) VALUES (${"mine:" + friend}, 0, NULL, 'mine_open')`;
+
+    const host = createHost({ requireAuth: true });
+    await pgAuth(host, sql);
+    await pgDoc<Board>(host, sql, "board:" + bid, null as unknown as Board, { apply: "board_apply" });
+    type Mine = { boards: Record<string, { name: string }> };
+    const mine = await pgDoc<Mine>(host, sql, "mine:" + friend, null as unknown as Mine, { apply: "mine_apply" });
+    const sync = await pgSync(host, sql, { mode: "poll", ms: 50 });
+    expect(sync.mode).toBe("poll");                     // no doorbell to hear in process
+    try {
+      const url = serve(host);
+      const r = connect(url, {
+        onConnect: async (remote) => { await remote.call("login", { email: "own2@pg.lite", password: "pw" }); },
+      });
+      remotes.push(r);
+      const board = r.doc<Board>("board:" + bid);
+      await board.ready;
+      expect(mine.peek()!.boards[String(bid)]).toBeUndefined();
+
+      // A real wire write, through board_apply. Its mirror into mine:<friend>
+      // is committed in the same transaction — and reaches the hosted signal
+      // only because sync is running.
+      board.apply([{ op: "add", path: "/members/-", value: { email: "fri2@pg.lite" } }]);
+
+      await until(() => !!mine.peek()!.boards[String(bid)]);
+      expect(mine.peek()!.boards[String(bid)]!.name).toBe("mirrored");
+    } finally {
+      sync.stop();
+    }
+  });
+
+  test("the embedded server STARTS sync — the wiring, not just the mechanism", async () => {
+    // The bug was here, not in pgSync: server.ts started fan-out only when a
+    // pgUrl was set, on the reasoning that embedded Postgres has no sibling
+    // processes. True, and beside the point — mirrors need delivery too.
+    const { startServer } = await import("../server");
+    const saved = process.env.EPSILON_PG_URL;
+    delete process.env.EPSILON_PG_URL;                  // this test is about the embedded path
+    const bootDir = mkdtempSync(join(tmpdir(), "epsilon-pglite-boot-"));
+    let app: Awaited<ReturnType<typeof startServer>> | undefined;
+    try {
+      app = await startServer({ port: 0, pgDir: bootDir, dbDir: DB_DIR });
+      expect(app.sync?.mode).toBe("poll");              // polls its own in-process database
+    } finally {
+      app?.sync?.stop();
+      app?.server.stop(true);
+      await app?.sql?.end?.();
+      rmSync(bootDir, { recursive: true, force: true });
+      if (saved) process.env.EPSILON_PG_URL = saved;
+    }
   });
 
   test("durability: close the process's database, reopen the directory, hydrate", async () => {
