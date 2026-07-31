@@ -7,6 +7,79 @@ will ship.
 
 ## [Unreleased]
 
+The third japan field report, absorbed. A month deployed with eight real
+users on the embedded tier; three of these are bugs it found in shipped
+behavior, two are features it grew that belong in the box.
+
+### Fixed
+
+- **A queued call could overtake its own authentication** (`epsilon/doc.ts`).
+  `connect()` flushed calls queued before the socket opened *ahead* of the
+  `onConnect` hook — and every call a one-shot CLI command makes is issued
+  in the same tick as `connect()`, so it landed on a session-less socket.
+  Symptom: a valid owner session refused all evening. The hook now runs
+  first; its own calls send directly, the socket being open by then.
+- **The embedded tier delivered no mirrors** (`server.ts`). `pgSync` was
+  started only for a `pgUrl`, on the reasoning that PGlite has no sibling
+  processes — true, and beside the point. Sync is the delivery path for
+  every commit made OUTSIDE a doc's own write hook, and the commonest is a
+  MIRROR: `board_apply` writing into `mine:<uid>` in the same transaction.
+  The write hook re-enters the doc it wrote; nothing re-enters the sibling.
+  Symptom: a share landed in the tables and the member's list never moved
+  — *refresh included*, because a doc another socket still watches is
+  served the hosted snapshot, not a fresh composition. The embedded tier
+  now polls its own in-process database (250ms); `startServer` returns the
+  `sync` handle. Pinned twice: the mechanism, and the wiring that omitted it.
+
+### Added
+
+- **`connect()` gains `onDisconnect(willRetry)`** — the symmetric half of
+  `onConnect`, fired on every close; false only for a deliberate
+  `remote.close()`. Doc signals KEEP their last value across a drop (the
+  reconnect's snapshot is what resets them), so anything rendered as live —
+  presence, a connection dot — must hear the drop from the hook or it goes
+  on testifying to a state nobody is in.
+- **Who changed what.** Two halves, cleanly split. HISTORY is core:
+  `doc_history` joins the doc kit beside `doc_undo` — the op log read back,
+  newest first, paged by VERSION cursor (`before` walks back, `after` tops
+  up an open panel), names JOINed at read time so a member who has since
+  left is still named honestly. The permit is `doc_open`, the same question
+  the wire's default gate asks at every open, so history can never be a side
+  door and no doc type has to remember to guard it; `pgHistory(host, db)` is
+  the whole wiring, and the audit was already being written for every op.
+  STATE is app schema by nature — `updated_by`/`updated_at` on the row,
+  stamped by the type's dispatch, surviving the op-log prune; `100-board.sql`
+  gains it on cards as the worked example, along with a `card_json` helper so
+  the wire shape has ONE definition. Two traps documented in the kit and the
+  skill: an op that also stamps changes more columns than its path says, so
+  its echo must widen to the whole row (the `done` branch did) or clients
+  disagree with a recompute; and a RESTORE takes the stamp from the value,
+  so undo puts the row back rather than re-attributing it to the undoer.
+- **The operator's door** (`pgAdmin`). The embedded database has no port, so
+  the CLI is the only way into a live deployment: `call admin {"sql":"…"}`,
+  gated by `EPSILON_ADMIN` (registered emails). NO LIST, NO DOOR — unset and
+  the method is never registered, so a deployment that didn't opt in has
+  nothing to attack. When it IS configured, refusals SPEAK rather than
+  hiding behind a uniform missing-method reply: the no-oracle rule earns its
+  keep on doc names, which strangers can probe, but this door is only
+  reachable by an authenticated socket, and an operator who cannot tell "not
+  signed in" from "not on the list" from "not deployed" spends the evening
+  guessing which. Born the night a typo'd registration could be neither
+  found nor repaired. The frame is bounded (500 rows, and it says when it
+  truncated); writes bypass the op log — right for users and sessions,
+  reload-worthy for doc tables.
+
+### Changed
+
+- `db/003-doc-kit.sql` grows `doc_history` IN PLACE rather than shipping a
+  006 (migrations are day-zero truth, not a diary — 0.3.0's rule, applied
+  again while the change is still unreleased). Deployed 0.5.x apps adopt it
+  by copying the one function body into their next app migration; it is
+  `CREATE OR REPLACE`, so it re-applies cleanly. Their ledger will then
+  differ on 003's hash: `TRUNCATE migrations` and re-migrate (every core
+  file is idempotent — the upgrade path 0.3.0 proved against a live
+  database), or pin the old hash if the fork is deliberate.
+
 ## [0.5.1] — 2026-07-30
 
 ### Fixed

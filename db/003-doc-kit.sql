@@ -32,6 +32,10 @@
 --                        echo — the wire's three verbs, in SQL. The
 --                        inverses are the same three verbs; never invent a
 --                        fourth.
+--   answer for itself    doc_history reads the log back — newest first,
+--                        paged by version, named at read time — behind the
+--                        doc's OWN permit (doc_open). Every type gets it
+--                        free; the audit was already being written.
 --
 -- A doc type is then: <t>_open (ONE composition query; NULL user = the
 -- host, full view) and <t>_apply = doc_begin → dispatch loop (echo to
@@ -154,6 +158,56 @@ BEGIN
   RETURN v_out;
 END;
 $$ LANGUAGE plpgsql;
+
+-- The log, read back — "who changed what", which doc_ops has been able to
+-- answer since 001 with no way to ask. Two halves, and only this one is the
+-- kit's: a row's own updated_by/updated_at (who last touched it, surviving
+-- the prune) is APP schema, stamped by the type's dispatch — 100-board.sql's
+-- cards are the worked example. This is the HISTORY half.
+--
+-- The permit is doc_open — the same question the wire's default gate asks at
+-- every open — so history can never become a side door into a doc the caller
+-- may not read, and no type has to remember to guard it. A NULL user is the
+-- host asking as itself (001's rule): the full log. Refusal reads as absence,
+-- exactly like doc_begin.
+--
+-- Names JOIN at read time rather than being stamped into the log: the log
+-- keeps ids, so a member who has since left is still named honestly, and a
+-- rename is not retconned across the past. p_before pages backwards
+-- ("older…"); p_after fetches only what is newer (an open panel topping
+-- itself up). Both are VERSION cursors — v is the ordering the doc already
+-- owns, so paging cannot drift the way a timestamp can. Depth is whatever
+-- epsilon_prune keeps (004).
+CREATE OR REPLACE FUNCTION doc_history(
+  p_doc    text,
+  p_user   bigint DEFAULT NULL,
+  p_before bigint DEFAULT NULL,
+  p_after  bigint DEFAULT NULL,
+  p_limit  int    DEFAULT 100
+) RETURNS jsonb AS $$
+BEGIN
+  IF doc_open(p_doc, p_user) IS NULL THEN
+    RAISE EXCEPTION 'not found: %', p_doc;
+  END IF;
+  -- The inner LIMIT takes the newest window; the outer agg keeps it newest-first.
+  RETURN COALESCE((
+    SELECT jsonb_agg(x.entry ORDER BY x.v DESC)
+      FROM (
+        SELECT o.v,
+               jsonb_build_object(
+                 'v', o.v, 'at', o.at, 'by', o.by_user,
+                 'name', u.name, 'ops', o.ops) AS entry
+          FROM doc_ops o
+          LEFT JOIN users u ON u.id = o.by_user
+         WHERE o.name = p_doc
+           AND (p_before IS NULL OR o.v < p_before)
+           AND (p_after  IS NULL OR o.v > p_after)
+         ORDER BY o.v DESC
+         LIMIT LEAST(GREATEST(COALESCE(p_limit, 100), 1), 500)
+      ) x
+  ), '[]'::jsonb);
+END;
+$$ LANGUAGE plpgsql STABLE;
 
 -- After INSERT … OVERRIDING SYSTEM VALUE (a restore), realign the identity
 -- sequence so the next minted id cannot collide with the restored one.

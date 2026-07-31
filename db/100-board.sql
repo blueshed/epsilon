@@ -45,7 +45,14 @@ CREATE TABLE IF NOT EXISTS cards (
   board_id bigint NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
   text text NOT NULL,
   done boolean NOT NULL DEFAULT false,
-  created_by bigint REFERENCES users(id) ON DELETE SET NULL
+  created_by bigint REFERENCES users(id) ON DELETE SET NULL,
+  -- Who last touched this row: the STATE half of "who changed what" (the
+  -- kit's doc_history is the other). Stamped by board_apply on real edits;
+  -- NULL means "untouched since it was made", which is true and reads better
+  -- than inventing an editor. Unlike the op log this is never pruned — the
+  -- badge outlives the history behind it.
+  updated_by bigint REFERENCES users(id) ON DELETE SET NULL,
+  updated_at timestamptz
 );
 
 CREATE INDEX IF NOT EXISTS idx_cards_board ON cards(board_id);
@@ -60,6 +67,17 @@ CREATE INDEX IF NOT EXISTS idx_board_members_user ON board_members(user_id);
 -- Upgrade path for databases that predate the squash (ledger carries the
 -- old file names; every statement here is idempotent).
 ALTER TABLE cards ADD COLUMN IF NOT EXISTS done boolean NOT NULL DEFAULT false;
+ALTER TABLE cards ADD COLUMN IF NOT EXISTS updated_by bigint REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE cards ADD COLUMN IF NOT EXISTS updated_at timestamptz;
+
+-- ONE definition of a card's wire shape. Every echo, every before-read and
+-- the composition all go through it, so a new field can't reach the client
+-- down one path and not another (they had already drifted once by hand).
+CREATE OR REPLACE FUNCTION card_json(c cards) RETURNS jsonb AS $$
+  SELECT jsonb_build_object(
+    'id', c.id, 'text', c.text, 'done', c.done, 'created_by', c.created_by,
+    'updated_by', c.updated_by, 'updated_at', c.updated_at);
+$$ LANGUAGE sql STABLE;
 
 CREATE OR REPLACE FUNCTION mine_uid(p_doc text) RETURNS bigint AS $$
   SELECT split_part(p_doc, ':', 2)::bigint;
@@ -83,8 +101,7 @@ BEGIN
       'name', b.name,
       'owner_id', b.owner_id,
       'cards', COALESCE(
-        (SELECT jsonb_object_agg(c.id::text,
-           jsonb_build_object('id', c.id, 'text', c.text, 'done', c.done, 'created_by', c.created_by))
+        (SELECT jsonb_object_agg(c.id::text, card_json(c))
            FROM cards c WHERE c.board_id = b.id),
         '{}'::jsonb),
       'members', COALESCE(
@@ -164,39 +181,43 @@ BEGIN
     v_p := doc_path(v_op);
 
     IF v_p = ARRAY['cards', '-'] AND v_op->>'op' = 'add' THEN
-      INSERT INTO cards (board_id, text, created_by)
-        VALUES (v_bid, v_op->'value'->>'text', p_user)
-        RETURNING id INTO v_id;
-      v_out := v_out || op_add('/cards/' || v_id,
-        jsonb_build_object('id', v_id, 'text', v_op->'value'->>'text', 'done', false, 'created_by', p_user));
+      INSERT INTO cards (board_id, text, created_by, updated_by, updated_at)
+        VALUES (v_bid, v_op->'value'->>'text', p_user, p_user, now())
+        RETURNING id, card_json(cards) INTO v_id, v_row;
+      v_out := v_out || op_add('/cards/' || v_id, v_row);
       v_undo := op_remove('/cards/' || v_id) || v_undo;
 
     ELSIF array_length(v_p, 1) = 2 AND v_p[1] = 'cards' AND v_op->>'op' = 'add'
           AND v_p[2] ~ '^\d+$' THEN
       -- RESTORE: the echo of an add is an add at the resolved id. The row's
-      -- fields (created_by included) ride the value; doc_ops.by_user still
-      -- records who performed the restore.
-      INSERT INTO cards (id, board_id, text, done, created_by)
+      -- fields (created_by and the stamp included) ride the value, so an undo
+      -- brings the row back EXACTLY as it was rather than re-attributing it;
+      -- doc_ops.by_user still records who performed the restore. A value with
+      -- no stamp (a hand-written add) is stamped by the writer instead.
+      INSERT INTO cards (id, board_id, text, done, created_by, updated_by, updated_at)
         OVERRIDING SYSTEM VALUE
         VALUES (v_p[2]::bigint, v_bid, v_op->'value'->>'text',
                 COALESCE((v_op->'value'->>'done')::boolean, false),
-                (v_op->'value'->>'created_by')::bigint)
-        RETURNING jsonb_build_object('id', id, 'text', text, 'done', done, 'created_by', created_by)
-        INTO v_row;
+                (v_op->'value'->>'created_by')::bigint,
+                COALESCE((v_op->'value'->>'updated_by')::bigint, p_user),
+                COALESCE((v_op->'value'->>'updated_at')::timestamptz, now()))
+        RETURNING card_json(cards) INTO v_row;
       PERFORM doc_restore_id('cards');
       v_out := v_out || op_add('/cards/' || v_p[2], v_row);
       v_undo := op_remove('/cards/' || v_p[2]) || v_undo;
 
     ELSIF array_length(v_p, 1) = 2 AND v_p[1] = 'cards' AND v_op->>'op' = 'replace' THEN
-      -- Whole-row replace — the echo shape; created_by is immutable.
-      SELECT jsonb_build_object('id', id, 'text', text, 'done', done, 'created_by', created_by)
-        INTO v_before FROM cards WHERE id = v_p[2]::bigint AND board_id = v_bid;
+      -- Whole-row replace — the echo shape; created_by is immutable. Like the
+      -- restore above, a value CARRYING a stamp keeps it (that is undo putting
+      -- the row back); an ordinary edit carries none and is stamped here.
+      SELECT card_json(c) INTO v_before FROM cards c WHERE c.id = v_p[2]::bigint AND c.board_id = v_bid;
       IF NOT FOUND THEN RAISE EXCEPTION 'row not found: %', v_op->>'path'; END IF;
       UPDATE cards SET text = v_op->'value'->>'text',
-                       done = COALESCE((v_op->'value'->>'done')::boolean, false)
+                       done = COALESCE((v_op->'value'->>'done')::boolean, false),
+                       updated_by = COALESCE((v_op->'value'->>'updated_by')::bigint, p_user),
+                       updated_at = COALESCE((v_op->'value'->>'updated_at')::timestamptz, now())
         WHERE id = v_p[2]::bigint AND board_id = v_bid
-        RETURNING jsonb_build_object('id', id, 'text', text, 'done', done, 'created_by', created_by)
-        INTO v_row;
+        RETURNING card_json(cards) INTO v_row;
       v_out := v_out || op_replace('/cards/' || v_p[2], v_row);
       v_undo := op_replace('/cards/' || v_p[2], v_before) || v_undo;
 
@@ -204,9 +225,9 @@ BEGIN
           AND v_op->>'op' = 'replace' THEN
       SELECT to_jsonb(text) INTO v_before FROM cards WHERE id = v_p[2]::bigint AND board_id = v_bid;
       IF NOT FOUND THEN RAISE EXCEPTION 'row not found: %', v_op->>'path'; END IF;
-      UPDATE cards SET text = v_op->>'value'
+      UPDATE cards SET text = v_op->>'value', updated_by = p_user, updated_at = now()
         WHERE id = v_p[2]::bigint AND board_id = v_bid
-        RETURNING jsonb_build_object('id', id, 'text', text, 'done', done, 'created_by', created_by) INTO v_row;
+        RETURNING card_json(cards) INTO v_row;
       v_out := v_out || op_replace('/cards/' || v_p[2], v_row);
       v_undo := op_replace('/cards/' || v_p[2] || '/text', v_before) || v_undo;
 
@@ -214,14 +235,18 @@ BEGIN
           AND v_op->>'op' = 'replace' THEN
       SELECT to_jsonb(done) INTO v_before FROM cards WHERE id = v_p[2]::bigint AND board_id = v_bid;
       IF NOT FOUND THEN RAISE EXCEPTION 'row not found: %', v_op->>'path'; END IF;
-      UPDATE cards SET done = (v_op->>'value')::boolean
-        WHERE id = v_p[2]::bigint AND board_id = v_bid;
-      v_out := v_out || op_replace(v_op->>'path', v_op->'value');
+      UPDATE cards SET done = (v_op->>'value')::boolean, updated_by = p_user, updated_at = now()
+        WHERE id = v_p[2]::bigint AND board_id = v_bid
+        RETURNING card_json(cards) INTO v_row;
+      -- The echo widened to the whole row when the stamp arrived: an op that
+      -- changes two columns must SAY so, or the client's copy stops matching
+      -- a recompute (the law rel.test.ts drives). The undo stays narrow — it
+      -- only has to put `done` back, and re-stamps as the undoer on its way.
+      v_out := v_out || op_replace('/cards/' || v_p[2], v_row);
       v_undo := op_replace(v_op->>'path', v_before) || v_undo;
 
     ELSIF array_length(v_p, 1) = 2 AND v_p[1] = 'cards' AND v_op->>'op' = 'remove' THEN
-      SELECT jsonb_build_object('id', id, 'text', text, 'done', done, 'created_by', created_by)
-        INTO v_before FROM cards WHERE id = v_p[2]::bigint AND board_id = v_bid;
+      SELECT card_json(c) INTO v_before FROM cards c WHERE c.id = v_p[2]::bigint AND c.board_id = v_bid;
       DELETE FROM cards WHERE id = v_p[2]::bigint AND board_id = v_bid;
       IF FOUND THEN
         v_out := v_out || op_remove('/cards/' || v_p[2]);

@@ -5,7 +5,7 @@ import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { SQL } from "bun";
 import { createHost, connect, type Host, type Remote } from "./doc";
 import type { Signal } from "./signal";
-import { migrate, pgDoc, pgSync, pgAuth, pgUndo } from "./pg";
+import { migrate, pgDoc, pgSync, pgAuth, pgUndo, pgAdmin } from "./pg";
 import type { Card, Board } from "../types";
 
 // Test db namespaced by app (package.json name) — see pg.test.ts's note.
@@ -1044,5 +1044,176 @@ describe("gone is a snapshot of nothing — deletion and revocation bite live so
     oBoard.at("/cards").apply([{ op: "add", path: "/-", value: { text: "after" } }]);
     await until(() => Object.keys(oBoard.peek()!.cards).length === 1);
     expect(mBoard.peek()).toBeNull();
+  });
+});
+
+describe("history — the audit read back, and the stamp on the row", () => {
+  let owner: number;
+  let mate: number;
+  let stranger: number;
+  let doc: string;
+  const apply = (ops: unknown, user: number | null) =>
+    sql.unsafe(`SELECT board_apply($1, $2, $3) AS r`, [doc, ops, user]);
+
+  beforeAll(async () => {
+    const [o] = await sql`SELECT register('Hist', 'hist@log.test', 'pw') AS u`;
+    const [m] = await sql`SELECT register('Mate', 'mate@log.test', 'pw') AS u`;
+    const [s] = await sql`SELECT register('Snoop', 'snoop@log.test', 'pw') AS u`;
+    owner = Number((o.u as { id: number }).id);
+    mate = Number((m.u as { id: number }).id);
+    stranger = Number((s.u as { id: number }).id);
+    const [b] = await sql`INSERT INTO boards (name, owner_id) VALUES ('logged', ${owner}) RETURNING id`;
+    doc = `board:${b.id}`;
+    await sql`INSERT INTO docs (name, v, data, open_fn) VALUES (${doc}, 0, NULL, 'board_open')`;
+    await sql`INSERT INTO docs (name, v, data, open_fn) VALUES (${"mine:" + mate}, 0, NULL, 'mine_open')
+              ON CONFLICT (name) DO NOTHING`;
+  });
+
+  test("newest first, named at read time, paged by version cursor", async () => {
+    for (const text of ["one", "two", "three"]) {
+      await apply([{ op: "add", path: "/cards/-", value: { text } }], owner);
+    }
+    const [h] = await sql`SELECT doc_history(${doc}, ${owner}) AS h`;
+    const all = h.h as { v: number; by: number; name: string; ops: { path: string }[] }[];
+    expect(all).toHaveLength(3);
+    expect(Number(all[0]!.v)).toBe(3);                    // newest first
+    expect(Number(all[0]!.by)).toBe(owner);
+    expect(all[0]!.name).toBe("Hist");                    // joined, not stamped
+    expect(all[0]!.ops[0]!.path).toMatch(/^\/cards\/\d+$/); // the RESOLVED echo, not the client's `-`
+
+    // Version cursors: `before` pages backwards, `after` tops up.
+    const [older] = await sql`SELECT doc_history(${doc}, ${owner}, 3) AS h`;
+    expect((older.h as { v: number }[]).map((e) => Number(e.v))).toEqual([2, 1]);
+    const [newer] = await sql`SELECT doc_history(${doc}, ${owner}, NULL, 2) AS h`;
+    expect((newer.h as { v: number }[]).map((e) => Number(e.v))).toEqual([3]);
+  });
+
+  test("a name is honest after the fact — a member who left is still named", async () => {
+    await apply([{ op: "add", path: "/members/-", value: { email: "mate@log.test" } }], owner);
+    await apply([{ op: "add", path: "/cards/-", value: { text: "mate was here" } }], mate);
+    await apply([{ op: "remove", path: `/members/${mate}` }], owner);
+
+    const [h] = await sql`SELECT doc_history(${doc}, ${owner}) AS h`;
+    const mine = (h.h as { by: number; name: string }[]).find((e) => Number(e.by) === mate);
+    expect(mine!.name).toBe("Mate");                      // the log kept the id; the join finds them
+  });
+
+  test("history is the doc's permit, not a second one — a stranger is refused", async () => {
+    let err = "";
+    try { await sql`SELECT doc_history(${doc}, ${stranger}) AS h`; }
+    catch (e) { err = String(e); }
+    expect(err).toContain("not found");                   // exactly how the doc refuses
+
+    // ...and an unknown doc refuses identically — no existence oracle.
+    err = "";
+    try { await sql`SELECT doc_history(${"board:999999"}, ${owner}) AS h`; }
+    catch (e) { err = String(e); }
+    expect(err).toContain("not found");
+
+    // The host, asking as itself, sees the whole log (001's NULL-user rule).
+    const [host] = await sql`SELECT doc_history(${doc}, NULL) AS h`;
+    expect((host.h as unknown[]).length).toBeGreaterThan(0);
+  });
+
+  test("the row remembers its last editor, and a restore puts the stamp back", async () => {
+    // A second writer with a live permit (mate left in the test above).
+    const [e] = await sql`SELECT register('Editor', 'editor@log.test', 'pw') AS u`;
+    const editor = Number((e.u as { id: number }).id);
+    await sql`INSERT INTO docs (name, v, data, open_fn) VALUES (${"mine:" + editor}, 0, NULL, 'mine_open')
+              ON CONFLICT (name) DO NOTHING`;
+    await apply([{ op: "add", path: "/members/-", value: { email: "editor@log.test" } }], owner);
+
+    const add = await apply([{ op: "add", path: "/cards/-", value: { text: "stamped" } }], owner);
+    const id = ((add[0]!.r as { ops: { path: string }[] }).ops[0]!.path).split("/").pop()!;
+    const [made] = await sql`SELECT updated_by, updated_at FROM cards WHERE id = ${id}`;
+    expect(Number(made.updated_by)).toBe(owner);
+    expect(made.updated_at).not.toBeNull();
+
+    // Someone else edits it: the badge moves, and the echo SAYS so — the op
+    // changed two columns, so it carries the whole row.
+    const edit = await apply([{ op: "replace", path: `/cards/${id}/text`, value: "edited" }], editor);
+    const echo = (edit[0]!.r as { ops: { value: { updated_by: number } }[] }).ops[0]!;
+    expect(Number(echo.value.updated_by)).toBe(editor);
+    const [moved] = await sql`SELECT updated_by FROM cards WHERE id = ${id}`;
+    expect(Number(moved.updated_by)).toBe(editor);
+
+    // A restore is undo putting the row BACK, stamp included — not a new
+    // edit by whoever pressed undo.
+    const rm = await apply([{ op: "remove", path: `/cards/${id}` }], owner);
+    const v = Number((rm[0]!.r as { v: number }).v);
+    await sql.unsafe(`SELECT doc_undo($1, $2, $3, 'board_apply') AS r`, [doc, v, owner]);
+    const [back] = await sql`SELECT text, updated_by FROM cards WHERE id = ${id}`;
+    expect(back.text).toBe("edited");
+    expect(Number(back.updated_by)).toBe(editor);         // the editor's edit, not the undoer
+  });
+});
+
+describe("the operator's door — no list, no door", () => {
+  test("unlisted callers are refused in words; the listed one gets rows", async () => {
+    const host = createHost({ requireAuth: true });
+    await pgAuth(host, sql);
+    const opened = pgAdmin(host, sql, { admins: ["  Boss@Door.TEST ", ""] });
+    expect(opened).toBe(true);                       // padded and cased entries still count
+    const url = serve(host);
+
+    const boss = client(url);
+    await boss.call("register", { name: "Boss", email: "boss@door.test", password: "pw" });
+    const nobody = client(url);
+    await nobody.call("register", { name: "Nobody", email: "nobody@door.test", password: "pw" });
+
+    // A signed-in stranger is told WHY, not handed a uniform "unknown method"
+    // — the door is only reachable by an authenticated socket anyway.
+    let err = "";
+    try { await nobody.call("admin", { sql: "SELECT 1" }); } catch (e) { err = String(e); }
+    expect(err).toContain("not permitted");
+
+    // No session at all is its own answer.
+    const anon = client(url);
+    err = "";
+    try { await anon.call("admin", { sql: "SELECT 1" }); } catch (e) { err = String(e); }
+    expect(err).toContain("no session");
+
+    // The listed operator reaches the database — the door's whole purpose on
+    // a deployment whose Postgres has no port.
+    const out = await boss.call<{ rows: { email: string }[] }>("admin", {
+      sql: "SELECT email FROM users WHERE email = 'nobody@door.test'",
+    });
+    expect(out.rows[0]!.email).toBe("nobody@door.test");
+
+    err = "";
+    try { await boss.call("admin", {}); } catch (e) { err = String(e); }
+    expect(err).toContain("sql required");
+  });
+
+  test("the frame is bounded, and the truncation says so", async () => {
+    const host = createHost({ requireAuth: true });
+    await pgAuth(host, sql);
+    pgAdmin(host, sql, { admins: ["cap@door.test"], maxRows: 5 });
+    const r = client(serve(host));
+    await r.call("register", { name: "Cap", email: "cap@door.test", password: "pw" });
+
+    const out = await r.call<{ rows: unknown[]; truncated?: boolean; total?: number }>("admin", {
+      sql: "SELECT generate_series(1, 50) AS n",
+    });
+    expect(out.rows).toHaveLength(5);
+    expect(out.truncated).toBe(true);
+    expect(out.total).toBe(50);                      // the tail is still in the database
+  });
+
+  test("with nobody listed, the method is never registered at all", async () => {
+    const host = createHost({ requireAuth: true });
+    await pgAuth(host, sql);
+    const saved = process.env.EPSILON_ADMIN;
+    delete process.env.EPSILON_ADMIN;
+    try {
+      expect(pgAdmin(host, sql)).toBe(false);
+      const r = client(serve(host));
+      await r.call("register", { name: "Void", email: "void@door.test", password: "pw" });
+      let err = "";
+      try { await r.call("admin", { sql: "SELECT 1" }); } catch (e) { err = String(e); }
+      expect(err).toContain("unknown method");       // a deployment that didn't opt in has no door
+    } finally {
+      if (saved) process.env.EPSILON_ADMIN = saved;
+    }
   });
 });

@@ -128,6 +128,38 @@ type's own apply: permit re-checked, mirrors re-fired, and the resulting
 commit records the redo. Works without pgSync (`pgReceive` re-enters the
 echo), so it's embedded-tier safe. Undo is a WRITE — treat it like one.
 
+## Who changed what
+
+Two halves. **HISTORY**: `pgHistory(host, db)` registers the `history`
+method — `remote.call("history", { doc, before?, after?, limit? })` returns
+the doc's own op log, newest first, each entry `{v, at, by, name, ops}`.
+Paging is by VERSION cursor: `before` walks backwards ("older…"), `after`
+fetches only what is newer than a version you already hold. The permit is
+`doc_open` — the doc's own gate — so it is never a side door, and a doc type
+gets it for free. Names are JOINed at read time, so someone who has since
+left is still named. Depth is whatever `epsilon_prune` keeps.
+
+**STATE**: `updated_by` / `updated_at` on the row, stamped by your dispatch
+(see `100-board.sql`'s cards). Survives the prune, composes into the doc, and
+answers "who last touched this" without a query. Two traps: an op that also
+stamps changes more columns than its path says, so widen its ECHO to the
+whole row (a scalar echo would leave clients disagreeing with a recompute);
+and a RESTORE must take the stamp FROM the value, or undo re-attributes the
+row to whoever pressed undo.
+
+## The operator's door
+
+`pgAdmin(host, db)` registers `admin` — `call admin '{"sql":"…"}'` — gated by
+`EPSILON_ADMIN` (comma-separated registered emails) or `{ admins }`. It
+returns `{ rows }`, or `{ rows, truncated, total }` past `maxRows` (500).
+NO LIST, NO DOOR: unset and the method is never registered, so a deployment
+that didn't opt in has nothing to attack; `pgAdmin` returns whether it opened
+one. It exists for the EMBEDDED tier, whose database has no port — this is
+the only way to inspect or repair a running deployment. Refusals say which
+of "no session" / "not permitted" applies, deliberately: the door is only
+reachable by an authenticated socket. Writes here bypass the op log, so
+hosted docs won't hear them — reload after touching doc tables.
+
 ## Dynamic docs, presence
 
 - `host.docs(prefix, (name, userId) => ...)` — names are data, hosted on
@@ -168,7 +200,9 @@ bun epsilon/cli.ts set board:2 /cards/1/done true
 bun epsilon/cli.ts rm  board:2 /cards/1
 bun epsilon/cli.ts watch board:2 --for 3000    # NDJSON: snapshot, then each op
 bun epsilon/cli.ts call login '{"email":"…","password":"…"}'
-bun epsilon/cli.ts call undo '{"doc":"board:2"}'   # revert YOUR last write
+bun epsilon/cli.ts call undo '{"doc":"board:2"}'      # revert YOUR last write
+bun epsilon/cli.ts call history '{"doc":"board:2"}'   # who changed what, newest first
+bun epsilon/cli.ts call admin '{"sql":"SELECT …"}'    # EPSILON_ADMIN only; the embedded db has no port
 ```
 
 Every mutation prints the RESOLVED echo the server broadcast — what you

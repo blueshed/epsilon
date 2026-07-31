@@ -512,9 +512,15 @@ export function connect(
   opts?: {
     onError?: (doc: string, error: string) => void;
     /** Awaited on EVERY socket open — first connect and each reconnect —
-     *  after queued calls flush and BEFORE docs (re)open. Authenticate here
-     *  and a requireAuth host serves the re-opens that follow. */
+     *  BEFORE queued calls flush and before docs (re)open. Authenticate here
+     *  and a requireAuth host serves everything that follows. */
     onConnect?: (remote: Remote) => void | Promise<void>;
+    /** Fires on EVERY socket close, deliberate or not — the symmetric half
+     *  of onConnect. Doc signals keep their last value on a drop (the
+     *  reconnect's snapshot resets them), so anything rendered as live —
+     *  presence, a connection dot — must hear the drop from HERE, or it
+     *  testifies stale. willRetry is false only for remote.close(). */
+    onDisconnect?: (willRetry: boolean) => void;
   },
 ): Remote {
   const docs = new Map<string, RemoteDoc<any>>();
@@ -589,16 +595,20 @@ export function connect(
     ws = new WebSocket(url);
     ws.onopen = async () => {
       backoff = 100;
-      // Queued calls first, then the connect hook — authenticate there and a
-      // requireAuth host serves the re-opens — then (re)open every doc; the
-      // snapshot-as-op resets each baseline.
-      for (const msg of queued.splice(0)) ws.send(JSON.stringify(msg));
+      // The connect hook FIRST, then everything that was waiting on the
+      // socket: queued calls, then (re)open every doc — the snapshot-as-op
+      // resets each baseline. It used to be the other way round, and a call
+      // issued before the dial completed — which is every call a one-shot
+      // CLI makes — overtook its own authenticate and landed on a
+      // session-less socket. The hook's own calls do not queue: the socket
+      // is OPEN by the time it runs, so they send directly.
       try {
         await opts?.onConnect?.(remote);
       } catch (err) {
         // Opens proceed regardless — refusals surface through onError.
         console.error("[epsilon/doc] onConnect hook failed:", err);
       }
+      for (const msg of queued.splice(0)) ws.send(JSON.stringify(msg));
       for (const name of docs.keys()) send({ action: "open", doc: name });
       for (const msg of queuedOps.splice(0)) ws.send(JSON.stringify(msg));
     };
@@ -626,6 +636,11 @@ export function connect(
       // caller's decision (it may not be idempotent, e.g. register).
       for (const [, p] of pending) p.reject(new Error("disconnected"));
       pending.clear();
+      try {
+        opts?.onDisconnect?.(!closed);
+      } catch (err) {
+        console.error("[epsilon/doc] onDisconnect hook failed:", err);
+      }
       if (closed) return;
       setTimeout(wire, (backoff = Math.min(backoff * 2, 10_000)));
     };

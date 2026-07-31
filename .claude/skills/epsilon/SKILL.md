@@ -34,7 +34,8 @@ drives the real app in `Bun.WebView`.
 
 ```ts
 const remote = connect(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`, {
-  onConnect: (r) => reauth(r),   // EVERY (re)connect, awaited BEFORE docs re-open — re-auth here
+  onConnect: (r) => reauth(r),   // EVERY (re)connect, awaited FIRST — before queued calls and re-opens
+  onDisconnect: (willRetry) => setLive(false),  // every close; false only for remote.close()
   onError,                       // "unauthenticated" → show auth dialog
 });
 const board = remote.doc<Board>("board:1");
@@ -44,12 +45,17 @@ list(cards, (card) => { ...bind(card.at<string>("/text"), (t) => { el.textConten
 cards.apply([{ op: "add", path: "/-", value: { text } }]);         // server mints; echo renders
 await remote.call("login" | "register" | "authenticate", params);  // then re-ask: remote.doc("board:1")
 await remote.call("undo", { doc: "board:2" });                     // YOUR last write, reverted ({ v } for a specific one)
+await remote.call("history", { doc: "board:2", before, after });   // the op log back: newest first, named, paged by v
 ```
 
 `bind(lens, set)` is the precise scalar path — set() re-runs only when an
 op touches that slice, never on a sibling's keystroke. `text(sig)`/`effect`
 are the state-channel fallback (always correct; the only choice for
 `map()`ed values, which carry no ops).
+
+A doc signal KEEPS its last value while the socket is down (the reconnect's
+snapshot resets it), so render live-ness from `onDisconnect`, never from the
+doc — a presence list left alone stays green and lies.
 
 ## Engines (decision table in README "Choosing an engine")
 
@@ -65,6 +71,11 @@ browser's own client behind argv, auth-aware, JSON out; every mutation
 prints the RESOLVED echo the server broadcast. While `bun dev` runs, USE
 IT to verify realtime behavior end-to-end. Full commands: REFERENCE.md.
 
+On the EMBEDDED engine the database has no port, so the CLI is also the only
+way in: `call admin '{"sql":"…"}'` (gated by `EPSILON_ADMIN` — unset means
+the method doesn't exist). Admin writes bypass the op log: fine for
+users/sessions, reload-worthy for doc tables.
+
 ## Rules — in order of importance
 
 - **Never update locally after a send.** The echo renders the write — touch
@@ -74,7 +85,10 @@ IT to verify realtime behavior end-to-end. Full commands: REFERENCE.md.
   carries the payload and doubles as the audit trail AND the undo log.
 - **Express EVERY change — cascades included.** An FK cascade the op log
   never saw leaves orphans on every screen and a hole undo can't restore
-  (`doc_cascade_remove`, see REFERENCE.md).
+  (`doc_cascade_remove`, see REFERENCE.md). Same rule for extra COLUMNS: if
+  a dispatch also stamps `updated_by`/`updated_at`, the echo must widen from
+  the scalar path to the whole row, or a recompute won't match what clients
+  hold.
 - **`list()` for collections, `bind()` for scalars, lenses for content.**
   No effects that rebuild rows from `doc.data`.
 - **Close what you leave.** `remote.doc()` handles are refcounted — call

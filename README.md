@@ -57,7 +57,7 @@ host: start `bun server.ts`, healthcheck `/`, a volume behind
 - [`server.ts`](server.ts) — the authority. In-memory out of the box (a shape *preview*: uuid ids, no permits); Postgres — the real implementation, with auth + ownership — via one env var.
 - [`index.ts`](index.ts) — the pixels. A remote doc is a signal whose writes go over the wire; the echo renders them.
 - [`index.html`](index.html) / [`index.css`](index.css) — Bun serves and bundles them.
-- [`db/`](db/) — your schema: numbered migrations, applied at boot, forward-only. `003-doc-kit.sql` is the reusable skeleton of a relational doc type; `100-board.sql` is the worked example — tables, composition, transactional writes, ownership. Number your own migrations from 100 up: 001–099 are epsilon core, frozen once released, so an upgrade never collides with your files.
+- [`db/`](db/) — your schema: numbered migrations, applied at boot, forward-only. `003-doc-kit.sql` is the reusable skeleton of a relational doc type (locking, the audit, undo, history); `100-board.sql` is the worked example — tables, composition, transactional writes, ownership. Number your own migrations from 100 up: 001–099 are epsilon core, frozen once released, so an upgrade never collides with your files.
 
 ```sh
 bun run db:up            # compose Postgres (or use your own)
@@ -72,7 +72,7 @@ EPSILON_PG_URL=postgres://epsilon:epsilon@localhost:5599/epsilon bun dev
 | `signal.ts` | Op-carrying signals; composing `at()` lenses |
 | `doc.ts` | The wire — one Signal class both sides; `apply()` hides the WebSocket |
 | `ui.ts` | `list()` routes membership ops; `bind()` rides a lens's op stream for scalars |
-| `pg.ts` | Durability, LISTEN/NOTIFY fan-out, wire adapter for the SQL auth contract |
+| `pg.ts` | Durability, LISTEN/NOTIFY fan-out, wire adapters: auth, undo, history, the operator's door |
 | `pglite.ts` | The same `Sql` seam over in-process Postgres — the embedded engine |
 | `migrate.ts` | Numbered migrations: ordered, hash-recorded, forward-only, transactional |
 | `cli.ts` | The wire from a terminal — auth-aware one-shot commands + `watch`, JSON out (humans, scripts, AIs) |

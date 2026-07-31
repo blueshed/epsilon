@@ -7,6 +7,11 @@ export interface Card {
   done?: boolean;
   /** Relational tier only: the author, from the echo. */
   created_by?: number | null;
+  /** Relational tier only: who last edited this row, and when — the STATE
+   *  half of "who changed what" (the kit's doc_history is the other). NULL
+   *  until someone touches it. Survives the op-log prune. */
+  updated_by?: number | null;
+  updated_at?: string | null;
 }
 
 export interface Member {

@@ -206,6 +206,84 @@ export function pgUndo(host: Host, sql: Sql, applyOf: (doc: string) => string | 
   });
 }
 
+/**
+ * History as a host method: `remote.call("history", { doc, before?, after?,
+ * limit? })` reads the doc's own op log back (the kit, db/003) — newest first, names
+ * joined at read time, paged by version cursor. `before` pages backwards,
+ * `after` fetches only what is newer than a version you already have.
+ *
+ * It is a READ of the audit every write already makes, gated by the doc's
+ * own permit (doc_open) in SQL — so it can't become a side door into a doc
+ * the caller may not open, and adding it costs a doc type nothing. Depth is
+ * whatever epsilon_prune keeps (004); a row's own updated_by/updated_at, if
+ * the type stamps them, outlives the log.
+ */
+export function pgHistory(host: Host, sql: Sql, opts?: { limit?: number }): void {
+  host.method("history", async (
+    params: { doc?: string; before?: number; after?: number; limit?: number },
+    ws,
+  ) => {
+    const name = String(params?.doc ?? "");
+    if (!name) throw new Error("doc required");
+    const [row] = await sql`SELECT doc_history(
+      ${name},
+      ${ws.data?.user?.id == null ? null : Number(ws.data.user.id)},
+      ${params?.before ?? null},
+      ${params?.after ?? null},
+      ${params?.limit ?? opts?.limit ?? 100}) AS h`;
+    return row.h as unknown[];
+  });
+}
+
+/**
+ * The operator's door: `remote.call("admin", { sql })` runs one statement and
+ * returns its rows — the CLI's `call admin '{"sql":"…"}'`.
+ *
+ * It exists because the EMBEDDED tier has no port. PGlite lives inside the
+ * app process, so there is no psql, no console, no way to inspect or repair a
+ * running deployment except the wire the app already speaks. (Born the night
+ * a typo'd registration could be neither found nor fixed.)
+ *
+ * Gated by an explicit list of registered emails — `EPSILON_ADMIN`, or
+ * `admins`. NO LIST, NO DOOR: with none configured the method is never
+ * registered, so a deployment that didn't opt in doesn't have one to attack.
+ * When it IS configured, refusals SPEAK rather than hiding behind a uniform
+ * "unknown method": the door is only reachable by an authenticated socket,
+ * and an operator who cannot tell "no session" from "not on the list" from
+ * "not deployed" spends the evening guessing which. Returns whether a door
+ * was opened, so a boot log can say so.
+ *
+ * Writes made here BYPASS the op log: right for users and sessions, and
+ * reload-worthy for doc tables — hosted docs will not hear about them.
+ */
+export function pgAdmin(
+  host: Host,
+  sql: Sql,
+  opts?: { admins?: string[]; maxRows?: number },
+): boolean {
+  const admins = (opts?.admins ?? process.env.EPSILON_ADMIN?.split(",") ?? [])
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  if (admins.length === 0) return false;
+  const maxRows = opts?.maxRows ?? 500;
+
+  host.method("admin", async (params: { sql?: string }, ws) => {
+    const user = ws.data?.user as { id?: number | string; email?: string } | undefined;
+    if (user?.id == null) throw new Error("admin: no session on this socket — log in first");
+    if (!user.email || !admins.includes(user.email.toLowerCase())) {
+      throw new Error(`admin: not permitted for ${user.email ?? user.id}`);
+    }
+    if (!params?.sql) throw new Error("admin: sql required");
+    const rows = (await sql.unsafe(params.sql)) as unknown[];
+    // Bound the FRAME, not the query — the tail is still in the database, and
+    // a truncated answer that says so beats a socket killed by a stray SELECT *.
+    return Array.isArray(rows) && rows.length > maxRows
+      ? { rows: rows.slice(0, maxRows), truncated: true, total: rows.length }
+      : { rows: rows ?? [] };
+  });
+  return true;
+}
+
 /** Bring one hosted doc up to the database's version. Idempotent — receive()
  *  drops stale versions, so overlapping calls can't double-apply. */
 async function catchUp(host: Host, sql: Sql, name: string): Promise<void> {
