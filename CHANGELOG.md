@@ -7,6 +7,8 @@ will ship.
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-07-31
+
 The third japan field report, absorbed. A month deployed with eight real
 users on the embedded tier; three of these are bugs it found in shipped
 behavior, two are features it grew that belong in the box.
@@ -73,12 +75,12 @@ behavior, two are features it grew that belong in the box.
 
 - `db/003-doc-kit.sql` grows `doc_history` IN PLACE rather than shipping a
   006 (migrations are day-zero truth, not a diary — 0.3.0's rule, applied
-  again while the change is still unreleased). Deployed 0.5.x apps adopt it
-  by copying the one function body into their next app migration; it is
-  `CREATE OR REPLACE`, so it re-applies cleanly. Their ledger will then
-  differ on 003's hash: `TRUNCATE migrations` and re-migrate (every core
-  file is idempotent — the upgrade path 0.3.0 proved against a live
-  database), or pin the old hash if the fork is deliberate.
+  again while the change is still unreleased). No deployed app is disturbed:
+  `epsilon:upgrade`'s scope is `epsilon/` and the skill, NEVER `db/`, so an
+  existing app's migrations and ledger come through an upgrade untouched —
+  there is no hash drift to heal. Adopt history when you want it by copying
+  the one function body into your next app migration; it is `CREATE OR
+  REPLACE`, so it re-applies cleanly. New scaffolds are born with it.
 
 ## [0.5.1] — 2026-07-30
 
