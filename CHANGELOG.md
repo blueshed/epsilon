@@ -7,6 +7,78 @@ will ship.
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-08-01
+
+Nouns are docs, and the law is a harness. Both grew from the same japan
+observation: the journey list was first built as a `call()` returning rows
+— a dead read that had to be *asked* to be made live. The agent didn't
+fail; it followed the grain (a dead read cost five lines, a live one
+forty). This release inverts the grain and hands the design's one law to
+app authors as a tool.
+
+### Added
+
+- **Declared read views** (`pgView`, in `epsilon/pg.ts`). The rule:
+  `call()` is for VERBS — anything you render is a noun, and a noun
+  arrives as a doc, live, permitted, versioned. When no doc exposes what
+  a screen needs, one app SQL function plus one line declares a view:
+  `pgView(host, db, "tally:", { open: "tally_open", on: ["board:",
+  "mine:"] })`. The function is composition AND permit (001's rule —
+  NULL user composes the host's copy, NULL result refuses as "unknown
+  doc", re-asked at every open); `on` names the dependency prefixes whose
+  commits — and deaths — recompose it. Read-only (writes refuse), no docs
+  row, no op log; per-identity views are per-identity NAMES
+  (`tally:<uid>`), like `mine:<uid>`. Recompose is eager by design and
+  bounded three ways: eviction (a view composes only while watched),
+  per-name coalescing, and an equality skip (a doorbell that changes
+  nothing pushes nothing — jsonb's canonical key order makes that one
+  string compare). Delivery is pgSync's in both modes: LISTEN taps the
+  doorbell; poll (the embedded tier) sweeps the dependencies' version
+  rows, hosted or not, only while a view is watched. Pinned by
+  view.test.ts (wire: LISTEN, poll, permit probes while live, the
+  equality skip, eviction/recompose) and a PGlite drive in
+  pglite.test.ts.
+- **The law harness** (`epsilon/law.ts`). The doc kit made writing a
+  type ~30 lines; nothing made proving one cheap — and every field-report
+  defect (the silent FK cascade, the un-widened `done` echo) was a law
+  violation caught by hand. `proveLaw({ handle, name, sql, batches,
+  mirrors?, undo? })` drives batches over the REAL wire — one per
+  dispatch branch, functions of current data, closing over test state
+  where a restore needs its remove's row — and after every echo asserts
+  the client copy deep-equals `doc_open(name)` recomposed from the
+  tables. With `undo` wired each batch is undone, checked, redone,
+  checked (types that record no undo skip gracefully); `mirrors` must
+  converge to their own recompute. The FAILURE TEXT is the interface:
+  differing paths, the last echo, and the defect class named
+  (unexpressed cascade → `doc_cascade_remove`; a sibling column
+  disagreeing beside an echoed path → widen the echo to the whole row).
+  Dogfooded: rel.test.ts's law describe is now a `proveLaw` call —
+  stronger than the hand-rolled drive it replaced (undo/redo of every
+  batch, the rename mirror) — and the todo type's drive is the minimal
+  recipe an app copies. Pure halves (deepEquals, diff, classify) pinned
+  without a database in law.test.ts.
+
+### Changed
+
+- **Two decrees, recorded in DESIGN.md.** Per-viewer composition is
+  promoted from "known limit" to a NON-GOAL: a doc reads the same to
+  everyone permitted to read it — different views for different people
+  are different doc names, minted per identity; per-subscriber recompose
+  would fight "express the change, never recompose". And "no arbitrary
+  live queries" is amended to "no UNDECLARED live queries" — `pgView` is
+  the door a declared one walks through.
+- **Presence's multi-process limit is stated, not hidden**: per-process
+  means presence under-reports behind a load balancer — each process
+  shows only its own sockets' watchers. "Scaling up is a config change"
+  holds for docs; presence is the one exception, documented in DESIGN.md
+  and left for a field report to justify fanning out.
+- Stale embedded-tier notes corrected (`pglite.ts` header, REFERENCE.md):
+  both still said pgSync is skipped/unnecessary on the embedded engine —
+  contradicting 0.6.0, which made poll-mode sync the embedded tier's
+  delivery path. The skill gains the two rules with teeth: *about to
+  render data? open a doc — if none exposes it, add a view, never a
+  fetch*; and *pin every new doc type with `proveLaw()`*.
+
 ## [0.6.0] — 2026-07-31
 
 The third japan field report, absorbed. A month deployed with eight real
