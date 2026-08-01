@@ -6,7 +6,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHost, connect, type Host, type Remote } from "./doc";
-import { migrate, pgDoc, pgAuth, pgSync, type Sql } from "./pg";
+import { migrate, pgDoc, pgAuth, pgSync, pgView, type Sql } from "./pg";
 import { openPglite } from "./pglite";
 import type { Card, Board } from "../types";
 
@@ -187,6 +187,45 @@ describe("embedded Postgres — same schema, no server", () => {
       await app?.sql?.end?.();
       rmSync(bootDir, { recursive: true, force: true });
       if (saved) process.env.EPSILON_PG_URL = saved;
+    }
+  });
+
+  test("a view follows its dependencies on the embedded engine — the sweep is the doorbell", async () => {
+    // PGlite has nothing to LISTEN on, so a view's recompose rides the same
+    // poll pgSync already runs here (0.6.0) — dependency version bumps in the
+    // docs table are the signal.
+    await sql.unsafe(`
+      CREATE OR REPLACE FUNCTION tally_open(p_doc text, p_user bigint DEFAULT NULL) RETURNS jsonb AS $$
+        SELECT CASE WHEN p_user IS NOT NULL AND p_user <> doc_id(p_doc) THEN NULL ELSE
+          jsonb_build_object(
+            'boards', (SELECT COUNT(*) FROM boards b WHERE b.owner_id = doc_id(p_doc)))
+        END;
+      $$ LANGUAGE sql STABLE;`);
+    const [u] = await sql`SELECT register('Viewer', 'viewer@pg.lite', 'pw') AS u`;
+    const uid = Number(u.u.id);
+    await sql`INSERT INTO docs (name, v, data, open_fn) VALUES (${"mine:" + uid}, 0, NULL, 'mine_open')`;
+
+    const host = createHost({ requireAuth: true });
+    await pgAuth(host, sql);
+    pgView(host, sql, "tally:", { open: "tally_open", on: ["board:", "mine:"] });
+    const sync = await pgSync(host, sql, { mode: "poll", ms: 50 });
+    try {
+      const url = serve(host);
+      const r = connect(url, {
+        onConnect: async (remote) => { await remote.call("login", { email: "viewer@pg.lite", password: "pw" }); },
+      });
+      remotes.push(r);
+      const tally = r.doc<{ boards: number }>(`tally:${uid}`);
+      await tally.ready;
+      expect(Number(tally.peek()!.boards)).toBe(0);
+
+      // Creation is an op on the mine doc — it rings the version bump the
+      // sweep watches; the view follows without hosting any dependency.
+      await sql.unsafe(`SELECT mine_apply($1, $2, $3) AS r`,
+        ["mine:" + uid, [{ op: "add", path: "/boards/-", value: { name: "embedded" } }] as unknown, uid]);
+      await until(() => Number(tally.peek()?.boards) === 1);
+    } finally {
+      sync.stop();
     }
   });
 
