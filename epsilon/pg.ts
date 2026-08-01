@@ -284,6 +284,153 @@ export function pgAdmin(
   return true;
 }
 
+// ---------------------------------------------------------------------------
+// Views — nouns are docs. A view is a READ-ONLY doc whose value is one
+// composition query over other docs' tables, recomposed when any of its
+// DECLARED dependencies commits. It satisfies the law by construction: it IS
+// recompute-from-state — the always-correct channel with no fast path to get
+// wrong — pushed as a root replace (the snapshot shape every client and
+// ui.ts already render; list() reconciles it by key set, so a recompose
+// lands as minimal DOM churn).
+//
+// Why it exists (the japan grain lesson, 2026-08-01): anything you RENDER is
+// a noun, and a noun must arrive as a doc — live, permitted, versioned —
+// because a `call()` that returns rows is a read that escaped the permit
+// lifetime ("a subscription never outlives its permit" can't bite data a
+// call already handed out). call() is for VERBS. If no doc exposes what
+// you're about to render, you add a view — never a fetch.
+//
+// The costs, named: recompose is EAGER — O(view) per matching doorbell where
+// a fetch is lazy — bounded by eviction (a view composes only while
+// watched), per-name coalescing, and an equality skip (`on` prefixes are
+// coarse; most doorbells change nothing). Delivery is pgSync's, like every
+// commit made outside a write hook (0.6.0): LISTEN taps the doorbell, poll
+// mode sweeps the dependencies' version rows. No pgSync, no updates.
+// ---------------------------------------------------------------------------
+
+interface ViewEntry {
+  prefix: string;
+  fn: string;
+  on: string[];
+  sql: Sql;
+  /** Per-name coalescing latch: doorbells during a recompose fold into one
+   *  re-run instead of stacking queries. */
+  busy: Map<string, { again: boolean }>;
+}
+
+const views = new WeakMap<Host, ViewEntry[]>();
+
+function viewsOf(host: Host): ViewEntry[] {
+  return views.get(host) ?? [];
+}
+
+/**
+ * Host a read-only view: `pgView(host, sql, "tally:", { open: "tally_open",
+ * on: ["board:", "mine:"] })`. Names are data, like every dynamic doc —
+ * `tally:<uid>` is a per-identity view exactly the way `mine:<uid>` is a
+ * per-identity doc (the decree holds: one name reads the same to everyone
+ * permitted; different views for different people are different names).
+ *
+ * `open` is an app SQL function `<fn>(name, user)` — the composition AND
+ * the permit, 001's rule verbatim: NULL user composes the host's full copy;
+ * NULL result refuses (the wire reads "unknown doc" — no existence oracle),
+ * asked fresh at EVERY open. No docs row, no version, no op log — a view
+ * has nothing to migrate and nothing to undo.
+ *
+ * `on` lists the doc-name prefixes whose commits recompose it. Declared,
+ * not inferred — that is the whole tractability of the feature (see
+ * DESIGN.md "Non-goals": no UNDECLARED live queries).
+ */
+export function pgView(
+  host: Host,
+  sql: Sql,
+  prefix: string,
+  opts: { open: string; on: string[] },
+): void {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(opts.open)) {
+    throw new Error(`[epsilon/pg] view open must be a plain function name: ${opts.open}`);
+  }
+  const view: ViewEntry = { prefix, fn: opts.open, on: opts.on, sql, busy: new Map() };
+  let list = views.get(host);
+  if (!list) views.set(host, (list = []));
+  list.push(view);
+
+  host.docs(prefix, async (name, userId) => {
+    // The first opener's permit — the composition function itself, asked
+    // with their identity BEFORE anything is hosted: probes cost nothing.
+    const asked = await sql.unsafe(`SELECT ${view.fn}($1, $2) AS d`, [name, userId ?? null]);
+    if (asked[0]?.d == null) throw new Error(`unknown doc: ${name}`);
+    let sig!: Signal<unknown>;
+    sig = host.doc<unknown>(name, null, {
+      // Read-only: the ONE thing a view refuses. Writes belong to the docs
+      // it composes from.
+      write() { throw new Error(`read-only view: ${name}`); },
+      // The gate re-asks the composition per open (pgDoc's default, by hand
+      // — a view has no docs row for doc_open to find).
+      async open(u) {
+        const rows = await sql.unsafe(`SELECT ${view.fn}($1, $2) IS NOT NULL AS ok`, [name, u ?? null]);
+        return rows[0]?.ok ? sig.peek() : null;
+      },
+    });
+    // The host composes as itself (001's rule); the gate decides who may
+    // receive it. Evicted with its last watcher like any dynamic doc — this
+    // factory recomposes on the next open.
+    const full = await sql.unsafe(`SELECT ${view.fn}($1) AS d`, [name]);
+    sig.apply([{ op: "replace", path: "", value: full[0]?.d ?? null }]);
+  });
+}
+
+/** Recompose one hosted view name — coalesced per name, pushed only when
+ *  the value actually moved. */
+async function recompose(host: Host, view: ViewEntry, name: string): Promise<void> {
+  const running = view.busy.get(name);
+  if (running) { running.again = true; return; }
+  const mine = { again: false };
+  view.busy.set(name, mine);
+  try {
+    do {
+      mine.again = false;
+      const rows = await view.sql.unsafe(`SELECT ${view.fn}($1) AS d`, [name]);
+      const data = (rows[0] as { d?: unknown } | undefined)?.d ?? null;
+      // Evicted while composing: nothing to update — the factory recomposes
+      // on the next open. Checked synchronously against the set-or-push.
+      if (!host.names().includes(name)) return;
+      const sig = host.doc<unknown>(name, null);
+      // The equality skip. jsonb serializes with canonical key order and JS
+      // preserves it through parse, so two equal compositions stringify
+      // identically — a doorbell that changed nothing pushes nothing.
+      if (JSON.stringify(sig.peek()) !== JSON.stringify(data)) {
+        sig.apply([{ op: "replace", path: "", value: data }]);
+      }
+    } while (mine.again);
+  } catch (err) {
+    console.error(`[epsilon/pg] view ${name} recompose failed:`, err);
+  } finally {
+    view.busy.delete(name);
+  }
+}
+
+/** A dependency committed (or died): recompose every hosted view that
+ *  declared it. pgSync calls this from both delivery modes. */
+function notifyViews(host: Host, changed: string): void {
+  for (const view of viewsOf(host)) {
+    if (!view.on.some((p) => changed.startsWith(p))) continue;
+    for (const name of host.names()) {
+      if (name.startsWith(view.prefix)) void recompose(host, view, name);
+    }
+  }
+}
+
+/** Recompose every hosted view — reconnect catch-up: doorbells rung while
+ *  the listener was down reached nobody. */
+function refreshViews(host: Host): void {
+  for (const view of viewsOf(host)) {
+    for (const name of host.names()) {
+      if (name.startsWith(view.prefix)) void recompose(host, view, name);
+    }
+  }
+}
+
 /** Bring one hosted doc up to the database's version. Idempotent — receive()
  *  drops stale versions, so overlapping calls can't double-apply. */
 async function catchUp(host: Host, sql: Sql, name: string): Promise<void> {
@@ -348,6 +495,9 @@ export async function pgSync(
             if (stopped || !msg.payload) return;
             try {
               const { name, gone } = JSON.parse(msg.payload) as { name: string; gone?: boolean };
+              // Views hear every doorbell — a commit AND a death both change
+              // what a dependent view composes to.
+              notifyViews(host, name);
               // doc_drop's doorbell: the doc no longer exists anywhere —
               // un-host it and its watchers hear the snapshot of nothing.
               if (gone) return host.drop(name);
@@ -357,8 +507,9 @@ export async function pgSync(
           });
           backoff = 200;
           // Anything committed while we were (re)connecting was NOTIFYd to
-          // nobody — catch every hosted doc up now.
+          // nobody — catch every hosted doc up now, views included.
           for (const name of host.names()) await catchUp(host, sql, name);
+          refreshViews(host);
         } catch (err) {
           console.error("[epsilon/pg] listen connect failed:", err);
           retry();
@@ -390,6 +541,32 @@ export async function pgSync(
   // was doc_dropped under us — un-host it (host.drop). Docs that never had
   // a row (in-memory presence docs sharing the host) are never eligible.
   const known = new Set<string>();
+  // Views watch docs this process may not host: their dependencies' (name, v)
+  // pairs, remembered between sweeps — a bump, a new name, or a vanished one
+  // is that view's doorbell. Swept only while a view is actually hosted.
+  const depV = new Map<string, string>();
+  async function tickViews(hosted: string[]): Promise<void> {
+    const active = viewsOf(host).filter((view) => hosted.some((n) => n.startsWith(view.prefix)));
+    if (active.length === 0) { depV.clear(); return; }
+    const patterns = [...new Set(active.flatMap((view) => view.on))]
+      .map((p) => p.replace(/([\\%_])/g, "\\$1") + "%");
+    const rows = await sql`
+      SELECT name, v FROM docs
+      WHERE name LIKE ANY (SELECT jsonb_array_elements_text(${patterns as any}))`;
+    const seen = new Set<string>();
+    const changed: string[] = [];
+    for (const row of rows) {
+      const name = row.name as string;
+      seen.add(name);
+      if (depV.get(name) !== String(row.v)) { depV.set(name, String(row.v)); changed.push(name); }
+    }
+    for (const name of [...depV.keys()]) {
+      if (!seen.has(name)) { depV.delete(name); changed.push(name); }
+    }
+    // The first sweep reads everything as changed — recompose is coalesced
+    // and the equality skip keeps a no-op sweep silent.
+    for (const name of changed) notifyViews(host, name);
+  }
   async function tick(): Promise<void> {
     if (stopped || inFlight) return;
     inFlight = true;
@@ -412,6 +589,7 @@ export async function pgSync(
         if (present.has(name)) known.add(name);
         else if (known.delete(name)) host.drop(name);
       }
+      await tickViews(names);
     } catch (err) {
       console.error("[epsilon/pg] sync tick failed:", err);
     } finally {

@@ -6,6 +6,7 @@ import { SQL } from "bun";
 import { createHost, connect, type Host, type Remote } from "./doc";
 import type { Signal } from "./signal";
 import { migrate, pgDoc, pgSync, pgAuth, pgUndo, pgAdmin } from "./pg";
+import { proveLaw } from "./law";
 import type { Card, Board } from "../types";
 
 // Test db namespaced by app (package.json name) — see pg.test.ts's note.
@@ -304,6 +305,22 @@ describe("the doc kit — a new doc type is dispatch + composition only", () => 
 
     const [audit] = await sql`SELECT by_user FROM doc_ops WHERE name = ${"todo:" + uid} AND v = 1`;
     expect(Number(audit.by_user)).toBe(uid);           // doc_commit wrote the audit row
+
+    // Pin the type with the law harness — the line every new doc type adds.
+    // One batch per dispatch branch; todo_apply records no undo (doc_commit
+    // without the parameter), which the harness skips gracefully rather
+    // than failing — opting out of undo is legal, lying is not.
+    pgUndo(host, sql, (d) => (d.startsWith("todo:") ? "todo_apply" : undefined));
+    const first = (d: Todos) => Object.keys(d.todos)[0]!;
+    await proveLaw<Todos>({
+      handle: doc, name: `todo:${uid}`, sql,
+      undo: (v?: number) => r.call("undo", { doc: `todo:${uid}`, v }),
+      batches: [
+        () => [{ op: "add", path: "/todos/-", value: { text: "prove me" } }],
+        (d) => [{ op: "replace", path: `/todos/${first(d)}/done`, value: true }],
+        (d) => [{ op: "remove", path: `/todos/${first(d)}` }],
+      ],
+    });
   });
 });
 
@@ -688,17 +705,29 @@ describe("presence — exactly as private as the board it watches", () => {
   });
 });
 
-describe("the law, executable — the op stream must equal recompute-from-state", () => {
-  test("after every op shape the client copy equals compose-from-tables", async () => {
+describe("the law, executable — proveLaw drives it (epsilon/law.ts)", () => {
+  test("board: every op shape, the undo and redo of each, and the rename mirror", async () => {
+    // The assertion the whole design hangs on: what the ops built must equal
+    // what the tables compose, after EVERY echo. The harness is the same
+    // drive a new doc type pins itself with — one batch per dispatch branch;
+    // this call is the worked example the skill points at.
     const host = createHost({ requireAuth: true });
     await pgAuth(host, sql);
+    host.docs("mine:", async (name, userId) => {
+      const uid = Number(name.split(":")[1]);
+      if (!Number.isFinite(uid) || Number(userId) !== uid) throw new Error(`unknown doc: ${name}`);
+      await pgDoc(host, sql, name, null, { apply: "mine_apply", seed: { open_fn: "mine_open" } });
+    });
     host.docs("board:", async (name, userId) => {
       const id = Number(name.split(":")[1]);
       const [b] = await sql`SELECT owner_id FROM boards WHERE id = ${id}`;
       if (!b || Number(userId) !== Number(b.owner_id)) throw new Error(`unknown doc: ${name}`);
       await pgDoc(host, sql, name, null, { apply: "board_apply" });
     });
+    pgUndo(host, sql, (d) => (d.startsWith("board:") ? "board_apply" : undefined));
     const url = serve(host);
+    stops.push((await pgSync(host, sql, { url: PG_URL })).stop);   // mirrors deliver through sync
+
     const r = client(url);
     const me = await r.call<{ user: { id: number } }>("register", {
       name: "Law", email: "law@law.test", password: "pw",
@@ -709,46 +738,35 @@ describe("the law, executable — the op stream must equal recompute-from-state"
     await sql`INSERT INTO docs (name, v, data, open_fn) VALUES (${name}, 0, NULL, 'board_open')`;
 
     const doc = r.doc<Board>(name);
-    await doc.ready;
-    // The assertion the whole design hangs on: what the ops built must equal
-    // what the tables compose. An op stream that lies fails HERE.
-    const same = async () => {
-      const [row] = await sql`SELECT doc_open(${name}) AS d`;
-      expect(doc.peek()).toEqual(row.d);
-    };
-    await same();
+    const mine = r.doc<{ boards: Record<string, { id: number; name: string }> }>(`mine:${uid}`);
+    await Promise.all([doc.ready, mine.ready]);
 
-    doc.at("/cards").apply([{ op: "add", path: "/-", value: { text: "one" } }]);
-    await until(() => Object.keys(doc.peek()!.cards).length === 1);
-    await same();
-    const id = Object.keys(doc.peek()!.cards)[0]!;
-
-    doc.at<string>(`/cards/${id}/text`).set("edited");
-    await until(() => doc.peek()!.cards[id]!.text === "edited");
-    await same();
-
-    doc.at<boolean>(`/cards/${id}/done`).set(true);
-    await until(() => doc.peek()!.cards[id]!.done === true);
-    await same();
-
-    // Whole-row replace — the echo shape as INPUT (the kit's rule).
-    doc.at<Card>(`/cards/${id}`).set({ id: Number(id), text: "whole", done: false });
-    await until(() => doc.peek()!.cards[id]!.text === "whole");
-    await same();
-
-    doc.at<string>("/name").set("law, renamed");
-    await until(() => doc.peek()!.name === "law, renamed");
-    await same();
-
-    const row = doc.peek()!.cards[id]!;
-    doc.at("/cards").apply([{ op: "remove", path: `/${id}` }]);
-    await until(() => doc.peek()!.cards[id] === undefined);
-    await same();
-
-    // Restore at the exact id, over the wire — the other half of the kit's rule.
-    doc.at("/cards").apply([{ op: "add", path: `/${id}`, value: row }]);
-    await until(() => doc.peek()!.cards[id] !== undefined);
-    await same();
+    const cid = (d: Board) => Object.keys(d.cards)[0]!;
+    let saved: Card | undefined;   // batch functions may close over test state:
+    let savedId = "";              // the restore needs the row its remove took
+    await proveLaw<Board>({
+      handle: doc, name, sql,
+      mirrors: [{ name: `mine:${uid}`, handle: mine }],
+      undo: (v?: number) => r.call("undo", { doc: name, v }),
+      batches: [
+        () => [{ op: "add", path: "/cards/-", value: { text: "one" } }],
+        (d) => [{ op: "replace", path: `/cards/${cid(d)}/text`, value: "edited" }],
+        // The trap batch: the dispatch also stamps updated_by/updated_at, so
+        // its echo must widen to the whole row or the harness fails it.
+        (d) => [{ op: "replace", path: `/cards/${cid(d)}/done`, value: true }],
+        // Whole-row replace — the echo shape as INPUT (the kit's rule).
+        (d) => [{ op: "replace", path: `/cards/${cid(d)}`, value: { text: "whole", done: false } }],
+        // A rename mirrors into the owner's own list — same transaction.
+        () => [{ op: "replace", path: "/name", value: "law, renamed" }],
+        (d) => {
+          savedId = cid(d);
+          saved = d.cards[savedId];
+          return [{ op: "remove", path: `/cards/${savedId}` }];
+        },
+        // Restore at the exact id — the other half of the kit's rule.
+        () => [{ op: "add", path: `/cards/${savedId}`, value: saved }],
+      ],
+    });
   });
 });
 

@@ -13,8 +13,10 @@ Read on demand from SKILL.md. Source of truth order: the runtime source
 - **Embedded** (`EPSILON_PG_DIR=./data`): the relational tier on in-process
   Postgres (PGlite) — no database service; migrations, stored functions,
   and auth run unchanged. ONE app process owns the directory (mount a
-  volume); pgSync is skipped — no sibling processes exist. Deploying with
-  it? `bun add @electric-sql/pglite`. Outgrowing it? pg_dump, set
+  volume); pgSync runs in POLL mode (0.6.0) — sync is the delivery path
+  for every commit made outside a doc's own write hook (mirrors, undo,
+  views), not just for sibling processes. Deploying with it?
+  `bun add @electric-sql/pglite`. Outgrowing it? pg_dump, set
   `EPSILON_PG_URL` — a config change, same schema. `railway.json` at the
   repo root is the worked deploy example (config-as-code: start command,
   healthcheck `/`, restart on failure) — volume at `/data`,
@@ -115,6 +117,49 @@ core, frozen once released; `migrate()` warns if you squat below.
   a gated factory. Singletons (`trip:1`-style) skip the factory: seed the
   docs row in your migration like `board:1` and host with
   `pgDoc(host, sql, "trip:1", null, { apply: "trip_apply" })` at boot.
+
+## Views — render a noun, open a doc
+
+`call()` is for VERBS. Anything you render is a noun, and a noun arrives
+as a doc — a fetch-shaped call renders once, goes dead, and escapes the
+permit lifetime. When no doc exposes what a screen needs (a list across
+docs, counts, a dashboard), declare a VIEW:
+
+```sql
+-- App SQL: composition AND permit in one function (001's rule — NULL user
+-- = the host's full copy; NULL result = refused, "unknown doc" on the wire).
+CREATE OR REPLACE FUNCTION tally_open(p_doc text, p_user bigint DEFAULT NULL)
+RETURNS jsonb AS $$
+  SELECT CASE WHEN p_user IS NOT NULL AND p_user <> doc_id(p_doc) THEN NULL ELSE
+    jsonb_build_object('boards',
+      (SELECT COUNT(*) FROM boards b WHERE b.owner_id = doc_id(p_doc)))
+  END;
+$$ LANGUAGE sql STABLE;
+```
+
+```ts
+pgView(host, db, "tally:", { open: "tally_open", on: ["board:", "mine:"] });
+```
+
+- READ-ONLY: writes refuse ("read-only view") — mutate the docs it
+  composes from. No docs row, no version history, no undo; nothing to
+  migrate beyond the function.
+- `on` DECLARES the dependency prefixes — a commit (or doc_drop) on any
+  matching doc recomposes every hosted name of the view. Declared, not
+  inferred; that's the whole tractability (DESIGN.md: no UNDECLARED live
+  queries).
+- Per-identity views are per-identity NAMES (`tally:<uid>`), like
+  `mine:<uid>` — one name reads the same to everyone permitted (the
+  per-viewer decree). The permit is re-asked at every open and the client
+  opens it like any doc: `remote.doc("tally:" + uid)`.
+- Costs: recompose is eager, bounded by eviction (composes only while
+  watched), per-name coalescing, and an equality skip (a doorbell that
+  changes nothing pushes nothing). Delivery is pgSync's — LISTEN or poll,
+  embedded tier included; no pgSync, no updates.
+- `history` stays a call on purpose: the rule governs rendered LIVE
+  state; a parameterized, paged archive read is verb-shaped.
+- view.test.ts is the worked suite (wire + poll); pglite.test.ts drives
+  one embedded.
 
 ## Undo
 
@@ -221,10 +266,15 @@ in another, and you are watching the fan-out itself.
   checkouts sharing one dev Postgres never fight over migration ledgers) —
   they TRUNCATE, and sharing one deadlocks against the migration advisory
   lock.
-- The law as a test: after driving ops over the wire, assert the client
-  copy `toEqual`s `doc_open(name)` composed from the tables (see
-  rel.test.ts "the law, executable"). Add the same assertion for every
-  new doc type — it catches any dispatch whose op stream lies.
+- The law as a harness (`epsilon/law.ts`): `proveLaw({ handle, name, sql,
+  batches, mirrors?, undo? })` drives batches over the real wire and
+  asserts the client copy deep-equals `doc_open(name)` after every echo —
+  undoing and redoing each batch when `undo` is wired, waiting on mirrors
+  to converge. One batch per dispatch branch is the discipline; batch
+  functions may close over test state (a restore keeps its remove's row).
+  Failures name the defect class (unexpressed cascade, un-widened echo).
+  Pin EVERY new doc type with it — rel.test.ts's law describe is the
+  worked call; the todo drive there is the minimal one to copy.
 
 ## Sharp edges
 

@@ -17,6 +17,8 @@ folder in your app — ~1.7k lines of TypeScript you own, with its own tests.
 - **Multi-user is in the box.** Share a board by email — it appears in the member's own list in the same transaction; presence shows who's looking; unwatched docs evict and re-host on demand.
 - **Postgres, db-first.** Migrations in `db/` (numbered, hash-recorded, forward-only). Set `EPSILON_PG_URL` and the doc is durable — state and versions survive restarts. Identity is minted by the database and carried everywhere, never re-derived.
 - **Undo is in the schema.** `doc_ops` records each write's inverse; `remote.call("undo", { doc })` reverts *your* last one — refused, never clobbered, when someone wrote after you. The audit log and the undo log are the same table.
+- **Nothing renders dead.** Anything a screen shows is a doc — live, permitted, versioned. When no doc exposes it (a list across docs, counts, a dashboard), one SQL function plus one `pgView` line declares a read-only **view** that recomposes when its named dependencies commit. `call()` is for verbs; there are no fetches to go stale.
+- **The law is a harness you run.** `epsilon/law.ts` drives your doc type's ops over the real wire and proves the client copy equals recompute-from-tables after every echo — undo and mirrors included, failures naming the defect (`proveLaw`, one call per doc type, in your own tests).
 - **Or Postgres with no database process.** Set `EPSILON_PG_DIR=./data` and the SAME schema runs embedded, in-process ([PGlite](https://pglite.dev)) — one deployable service, state on a volume, every migration and stored function unchanged. Outgrow it? `pg_dump`, set `EPSILON_PG_URL`: scaling up is a config change. (Single app process only; add `@electric-sql/pglite` when deploying with it.)
 - **Bun, simple.** One runtime, TypeScript on both sides, no build step, zero dependencies (`pg` is optional, dev-time, and retires when Bun ships `sql.listen`).
 - **The UX is the same stream.** Signals carry ops; `list()` routes them; nothing diffs.
@@ -72,8 +74,9 @@ EPSILON_PG_URL=postgres://epsilon:epsilon@localhost:5599/epsilon bun dev
 | `signal.ts` | Op-carrying signals; composing `at()` lenses |
 | `doc.ts` | The wire — one Signal class both sides; `apply()` hides the WebSocket |
 | `ui.ts` | `list()` routes membership ops; `bind()` rides a lens's op stream for scalars |
-| `pg.ts` | Durability, LISTEN/NOTIFY fan-out, wire adapters: auth, undo, history, the operator's door |
+| `pg.ts` | Durability, LISTEN/NOTIFY fan-out, declared read views (`pgView`), wire adapters: auth, undo, history, the operator's door |
 | `pglite.ts` | The same `Sql` seam over in-process Postgres — the embedded engine |
+| `law.ts` | The law as a harness — `proveLaw` drives your doc type over the wire and fails with the defect named |
 | `migrate.ts` | Numbered migrations: ordered, hash-recorded, forward-only, transactional |
 | `cli.ts` | The wire from a terminal — auth-aware one-shot commands + `watch`, JSON out (humans, scripts, AIs) |
 | `upgrade.ts` | `bun run epsilon:upgrade` — take a newer runtime over your local patches (three-way merge) |

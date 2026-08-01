@@ -10,11 +10,12 @@
  *   await pgDoc(host, sql, "board:1", null, { apply: "board_apply" });
  *
  * The deal being made (and why it suits many small apps): ONE app process
- * owns the directory — no horizontal scaling, and pgSync is unnecessary by
- * construction (there is no other process to hear from; the host's own
- * broadcast reaches every subscriber). Outgrow it, pg_dump into a wire
- * Postgres, set EPSILON_PG_URL: scaling up is a config change, because both
- * engines speak the same schema.
+ * owns the directory — no horizontal scaling. pgSync still runs, in POLL
+ * mode (0.6.0's lesson): sync is the delivery path for every commit made
+ * outside a doc's own write hook — mirrors, undo, views — not just for
+ * sibling processes, and PGlite has no doorbell to ring. Outgrow it,
+ * pg_dump into a wire Postgres, set EPSILON_PG_URL: scaling up is a config
+ * change, because both engines speak the same schema.
  *
  * Optional, like `pg`: nothing imports this file unless the app asks for
  * the embedded engine. Deploying with it? `bun add @electric-sql/pglite`.

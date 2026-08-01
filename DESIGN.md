@@ -157,10 +157,11 @@ The first cut wasn't db-first enough. Three gaps, closed:
   `board_apply` (RAISEs "not found" — no existence oracle). `owner_id NULL`
   = shared, which is how the demo board stays open.
 
-Known limit: the hosted server copy of a doc is shared, so per-identity doc
-scoping applies at the WRITE boundary and at direct `doc_open(doc, user)`
-reads. Per-subscriber composed docs (delta's recompute pattern) are future
-work.
+The hosted server copy of a doc is shared, so per-identity doc scoping
+applies at the WRITE boundary and at direct `doc_open(doc, user)` reads.
+Once "future work" (per-subscriber composed docs, delta's recompute
+pattern), now a decree — see Non-goals: a doc reads the same to everyone
+permitted to read it.
 
 Bun quirks found the hard way (all pinned by tests):
 `expect(p).rejects.toThrow()` never settles against a Bun SQL rejection —
@@ -214,6 +215,13 @@ with its last watcher. Hooks fire AFTER the snapshot send, so a new
 subscriber sees itself appear as a contiguous op. Ephemeral and
 PER-PROCESS by design — nothing persists, nothing fans out across
 processes.
+
+Stated limit (2026-08-01): per-process means presence UNDER-REPORTS on the
+multi-process tier — behind a load balancer each process shows only its own
+sockets' watchers. "Scaling up is a config change" holds for docs; presence
+is the one exception, and it is documented rather than hidden. If a field
+report ever needs it, the doorbell can carry presence across processes; it
+does not today.
 
 And exactly as private as the board it watches (2026-07-29): a factory
 refusal guards only the FIRST open — the doc outlives its opener — and an
@@ -367,6 +375,72 @@ signed in" from "not on the list" from "not deployed" spends the evening
 guessing which. Writes here bypass the op log — right for users and
 sessions, reload-worthy for doc tables.
 
+## Nouns are docs — declared read views (2026-08-01)
+
+The japan grain lesson: the journey list was first built as a `call()`
+returning rows — a dead read that had to be ASKED to be made live. The
+agent didn't fail; it followed the grain. A dead read cost five lines and
+a live one cost forty, and whatever the grain permits, an agent (or a
+tired human) will build. The fix is structural, not documentary:
+
+- **`call()` is for verbs** — login, undo, register. Anything you RENDER
+  is a noun, and a noun arrives as a doc: live, permitted, versioned,
+  because there is no other door. If no doc exposes it, you add a view —
+  never a fetch. (A call-shaped read also escapes the permit lifetime:
+  "a subscription never outlives its permit" cannot bite rows a call
+  already handed out.)
+- **A view is a read-only doc** (`pgView(host, sql, "tally:", { open:
+  "tally_open", on: ["board:", "mine:"] })`): one app SQL function is the
+  composition AND the permit (001's rule verbatim — NULL user = the host's
+  full copy, NULL result = refused, asked fresh per open), recomposed when
+  a DECLARED dependency prefix commits, pushed as a root replace — the
+  snapshot shape everything already renders; `list()` reconciles it by key
+  set, so a recompose lands as minimal DOM churn. No docs row, no version,
+  no op log; writes refuse ("read-only view"). Per-identity views are
+  per-identity NAMES (`tally:<uid>`), like `mine:<uid>` — the decree holds.
+- **It satisfies the law by construction** — a view IS
+  recompute-from-state, the always-correct channel with no fast path to
+  get wrong. It doesn't fight "express the change, never recompose":
+  that rule governs writes; a view is the read tier doing its one job.
+- **The costs, named.** Recompose is EAGER — O(view) per matching
+  doorbell where a fetch is lazy — bounded three ways: eviction (a view
+  composes only while watched), per-name coalescing (doorbells during a
+  recompose fold into one re-run), and an equality skip (`on` prefixes
+  are coarse; jsonb's canonical key order makes "nothing moved" one
+  string compare, and a silent doorbell pushes nothing).
+- **Delivery is pgSync's**, like every commit made outside a write hook
+  (0.6.0): LISTEN taps the doorbell — including `gone`, a death changes
+  what a view composes to — and poll mode sweeps the dependencies'
+  version rows (new name, bumped v, vanished name), hosted or not, only
+  while a view is actually watched.
+- `history` stays a call, deliberately: the rule governs rendered LIVE
+  state; a parameterized, paged archive read is verb-shaped.
+
+## The law, in the app's hands (2026-08-01)
+
+The doc kit made WRITING a type ~30 lines; nothing made PROVING one
+cheap — and every defect the field reports surfaced (silent cascades, the
+un-widened `done` echo) was a law violation caught by hand. `epsilon/law.ts`
+extracts rel.test.ts's drive into the harness a new type pins itself with:
+
+- `proveLaw({ handle, name, sql, batches, mirrors?, undo? })` — batches
+  drive the REAL wire, one per dispatch branch (functions of current data,
+  closing over test state where a restore needs its remove's row); after
+  every echo the client copy must deep-equal `doc_open(name)` recomposed
+  from the tables. With `undo` wired, each batch is undone, checked,
+  redone, checked — the recorded inverse is the half a plain drive never
+  exercises (types that record no undo skip gracefully). `mirrors` must
+  converge to their own recompute (delivery is pgSync's).
+- **The failure text is the interface** — written for whoever (or
+  whatever) fixes the dispatch: the differing paths, the last echo, and
+  the likely defect class named (unexpressed cascade → doc_cascade_remove;
+  a sibling column disagreeing beside an echoed path → widen the echo to
+  the whole row). A diagnosis an agent converges on in one iteration; a
+  raw diff it thrashes against.
+- rel.test.ts's law describe now IS a proveLaw call (stronger than the
+  hand-rolled drive it replaced: undo/redo per batch, the rename mirror);
+  the todo type's drive is the minimal recipe an app copies.
+
 ## Upgrades — taking a new epsilon is mechanical (2026-07-30)
 
 The second field report (japan; the first became 0.3.0): one month
@@ -404,7 +478,7 @@ and only the SQL part wanted machinery — which existed:
 
 ## Non-goals
 
-No vdom. No OT/CRDT (model is authoritative; LWW + resync). No offline. No arbitrary live queries — read views without a lawful `put` are read-only, as in delta. In-memory mode is a SHAPE PREVIEW, not a second implementation: uuid ids, no `-` identity resolution, no permits — keep identity-dependent UI behind auth.
+No vdom. No OT/CRDT (model is authoritative; LWW + resync). No offline. No UNDECLARED live queries (amended 2026-08-01) — a live read is a declared view (`pgView`: named composition, named dependencies, read-only); ad-hoc query subscriptions stay out. **No per-viewer composition** (decreed 2026-08-01, was a "known limit"): a doc reads the same to everyone permitted to read it — different views for different people are different doc NAMES (`mine:<uid>`, `tally:<uid>`), minted per identity. Per-subscriber recompose would fight "express the change, never recompose"; doc-granularity permits already scope identity. In-memory mode is a SHAPE PREVIEW, not a second implementation: uuid ids, no `-` identity resolution, no permits — keep identity-dependent UI behind auth.
 
 ## Decisions (Peter, 2026-07-28)
 

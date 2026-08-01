@@ -78,6 +78,11 @@ users/sessions, reload-worthy for doc tables.
 
 ## Rules — in order of importance
 
+- **About to render data? You're about to open a doc.** `call()` is for
+  VERBS (login, undo). If no doc exposes what you're rendering, add a VIEW
+  (`pgView` — one SQL function, declared dependencies; REFERENCE.md) —
+  NEVER a fetch-shaped call: it renders once, goes dead, and escapes the
+  permit lifetime. A view reads like any doc: `remote.doc("tally:" + uid)`.
 - **Never update locally after a send.** The echo renders the write — touch
   the DOM or state yourself and it doubles.
 - **Never mint ids client-side.** `/-` in, resolved id out.
@@ -94,6 +99,10 @@ users/sessions, reload-worthy for doc tables.
 - **Close what you leave.** `remote.doc()` handles are refcounted — call
   `.close()` when a view is done with a doc. Writes through a closed
   handle throw.
+- **Pin every new doc type with `proveLaw()`** (`epsilon/law.ts`) — one
+  batch per dispatch branch, driven over the real wire, checked against
+  recompute after every echo (undo and mirrors too). The failure names the
+  defect class. rel.test.ts's law describe is the worked call.
 - **Auth before docs** on `requireAuth` hosts; re-auth belongs in
   `onConnect` — it runs on every reconnect, before docs re-open.
 - **Never edit an applied migration.** Add the next number (comment-only
