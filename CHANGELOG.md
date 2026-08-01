@@ -7,6 +7,37 @@ will ship.
 
 ## [Unreleased]
 
+## [0.7.1] — 2026-08-01
+
+### Added
+
+- **The tally view, wired into the demo app for real** (`db/101-tally.sql`,
+  `server.ts`, `types.ts`, `index.*`). `pgView`'s worked example (0.7.0)
+  had only ever run inside `view.test.ts` — `tally_open` composes counts
+  over your own boards, `pgView(host, db, "tally:", { open: "tally_open",
+  on: ["board:", "mine:"] })` hosts it, and a quiet line under your board
+  list (`2 boards · 5 cards · 1 done`) renders it live, the same
+  `effect()`-over-`.get()` binding as `#board-name`. A new migration, not
+  an edit to `100-board.sql` — that file was already applied on real
+  databases, and `migrate()`'s forward-only hash check caught exactly
+  this the hard way. Pinned end to end in `app.test.ts`: a real browser,
+  real Postgres, the tally moving as boards and cards do.
+- **A `←` button back to main** (`#board-header`), next to the board
+  title: deterministic, unlike `history.back()` — a reload or a
+  bookmarked board link has no history to use. Hidden while already on
+  `board:1`.
+
+### Changed
+
+- **Every ✕ confirms first.** Card, member, and board removal all go
+  through `<dialog id="confirm">` — not `window.confirm()`, which stays
+  invisible to `app.test.ts`'s `Bun.WebView` the same way it would to a
+  real user's script blocker; a DOM dialog is stylable and driveable by
+  the same clicks the auth dialog already uses. The message names what's
+  actually at stake: a board you own says "this removes all its cards",
+  a shared one says "leave" instead of "delete" — `mine_apply`'s own
+  owned-vs-shared distinction, said out loud before it happens.
+
 ## [0.7.0] — 2026-08-01
 
 Nouns are docs, and the law is a harness. Both grew from the same japan

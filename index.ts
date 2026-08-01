@@ -4,7 +4,7 @@
 // that doc; opening one is just another doc name.
 import { connect, list, text, bind, effect, pushDisposeScope, popDisposeScope } from "./epsilon";
 import type { OpSignal, Dispose, DocHandle } from "./epsilon";
-import type { Board, Card, Member } from "./types";
+import type { Board, Card, Member, Tally } from "./types";
 
 interface BoardRef { id: number | string; name: string; shared?: boolean }
 interface Mine { boards: Record<string, BoardRef> }
@@ -13,10 +13,27 @@ const authDialog = document.getElementById("auth") as HTMLDialogElement;
 const authError = document.getElementById("auth-error")!;
 const mineSection = document.getElementById("mine")!;
 const boardName = document.getElementById("board-name")!;
+const boardBack = document.getElementById("board-back") as HTMLButtonElement;
 const log = document.getElementById("log")!;
 const share = document.getElementById("share")!;
 const membersUl = document.getElementById("members")!;
 const who = document.getElementById("who")!;
+
+// A native <dialog>, not window.confirm(): stylable like the rest of the
+// app, and driveable by the same clicks a test already uses for #auth — a
+// browser-chrome confirm() is invisible to both.
+const confirmDialog = document.getElementById("confirm") as HTMLDialogElement;
+const confirmMessage = document.getElementById("confirm-message")!;
+const confirmOk = document.getElementById("confirm-ok") as HTMLButtonElement;
+function confirmAction(message: string, actionLabel = "delete"): Promise<boolean> {
+  confirmMessage.textContent = message;
+  confirmOk.textContent = actionLabel;
+  confirmDialog.returnValue = "";
+  confirmDialog.showModal();
+  return new Promise((resolve) => {
+    confirmDialog.addEventListener("close", () => resolve(confirmDialog.returnValue === "ok"), { once: true });
+  });
+}
 
 const remote = connect(
   // wss on https — a hardcoded ws:// is blocked as mixed content behind TLS.
@@ -54,6 +71,7 @@ let currentBoard: string | null = null;
 
 function openBoard(name: string): void {
   currentBoard = name;
+  boardBack.hidden = name === "board:1";
   disposeBoard?.();
   log.replaceChildren();
   location.hash = `#/${name}`;
@@ -102,7 +120,11 @@ function openBoard(name: string): void {
       done.onchange = () => card.at("/done").set(done.checked);
       const del = document.createElement("button");
       del.textContent = "✕";
-      del.onclick = () => cards.apply([{ op: "remove", path: `/${id}` }]);
+      del.onclick = async () => {
+        if (await confirmAction(`delete "${card.peek().text}"?`)) {
+          cards.apply([{ op: "remove", path: `/${id}` }]);
+        }
+      };
       li.append(done, " ", label, " ", del);
       return li;
     }),
@@ -115,7 +137,11 @@ function openBoard(name: string): void {
       li.appendChild(text(m.map((x) => (x ? `${x.name} <${x.email}>` : ""))));
       const del = document.createElement("button");
       del.textContent = "✕";
-      del.onclick = () => members.apply([{ op: "remove", path: `/${uid}` }]);
+      del.onclick = async () => {
+        if (await confirmAction(`remove ${m.peek().name}?`, "remove")) {
+          members.apply([{ op: "remove", path: `/${uid}` }]);
+        }
+      };
       li.append(" ", del);
       return li;
     }),
@@ -167,11 +193,18 @@ addEventListener("hashchange", () => {
   if (name !== currentBoard) openBoard(name);
 });
 
+// Deterministic, unlike history.back(): always board:1, even after a reload
+// or a bookmarked link where there is no "back" to have.
+boardBack.onclick = () => openBoard("board:1");
+
 // --- your boards (authenticated mode) --------------------------------------
 
 function showMine(userId: number | string): void {
   const mine = remote.doc<Mine>(`mine:${userId}`);
   const boards = mine.at<Record<string, BoardRef>>("/boards") as OpSignal<Record<string, BoardRef> | null>;
+  // tally:<uid> — a declared view (epsilon/pg.ts's pgView), not a doc you
+  // write to: it renders like any doc, live, without a fetch.
+  const tally = remote.doc<Tally>(`tally:${userId}`);
   mineSection.hidden = false;
 
   pushDisposeScope();
@@ -183,11 +216,25 @@ function showMine(userId: number | string): void {
       name.onclick = () => openBoard(`board:${id}`);
       const del = document.createElement("button");
       del.textContent = "✕";
-      del.onclick = () => boards.apply([{ op: "remove", path: `/${id}` }]);
+      del.onclick = async () => {
+        const b = row.peek();
+        // Owned boards DELETE (every card with them); shared ones LEAVE —
+        // mine_apply's dispatch already draws this line, the confirm just
+        // says it out loud before it happens.
+        const msg = b.shared ? `leave "${b.name}"?` : `delete "${b.name}"? this removes all its cards.`;
+        if (await confirmAction(msg, b.shared ? "leave" : "delete")) {
+          boards.apply([{ op: "remove", path: `/${id}` }]);
+        }
+      };
       li.append(name, " ", del);
       return li;
     }),
   );
+  const tallyEl = document.getElementById("tally")!;
+  effect(() => {
+    const t = tally.get();
+    tallyEl.textContent = t ? `${t.boards} boards · ${t.cards} cards · ${t.done} done` : "";
+  });
   popDisposeScope(); // app-lifetime
 
   const form = document.getElementById("board-form") as HTMLFormElement;

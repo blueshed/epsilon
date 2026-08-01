@@ -27,3 +27,12 @@ export interface Board {
   owner_id?: number | null;
   members?: Record<string, Member>;
 }
+
+/** tally:<uid> — a declared view (epsilon/pg.ts's pgView), not a doc type:
+ *  counts over your own boards, composed by db/101-tally.sql. Relational
+ *  tier only — nothing to show in-memory mode, which has no owner_id. */
+export interface Tally {
+  boards: number;
+  cards: number;
+  done: number;
+}

@@ -50,7 +50,7 @@ export async function startServer(opts: StartOpts = {}) {
   let sync: Sync | undefined;
 
   if (pgUrl || pgDir) {
-    const { migrate, pgDoc, pgSync, pgAuth, pgUndo, pgHistory, pgAdmin } = await import("./epsilon/pg");
+    const { migrate, pgDoc, pgSync, pgAuth, pgUndo, pgHistory, pgAdmin, pgView } = await import("./epsilon/pg");
     // Same schema, two engines: a wire server (EPSILON_PG_URL), or EMBEDDED
     // Postgres in this process (EPSILON_PG_DIR) — one service, no db process.
     const db: Sql = pgUrl
@@ -111,6 +111,11 @@ export async function startServer(opts: StartOpts = {}) {
         seed: { open_fn: "mine_open" },
       });
     });
+
+    // tally:<uid> — nouns are docs (0.7.0): counts over your own boards,
+    // read-only, recomposed whenever board: or mine: commits. The worked
+    // example from DESIGN.md and view.test.ts, wired in for real.
+    pgView(host, db, "tally:", { open: "tally_open", on: ["board:", "mine:"] });
 
     // Undo is a write with server-computed ops: your last undoable version
     // (or an explicit v) reverts through board_apply itself — permit

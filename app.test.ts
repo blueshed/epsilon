@@ -100,6 +100,13 @@ describe("the app, end to end", () => {
       () => view.evaluate<string>("document.querySelector('#boards').textContent"),
       (t) => t.includes("my project"),
     );
+    // tally:<uid> — a view, not a doc anyone wrote to: mine_apply minting
+    // the board is enough to move it. board:1's card (added above) is
+    // owned by nobody, so it never counted.
+    await waitFor(
+      () => view.evaluate<string>("document.querySelector('#tally').textContent"),
+      (t) => t.includes("1 boards") && t.includes("0 cards"),
+    );
     await view.click("#boards li span");
     await waitFor(
       () => view.evaluate<string>("document.querySelector('#board-name').textContent"),
@@ -111,6 +118,10 @@ describe("the app, end to end", () => {
     await waitFor(
       () => view.evaluate<string>("document.querySelector('#log').textContent"),
       (t) => t.includes("first step"),
+    );
+    await waitFor(
+      () => view.evaluate<string>("document.querySelector('#tally').textContent"),
+      (t) => t.includes("1 cards"),
     );
 
     // The hash is navigation truth: back returns to the shared board,
@@ -125,6 +136,22 @@ describe("the app, end to end", () => {
       () => view.evaluate<string>("document.querySelector('#board-name').textContent"),
       (t) => t === "my project",
     );
+
+    // The ← button: visible away from main, deterministic unlike
+    // history.back() (a reload or a bookmarked link has no history to use).
+    expect(await view.evaluate<boolean>("document.querySelector('#board-back').hidden")).toBe(false);
+    await view.click("#board-back");
+    await waitFor(
+      () => view.evaluate<string>("document.querySelector('#board-name').textContent"),
+      (t) => t === "main",
+    );
+    expect(await view.evaluate<boolean>("document.querySelector('#board-back').hidden")).toBe(true);
+    await view.click("#boards li span");   // back onto "my project" for what follows
+    await waitFor(
+      () => view.evaluate<string>("document.querySelector('#board-name').textContent"),
+      (t) => t === "my project",
+    );
+
     const [myBoard] = await db`SELECT b.id, b.owner_id FROM boards b JOIN users u ON u.id = b.owner_id WHERE b.name = ${"my project"}`;
     expect(myBoard).toBeDefined();                                 // owned, in the tables
     const [myCard] = await db`SELECT text FROM cards WHERE board_id = ${myBoard.id}`;
@@ -143,11 +170,29 @@ describe("the app, end to end", () => {
       async () => (await db`SELECT done FROM cards WHERE board_id = ${myBoard.id}`)[0]?.done as boolean,
       (d) => d === true,
     );
-    // ✕ → remove; the row leaves the table AND the pixels.
+    await waitFor(
+      () => view.evaluate<string>("document.querySelector('#tally').textContent"),
+      (t) => t.includes("1 done"),
+    );
+    // ✕ → a confirm dialog (not window.confirm() — Bun's WebView can't
+    // drive a browser-chrome dialog, only a DOM one). Cancel changes nothing.
     await view.click("#log li button");
+    await waitFor(() => view.evaluate<boolean>("document.querySelector('#confirm').open"), (o) => o);
+    await view.click("#confirm-cancel");
+    await waitFor(() => view.evaluate<boolean>("document.querySelector('#confirm').open"), (o) => !o);
+    expect(Number((await db`SELECT count(*) AS n FROM cards WHERE board_id = ${myBoard.id}`)[0]!.n)).toBe(1);
+
+    // Confirmed: the row leaves the table AND the pixels.
+    await view.click("#log li button");
+    await waitFor(() => view.evaluate<boolean>("document.querySelector('#confirm').open"), (o) => o);
+    await view.click("#confirm-ok");
     await waitFor(
       async () => Number((await db`SELECT count(*) AS n FROM cards WHERE board_id = ${myBoard.id}`)[0]!.n),
       (n) => n === 0,
+    );
+    await waitFor(
+      () => view.evaluate<string>("document.querySelector('#tally').textContent"),
+      (t) => t.includes("0 cards") && t.includes("0 done"),
     );
     // Rename in place → replace /name; the mirror renames it in the mine
     // list too — two docs, one transaction, both on screen.

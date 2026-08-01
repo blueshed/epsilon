@@ -66,6 +66,20 @@ h1::before { content: "ε "; color: var(--accent); font-weight: 700; }
 }
 #signout:hover { color: var(--danger); }
 
+#board-header { display: flex; align-items: baseline; gap: 0.5rem; }
+#board-back {
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 1.1rem;
+  line-height: 1;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0;
+}
+#board-back:hover { color: var(--accent); }
+#board-back[hidden] { display: none; }
+
 /* The board title is EDITABLE (blur or Enter renames) — say so on hover. */
 #board-name {
   font-size: 1.35rem;
@@ -182,6 +196,12 @@ ul button:hover { color: var(--danger); }
 #add-passkey:disabled { color: var(--accent); cursor: default; }
 #boards li span { cursor: pointer; flex: 1; }
 #boards li span:hover { color: var(--accent); }
+#tally {
+  margin: 0.4rem 0 0;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+#tally:empty { display: none; }
 
 #share { margin-top: 2.5rem; }
 #share h3 {
@@ -217,6 +237,10 @@ dialog button {
 dialog button:hover { border-color: var(--accent); color: var(--accent); }
 .auth-actions { display: flex; gap: 0.5rem; }
 .auth-actions button { flex: 1; }
+#confirm-message { margin: 0 0 1rem; }
+/* The destructive choice reads red on hover, not the accent every other
+   dialog button gets — ID beats the element selector, no !important. */
+#confirm-ok:hover { border-color: var(--danger); color: var(--danger); }
 /* The passwordless door: full-width, beneath the password pair. */
 #auth-passkey { display: block; width: 100%; margin-top: 0.5rem; color: var(--accent); }
 #auth-passkey[hidden] { display: none; }

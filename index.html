@@ -16,10 +16,14 @@
     <section id="mine" hidden>
       <form id="board-form"><input id="new-board" placeholder="new board name, press enter" /></form>
       <ul id="boards"></ul>
+      <p id="tally"></p>
       <button id="add-passkey" hidden>add a passkey — sign in without a password next time</button>
     </section>
 
-    <h2 id="board-name"></h2>
+    <div id="board-header">
+      <button id="board-back" hidden>←</button>
+      <h2 id="board-name"></h2>
+    </div>
     <p id="who"></p>
     <form id="form"><input id="input" placeholder="type, press enter, watch the other tab" autofocus /></form>
     <ul id="log"></ul>
@@ -42,6 +46,14 @@
           <button id="auth-register">register</button>
         </div>
         <button id="auth-passkey" hidden>use a passkey</button>
+      </form>
+    </dialog>
+
+    <dialog id="confirm">
+      <p id="confirm-message"></p>
+      <form method="dialog" class="auth-actions">
+        <button id="confirm-cancel" value="cancel">cancel</button>
+        <button id="confirm-ok" value="ok">delete</button>
       </form>
     </dialog>
 
