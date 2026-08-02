@@ -1,7 +1,7 @@
-// The router's contract. Ported with the router itself — these are the cases
-// railroad found the hard way (async scope balance, stale resolutions, a
-// refcount that must not go negative), and they are the reason this file was
-// ported rather than rewritten.
+// The router's contract. Ported with the router itself — the async scope
+// balance and the stale-resolution guard are cases railroad found the hard
+// way, and they are why this file was ported rather than rewritten. The
+// refcount it also carried is gone (0.9.0): a page has one hash.
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 // Same guard as ui.test.ts, and for the same reason: happy-dom replaces the
 // networking globals, and the suites that follow this one in `bun run test`
@@ -179,11 +179,11 @@ describe("routes()", () => {
     location.hash = "#/slow";
     await tick();
 
-    const d = defer<Node>();
+    const d = defer<() => Node>();
     const dispose = routes(target, { "/slow": () => d.promise });
     expect(target.children.length).toBe(0);
 
-    d.resolve(el("span", "loaded"));
+    d.resolve(() => el("span", "loaded"));
     await d.promise;
     await tick();
     expect(target.textContent).toBe("loaded");
@@ -231,7 +231,7 @@ describe("routes()", () => {
     location.hash = "#/slow";
     await tick();
 
-    const slow = defer<Node>();
+    const slow = defer<() => Node>();
     const dispose = routes(target, {
       "/slow": () => slow.promise,
       "/fast": () => el("span", "fast"),
@@ -241,7 +241,7 @@ describe("routes()", () => {
     await tick();
     expect(target.textContent).toBe("fast");
 
-    slow.resolve(el("span", "slow"));
+    slow.resolve(() => el("span", "slow"));
     await slow.promise;
     await tick();
     expect(target.textContent).toBe("fast");
@@ -297,7 +297,7 @@ describe("routes()", () => {
     location.hash = "#/slow-boom";
     await tick();
 
-    const d = defer<Node>();
+    const d = defer<() => Node>();
     const dispose = routes(
       target,
       { "/slow-boom": () => d.promise },
@@ -338,7 +338,7 @@ describe("routes()", () => {
     expect(target.textContent).toBe("home");
 
     dispose();
-    dispose(); // a second call must not drive the shared refcount negative
+    dispose(); // idempotent — a parent scope may call it too
     expect(target.children.length).toBe(0);
 
     navigate("/about");
@@ -351,6 +351,28 @@ describe("routes()", () => {
     const dispose2 = routes(target2, { "/about": () => el("span", "again") });
     expect(target2.textContent).toBe("again");
     dispose2();
+  });
+
+  test("an async handler resolving to a bare Node is REFUSED", async () => {
+    // It used to be accepted, and this file documented it as leaking:
+    // bindings made after the first await had no owner scope. Shipping a
+    // form we describe as broken is worse than refusing it.
+    const target = document.createElement("div");
+    document.body.append(target);
+    location.hash = "#/bare";
+    await tick();
+
+    const d = defer<any>();
+    const dispose = routes(
+      target,
+      { "/bare": () => d.promise },
+      { onError: (err) => el("div", String((err as Error).message)) },
+    );
+    d.resolve(el("span", "not a thunk"));
+    await d.promise;
+    await tick();
+    expect(target.textContent).toContain("must resolve to a THUNK");
+    dispose();
   });
 
   test("nested routes via wildcard — the outer layout stays mounted", async () => {

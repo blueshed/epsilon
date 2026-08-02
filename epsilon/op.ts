@@ -65,13 +65,13 @@ function walk(
 /**
  * Apply ONE non-root op IN PLACE and return an undo that restores exactly
  * what changed — the atomicity primitive: appliers stack undos and unwind
- * on a mid-batch throw. @internal (Signal.apply and applyOps build on it)
+ * on a mid-batch throw. @internal (Signal.apply builds on it)
  */
 export function applyOp(doc: any, op: Op): () => void {
   const segments = parsePath(op.path);
   if (segments.length === 0) {
     throw new Error(
-      "[epsilon/op] root ops are handled by Signal.apply, not applyOps",
+      "[epsilon/op] root ops are handled by Signal.apply",
     );
   }
   const { parent, key } = walk(doc, segments);
@@ -100,22 +100,6 @@ export function applyOp(doc: any, op: Op): () => void {
   }
 }
 
-/**
- * Apply ops to a container IN PLACE (the ref stays stable — that's the point:
- * no clone per change), ATOMICALLY: a throw mid-batch unwinds the applied
- * prefix, so the container never holds a half-applied batch. Root ops
- * (path "" / "/") are NOT handled here — the signal layer owns root
- * replacement, where reassigning the value is correct.
- */
-export function applyOps(doc: any, ops: Op[]): void {
-  const undos: (() => void)[] = [];
-  try {
-    for (const op of ops) undos.push(applyOp(doc, op));
-  } catch (err) {
-    for (let i = undos.length - 1; i >= 0; i--) undos[i]!();
-    throw err;
-  }
-}
 
 /** Read the value at a pointer, or undefined when any segment is missing. */
 export function valueAt(doc: any, path: string): unknown {

@@ -14,14 +14,14 @@
  *   s.apply(ops)           — mutate in place + notify BOTH channels with ops
  *   s.onOps(fn)            — subscribe to the op stream; scope-disposed
  *   s.at(path)             — composing lens: narrowed value + rebased ops
- *   computed / effect / batch / untrack — as railroad (state channel only)
+ *   computed / effect — as railroad (state channel only)
  *
  * Ordering: within one apply(), ops handlers run first (routers see the
  * change before state effects recompute), then the state flush. batch()
  * coalesces the state flush; ops delivery stays per-apply (routing needs
  * every step, in order).
  *
- * Flush scheduler, effect, computed, batch, untrack, and dispose scopes are
+ * Flush scheduler, effect, computed, and dispose scopes are
  * adapted from @blueshed/railroad signals.ts (glitch-free topological
  * propagation). applyOps/valueAt from @blueshed/delta core.ts via ./op.
  */
@@ -33,8 +33,6 @@ type OpsHandler = (ops: Op[] | undefined) => void;
 
 let currentListener: Listener | null = null;
 let currentDeps: Set<Signal<any>> | null = null;
-let batchDepth = 0;
-const pendingEffects = new Set<Listener>();
 
 // === Flush scheduler (railroad's, verbatim in behavior) ===
 
@@ -217,10 +215,6 @@ export class Signal<T> implements OpSignal<T> {
       catch (err) { console.error("[epsilon/signal] onOps handler threw:", err); }
     }
     if (this.listeners.size === 0) return;
-    if (batchDepth > 0) {
-      for (const l of this.listeners) pendingEffects.add(l);
-      return;
-    }
     scheduleListeners(this.listeners);
   }
 
@@ -304,7 +298,7 @@ class Lens<T> implements OpSignal<T> {
   }
 }
 
-// === effect / dispose scopes / computed / untrack / batch (railroad's) ===
+// === effect / dispose scopes / computed (railroad's) ===
 
 export type Dispose = () => void;
 
@@ -395,44 +389,6 @@ export function computed<T>(
   return s;
 }
 
-export function untrack<T>(fn: () => T): T {
-  const prevListener = currentListener;
-  const prevDeps = currentDeps;
-  currentListener = null;
-  currentDeps = null;
-  try {
-    return fn();
-  } finally {
-    currentListener = prevListener;
-    currentDeps = prevDeps;
-  }
-}
-
-export function batch(fn: () => void): void {
-  let flushError: unknown;
-  let flushThrew = false;
-  batchDepth++;
-  try {
-    fn();
-  } finally {
-    batchDepth--;
-    if (batchDepth === 0 && pendingEffects.size > 0) {
-      const pending = [...pendingEffects];
-      pendingEffects.clear();
-      if (activeFlush) {
-        enqueue(activeFlush, pending);
-      } else {
-        try {
-          scheduleListeners(pending);
-        } catch (err) {
-          flushThrew = true;
-          flushError = err;
-        }
-      }
-    }
-  }
-  if (flushThrew) throw flushError;
-}
 
 export function signal<T>(initialValue: T, options?: SignalOptions<T>): Signal<T> {
   return new Signal(initialValue, options);

@@ -4,7 +4,7 @@ import { SQL } from "bun";
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { migrate, migrationStatus, migrationFiles, functionFiles } from "./migrate";
+import { migrate, migrationFiles, functionFiles } from "./migrate";
 
 // Test db namespaced by app (package.json name) — see pg.test.ts's note.
 const APP = ((await Bun.file(new URL("../package.json", import.meta.url)).json()).name as string)
@@ -95,16 +95,6 @@ describe("migrate", () => {
     expect(rows.length).toBe(0);                              // not recorded
   });
 
-  test("status reports applied vs pending", async () => {
-    const d = fixture({ "001-a.sql": "CREATE TABLE m_a (id int);" });
-    await migrate(sql, { dir: d, ...quiet });
-    writeFileSync(join(d, "002-b.sql"), "CREATE TABLE m_b (id int);");
-    const status = await migrationStatus(sql, { dir: d });
-    expect(status).toEqual([
-      { name: "001-a.sql", hash: "", applied: true },
-      { name: "002-b.sql", hash: "", applied: false },
-    ]);
-  });
 
   test("concurrent boots don't double-apply (advisory lock)", async () => {
     const d = fixture({ "001-a.sql": "CREATE TABLE m_a (id int);" });

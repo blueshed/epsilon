@@ -56,6 +56,38 @@ that deletes a *concept*; the queued deletions follow.
   would refuse to boot. [UPGRADING.md](UPGRADING.md) has the per-function
   migration recipe (copy the NEWEST body, touch no numbered file).
 
+### Removed
+
+- **Four exports that paid no tax** (−80 lines). `applyOps` had zero call
+  sites and duplicated the unwind loop in `Signal.apply` verbatim.
+  `untrack` had zero call sites, tests included. `batch` had exactly one —
+  its own test — and cost two module globals plus a branch in `notify()`,
+  which runs on every op; it is railroad's API for coalescing independent
+  `.set()` calls, and an epsilon app writes through `apply(ops[])`, which
+  already batches. `migrationStatus` had one caller, its own test.
+- **The router's hash refcount** (−8 net). railroad tore the hash signal
+  down when the last router disposed; that was twenty lines of bookkeeping
+  wrapped around a latent bug — a computed already returned by `route()`
+  closes over the nulled signal and silently stops updating. A page has one
+  hash for the life of the page. Own it once.
+- **The bare `Promise<Node>` route handler.** The file documented it as
+  leaking in the stack's own terms (post-await bindings have no owner scope
+  — browser JS has no AsyncContext). Shipping a shape whose own docs say
+  not to use it is worse than refusing it: async handlers now resolve to a
+  thunk, `() => Node`, and the error says so.
+
+### Not done, and why
+
+- **Boxing the signal's value** (the review's −12). It would delete the
+  root-op special case in `Signal.apply` by storing the value in `{v: T}`
+  so `""` is just another key. It is genuinely twelve lines smaller and
+  slightly harder to read — every access in the hottest class gains an
+  indirection, and "the value lives in a box so root ops aren't special" is
+  cleverer, not clearer. Its stated bonus was that `applyOps` would stop
+  being dead; deleting `applyOps` collected that instead. Against a pitch
+  that says *small enough to read*, twelve lines is not worth the sentence
+  you have to hold in your head.
+
 ## [0.8.1] — 2026-08-02
 
 A shakedown review (7 dimensions, each adversarially verified) found a hole

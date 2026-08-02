@@ -29,12 +29,13 @@
  * "?" yourself if you need it), and a trailing slash is a real empty segment:
  * "/users/42/" does NOT match "/users/:id".
  *
- * Handlers receive (params, params$) and return a Node, or a Promise of a Node
- * or of a THUNK (() => Node). Async handlers should resolve to the thunk form:
- * the router runs the thunk under a scope it owns, so reactive bindings built
- * after the first await are disposed on navigation. A bare Promise<Node> still
- * renders, but its post-await bindings have no owner scope (browser JS has no
- * AsyncContext) and outlive the route — the LIFETIME tax, unpaid.
+ * Handlers receive (params, params$) and return a Node, or a Promise of a
+ * THUNK (() => Node) — never a bare Promise<Node>. Browser JS has no
+ * AsyncContext, so a scope cannot be carried across an await; the thunk is
+ * what the router brackets, and it is how bindings made after the first
+ * await get an owner and are disposed on navigation. railroad accepted the
+ * bare form and documented it as leaking; refusing it is cheaper than
+ * shipping a shape whose own docs say not to use it.
  *   params  — plain object for destructuring: ({ id }) => ...
  *   params$ — Signal that updates when params change within the same pattern
  *
@@ -55,11 +56,11 @@
  * Both routes() and route() auto-track in the parent dispose scope, so nested
  * routing cleans up when the parent tears down.
  *
- * route() at module level (outside any dispose scope) is SUPPORTED: the signal
- * and its share of the hashchange listener live for the app's lifetime, which
- * is what module scope means. That is why route() doesn't warn when scopeless
- * the way a DOM-producing helper would — for those, scopeless is almost always
- * a leak; for route() it is a legitimate app-lifetime binding.
+ * route() at module level (outside any dispose scope) is SUPPORTED, and needs
+ * no ceremony: the hash signal is app-lifetime by construction, so a computed
+ * over it is too. That is why route() doesn't warn when scopeless the way a
+ * DOM-producing helper would — for those, scopeless is almost always a leak;
+ * for route() it is a legitimate app-lifetime binding.
  */
 
 import {
@@ -68,29 +69,20 @@ import {
 } from "./signal";
 import type { Dispose, ReadonlySignal } from "./signal";
 
+// ONE signal over location.hash, for the life of the page — which is the
+// life of `location` itself, so there is nothing to reclaim. railroad
+// refcounted this and tore the signal down at zero; that was 20 lines of
+// bookkeeping around a latent bug, because a computed already returned by
+// route() closes over the signal it nulled and silently stops updating.
+// A page has one hash. Own it once.
 let hashSignal: Signal<string> | null = null;
-let hashListenerCount = 0;
-let hashListener: (() => void) | null = null;
 
 function getHash(): Signal<string> {
   if (!hashSignal) {
-    hashSignal = new Signal(location.hash.slice(1) || "/");
-    hashListener = () => {
-      hashSignal!.set(location.hash.slice(1) || "/");
-    };
-    window.addEventListener("hashchange", hashListener);
+    const sig = (hashSignal = new Signal(location.hash.slice(1) || "/"));
+    window.addEventListener("hashchange", () => sig.set(location.hash.slice(1) || "/"));
   }
-  hashListenerCount++;
   return hashSignal;
-}
-
-function releaseHash(): void {
-  hashListenerCount--;
-  if (hashListenerCount === 0 && hashListener) {
-    window.removeEventListener("hashchange", hashListener);
-    hashListener = null;
-    hashSignal = null;
-  }
 }
 
 export function matchRoute(
@@ -131,15 +123,6 @@ export function route<
   T extends Record<string, string> = Record<string, string>,
 >(pattern: string): ReadonlySignal<T | null> {
   const hash = getHash();
-  // Idempotent release — disposing the scope more than once must not drive the
-  // shared hashListenerCount negative and tear the listener out from under
-  // other live routers.
-  let released = false;
-  trackDispose(() => {
-    if (released) return;
-    released = true;
-    releaseHash();
-  });
   return computed(() => matchRoute(pattern, hash.get()) as T | null);
 }
 
@@ -150,7 +133,7 @@ export function navigate(path: string): void {
 type RouteHandler = (
   params: Record<string, string>,
   params$: Signal<Record<string, string>>,
-) => Node | Promise<Node | (() => Node)>;
+) => Node | Promise<() => Node>;
 
 export interface RouterOptions {
   onError?: (err: unknown) => Node | void;
@@ -234,11 +217,10 @@ export function routes(
           }
           asyncPending = false;
           if (typeof resolved === "function") {
-            // Thunk resolution — the owner scope for post-await bindings. A
-            // bare Node resolution stays supported, but anything reactive it
-            // created after the first await is ownerless (browser JS has no
-            // AsyncContext to carry the scope across an await); resolve to a
-            // thunk so the router can bracket its construction.
+            // Thunk resolution — the owner scope for post-await bindings.
+            // Browser JS has no AsyncContext, so a scope cannot be carried
+            // across an await; the thunk gives the router something it can
+            // bracket. This is the ONLY async form (see below).
             pushDisposeScope();
             let built: unknown;
             let thrown: unknown;
@@ -270,8 +252,22 @@ export function routes(
             target.appendChild(built);
             return;
           }
-          activeDispose = scopeDispose;
-          target.appendChild(resolved);
+          // A bare Promise<Node> used to be accepted here, and this file
+          // documented it as broken in the stack's own terms: bindings it
+          // created after the first await had no owner scope and outlived
+          // the route. Shipping a form we describe as leaking is worse than
+          // refusing it — resolve to a thunk.
+          scopeDispose();
+          activePattern = null;
+          activeParams = null;
+          {
+            const err = new Error(
+              "[epsilon/route] an async handler must resolve to a THUNK, `() => Node`, " +
+                "not a Node — the thunk is what gives post-await bindings an owner scope.",
+            );
+            if (handleError(err)) return;
+            console.error(err.message);
+          }
         },
         (err) => {
           if (myRunId !== runId) {
@@ -299,14 +295,10 @@ export function routes(
   let disposeEffect: Dispose | null = null;
   let disposed = false;
   const dispose = () => {
-    // Idempotent — calling dispose() more than once (or via both the returned
-    // handle and a parent scope) must release the shared hash refcount exactly
-    // once, or it goes negative and detaches the listener from other routers.
-    if (disposed) return;
+    if (disposed) return;          // idempotent: a parent scope may also call it
     disposed = true;
     if (disposeEffect) disposeEffect();
     teardown();
-    releaseHash();
   };
   trackDispose(dispose);
 

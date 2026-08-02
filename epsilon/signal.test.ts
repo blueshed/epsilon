@@ -1,8 +1,7 @@
 // The primitive's contract, pinned. Each describe maps to a DESIGN.md claim.
 import { describe, test, expect } from "bun:test";
 import {
-  signal, computed, effect, batch,
-  pushDisposeScope, popDisposeScope,
+  signal, computed, effect, pushDisposeScope, popDisposeScope,
 } from "./signal";
 import type { Op } from "./op";
 
@@ -69,20 +68,6 @@ describe("ops channel", () => {
     dispose();
   });
 
-  test("batch coalesces the state flush; ops stay per-apply in order", () => {
-    const s = signal(board());
-    let stateRuns = 0;
-    const opsSeen: string[] = [];
-    const dispose = effect(() => { s.get(); stateRuns++; });
-    s.onOps((ops) => ops?.forEach((o) => opsSeen.push(o.path)));
-    batch(() => {
-      s.apply([{ op: "replace", path: "/name", value: "x" }]);
-      s.apply([{ op: "replace", path: "/cards/1/title", value: "y" }]);
-    });
-    expect(stateRuns).toBe(2);                       // 1 create + 1 coalesced
-    expect(opsSeen).toEqual(["/name", "/cards/1/title"]);
-    dispose();
-  });
 
   test("onOps is disposed with its scope", () => {
     const s = signal(board());

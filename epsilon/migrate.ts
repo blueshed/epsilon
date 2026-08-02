@@ -20,11 +20,12 @@
  *
  * Order: every pending numbered file first, then the whole of `db/fn/` —
  * so a function may reference a table a migration in the same boot created.
- * Within `db/fn/` order does NOT matter: the pass runs with
- * `check_function_bodies = off`, so functions may call each other freely
- * regardless of filename. One transaction for the lot — the vocabulary is
- * replaced atomically or not at all. An advisory lock serializes concurrent
- * boots (two processes starting together can't both apply 003).
+ * Within `db/fn/` order does NOT matter: the set is created once with
+ * `check_function_bodies = off` (so cross-references all exist) and then
+ * re-run with it ON (so every body is still validated) — order-freedom
+ * without losing the compiler. One transaction for the lot: the vocabulary
+ * is replaced atomically or not at all. An advisory lock serializes
+ * concurrent boots (two processes starting together can't both apply 003).
  *
  * What still belongs in a NUMBERED file: anything not replayable. Tables,
  * columns, indexes, types, seed data — and a function SIGNATURE change,
@@ -86,8 +87,9 @@ export function functionFiles(dir: string): string[] {
   return readdirSync(fnDir).filter((f) => f.endsWith(".sql")).sort();
 }
 
-/** Statements a replayed file cannot contain and stay idempotent. A log
- *  line, not a gate — the same shape as the sub-100 tripwire. */
+/** Statements a replayed file cannot contain and stay idempotent. Unlike
+ *  the sub-100 warning this is a GATE — such a file cannot survive a second
+ *  boot, so there is nothing to warn about and everything to refuse. */
 const NOT_REPLAYABLE =
   /^\s*(CREATE\s+(?!OR\s+REPLACE)(TABLE|INDEX|TYPE|EXTENSION|SEQUENCE)|ALTER\s+TABLE|INSERT\s+INTO|UPDATE\s+|DELETE\s+FROM)/im;
 
@@ -219,25 +221,3 @@ export async function migrate(
   }
 }
 
-/** What's applied vs pending — for a status command or a boot log. */
-export async function migrationStatus(sql: Sql, opts?: { dir?: string }): Promise<Migration[]> {
-  await ensureTable(sql);
-  const done = new Set<string>();
-  for (const row of await sql`SELECT name FROM migrations`) done.add(row.name as string);
-  const dir = opts?.dir ?? "db";
-  return [
-    ...migrationFiles(dir).map((name) => ({
-      name,
-      hash: "",
-      applied: done.has(name),
-    })),
-    // Always "applied": db/fn is replayed every boot, so pending is not a
-    // state it can be in.
-    ...functionFiles(dir).map((name) => ({
-      name: `fn/${name}`,
-      hash: "",
-      applied: true,
-      fn: true as const,
-    })),
-  ];
-}

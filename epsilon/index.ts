@@ -1,8 +1,8 @@
 /** @blueshed/epsilon — one op stream, Postgres to pixel. */
 export type { Op } from "./op";
-export { applyOps, splitPath, valueAt } from "./op";
+export { splitPath, valueAt } from "./op";
 export {
-  Signal, signal, computed, effect, batch, untrack,
+  Signal, signal, computed, effect,
   pushDisposeScope, popDisposeScope, trackDispose, hasActiveDisposeScope,
 } from "./signal";
 export type { OpSignal, ReadonlySignal, SignalOptions, Dispose } from "./signal";

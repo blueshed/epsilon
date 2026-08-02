@@ -40,7 +40,7 @@ export interface Sql {
 
 const CHANNEL = "epsilon_ops";
 
-export { migrate, migrationStatus, migrationFiles } from "./migrate";
+export { migrate, migrationFiles } from "./migrate";
 
 /**
  * Host a doc backed by Postgres.
