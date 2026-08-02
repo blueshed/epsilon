@@ -2,7 +2,7 @@
 // contract, and wire — on in-process Postgres (PGlite), no server anywhere.
 // Same schema, two engines; this suite is the proof the seam holds.
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHost, connect, type Host, type Remote } from "./doc";
@@ -255,5 +255,39 @@ describe("embedded Postgres — same schema, no server", () => {
     expect(Number(back.id)).toBe(Number(card.id));          // restored, not re-minted
     expect(back.text).toBe("in-process");
     expect(back.done).toBe(true);
+  });
+});
+
+// The vocabulary pass uses SET LOCAL check_function_bodies, twice, inside
+// one transaction. That is ordinary Postgres, but the embedded engine is a
+// wasm build — assume nothing, drive it.
+describe("db/fn on the embedded engine", () => {
+  test("replays, resolves cross-references, and an edit takes effect", async () => {
+    const d = mkdtempSync(join(tmpdir(), "epsilon-pglite-fn-"));
+    const fnDir = join(d, "fn");
+    mkdirSync(fnDir, { recursive: true });
+    writeFileSync(join(d, "001-t.sql"), "CREATE TABLE fn_t (id int)");
+    // a.sql sorts first but calls b.sql's function.
+    writeFileSync(join(fnDir, "a.sql"),
+      "CREATE OR REPLACE FUNCTION fn_a(n text) RETURNS text AS $$ SELECT fn_b('hi ' || n) $$ LANGUAGE sql;");
+    writeFileSync(join(fnDir, "b.sql"),
+      "CREATE OR REPLACE FUNCTION fn_b(t text) RETURNS text AS $$ SELECT upper(t) $$ LANGUAGE sql;");
+
+    const dbDir = mkdtempSync(join(tmpdir(), "epsilon-pglite-fndb-"));
+    const s2 = await openPglite(dbDir);
+    try {
+      const ran = await migrate(s2 as Sql, { dir: d, log: () => {} });
+      expect(ran.map((m) => m.name)).toEqual(["001-t.sql", "fn/a.sql", "fn/b.sql"]);
+      expect((await s2`SELECT fn_a('pete') AS r`)[0]!.r).toBe("HI PETE");
+
+      writeFileSync(join(fnDir, "b.sql"),
+        "CREATE OR REPLACE FUNCTION fn_b(t text) RETURNS text AS $$ SELECT lower(t) $$ LANGUAGE sql;");
+      await migrate(s2 as Sql, { dir: d, log: () => {} });
+      expect((await s2`SELECT fn_a('PETE') AS r`)[0]!.r).toBe("hi pete");
+    } finally {
+      await (s2 as any).end?.();
+      rmSync(d, { recursive: true, force: true });
+      rmSync(dbDir, { recursive: true, force: true });
+    }
   });
 });

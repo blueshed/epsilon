@@ -59,7 +59,7 @@ host: start `bun server.ts`, healthcheck `/`, a volume behind
 - [`server.ts`](server.ts) — the authority. In-memory out of the box (a shape *preview*: uuid ids, no permits); Postgres — the real implementation, with auth + ownership — via one env var.
 - [`index.ts`](index.ts) — the pixels. A remote doc is a signal whose writes go over the wire; the echo renders them.
 - [`index.html`](index.html) / [`index.css`](index.css) — Bun serves and bundles them.
-- [`db/`](db/) — your schema: numbered migrations, applied at boot, forward-only. `003-doc-kit.sql` is the reusable skeleton of a relational doc type (locking, the audit, undo, history); `100-board.sql` is the worked example — tables, composition, transactional writes, ownership. Number your own migrations from 100 up: 001–099 are epsilon core, frozen once released, so an upgrade never collides with your files.
+- [`db/`](db/) — your schema: numbered migrations, applied at boot, forward-only — and [`db/fn/`](db/fn/), your stored functions, replayed every boot and **edited in place** (`CREATE OR REPLACE` is idempotent; hash-locking it only forces a copy per edit). `003-doc-kit.sql` is the reusable skeleton of a relational doc type (locking, the audit, undo, history); `100-board.sql` is the worked example — tables, composition, transactional writes, ownership. Number your own migrations from 100 up: 001–099 are epsilon core, frozen once released, so an upgrade never collides with your files.
 
 ```sh
 bun run db:up            # compose Postgres (or use your own)

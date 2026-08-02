@@ -1,17 +1,37 @@
 /**
- * Migrations — numbered SQL files in `db/`, applied in order, recorded by
- * name AND content hash. Forward-only: once a file is applied, editing it is
- * an error (write the next number instead). Delta's vendor-first philosophy:
- * the files are yours, git-tracked, and nothing is hidden in node_modules.
+ * Migrations — TWO kinds of SQL, because there are two kinds of SQL.
+ *
+ * `db/NNN-name.sql` — SCHEMA. Numbered, applied in order, recorded by name
+ * AND content hash. Forward-only: once applied, editing it is an error
+ * (write the next number instead). This is the right rule for DDL, because
+ * a CREATE TABLE cannot be replayed over a table that exists.
+ *
+ * `db/fn/*.sql` — VOCABULARY. Stored functions, unnumbered, NOT recorded,
+ * re-applied wholesale on every boot. `CREATE OR REPLACE FUNCTION` is
+ * idempotent by construction — that is what OR REPLACE means — so a hash
+ * lock buys nothing and costs everything: it forces a full copy of the body
+ * into a new numbered file for each edit. The one deployed consumer had
+ * `trip_apply` written out ten times, 79% of its db/ was function bodies,
+ * and the copy-paste ritual had already produced a silent data-visibility
+ * bug (a new file copied an old body over a widened one). Edit the file.
  *
  *   await migrate(sql);                  // ./db relative to the app root
  *   await migrate(sql, { dir: "./db" }); // explicit
  *
- * Each file runs in ONE transaction — a failed migration leaves no partial
- * schema. An advisory lock serializes concurrent boots (two processes
- * starting together can't both apply 003).
+ * Order: every pending numbered file first, then the whole of `db/fn/` —
+ * so a function may reference a table a migration in the same boot created.
+ * Within `db/fn/` order does NOT matter: the pass runs with
+ * `check_function_bodies = off`, so functions may call each other freely
+ * regardless of filename. One transaction for the lot — the vocabulary is
+ * replaced atomically or not at all. An advisory lock serializes concurrent
+ * boots (two processes starting together can't both apply 003).
+ *
+ * What still belongs in a NUMBERED file: anything not replayable. Tables,
+ * columns, indexes, types, seed data — and a function SIGNATURE change,
+ * since CREATE OR REPLACE cannot alter a return type or argument names:
+ * `DROP FUNCTION IF EXISTS foo(int);` in the next number, then edit db/fn.
  */
-import { readdirSync } from "node:fs";
+import { readdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import type { Sql } from "./pg";
 
@@ -22,6 +42,8 @@ export interface Migration {
   name: string;
   hash: string;
   applied: boolean;
+  /** A `db/fn/` file — replayed every boot, never recorded. */
+  fn?: true;
 }
 
 async function ensureTable(sql: Sql): Promise<void> {
@@ -47,13 +69,27 @@ const CORE = new Set([
   "005-gone.sql",
 ]);
 
-/** List migration files in order — `NNN-name.sql`, numerically sorted. */
+/** List migration files in order — `NNN-name.sql`, numerically sorted. The
+ *  leading-digit filter is also what makes `db/fn/` invisible here. */
 export function migrationFiles(dir: string): string[] {
   // Conservative charset: these names are inlined as SQL literals below.
   return readdirSync(dir)
     .filter((f) => /^\d+[\w.-]*\.sql$/.test(f))
     .sort((a, b) => parseInt(a, 10) - parseInt(b, 10) || a.localeCompare(b));
 }
+
+/** Vocabulary files — `db/fn/*.sql`, name-sorted for a stable report. Order
+ *  carries no meaning; see the header on check_function_bodies. */
+export function functionFiles(dir: string): string[] {
+  const fnDir = join(dir, "fn");
+  if (!existsSync(fnDir)) return [];
+  return readdirSync(fnDir).filter((f) => f.endsWith(".sql")).sort();
+}
+
+/** Statements a replayed file cannot contain and stay idempotent. A log
+ *  line, not a gate — the same shape as the sub-100 tripwire. */
+const NOT_REPLAYABLE =
+  /^\s*(CREATE\s+(?!OR\s+REPLACE)(TABLE|INDEX|TYPE|EXTENSION|SEQUENCE)|ALTER\s+TABLE|INSERT\s+INTO|UPDATE\s+|DELETE\s+FROM)/im;
 
 /**
  * Apply every pending migration. Returns what ran (empty = already current).
@@ -122,6 +158,60 @@ export async function migrate(
       log(`applied ${name}`);
       ran.push({ name, hash: h, applied: true });
     }
+
+    // The vocabulary, after the schema — a function may reference a table
+    // the numbered pass just created. One transaction for all of it: a
+    // half-swapped vocabulary is worse than an old one.
+    const fns = functionFiles(dir);
+    if (fns.length) {
+      const bodies: string[] = [];
+      for (const name of fns) {
+        const text = await Bun.file(join(dir, "fn", name)).text();
+        // A GATE, not a tripwire (unlike the sub-100 warning above, which is
+        // about a future collision). This file cannot work: db/fn is
+        // replayed on every boot, so a CREATE TABLE in it fails the second
+        // time the app starts. Refusing here with the reason beats letting
+        // Postgres say "relation already exists" from inside a two-pass
+        // vocabulary swap, which explains nothing.
+        if (NOT_REPLAYABLE.test(text)) {
+          throw new Error(
+            `[epsilon/migrate] db/fn/${name} contains schema DDL, and db/fn is REPLAYED on ` +
+              `every boot. Move that statement to the next NUMBERED file; db/fn is for ` +
+              `CREATE OR REPLACE FUNCTION (and VIEW) only — things that are idempotent by construction.`,
+          );
+        }
+        bodies.push(text);
+      }
+      try {
+        // TWO passes, one transaction. SQL-language bodies are validated at
+        // CREATE time, so a function calling another would otherwise depend
+        // on filename order.
+        //   1. check_function_bodies OFF — everything is created, so
+        //      cross-references all exist by the end. Order-free.
+        //   2. check_function_bodies ON — the SAME bodies again, now
+        //      validated against a complete vocabulary.
+        // Skipping pass 2 would trade an ordering bug for a worse one: a
+        // typo would install silently and fail at CALL time, in front of a
+        // user. Re-creating a function is metadata, so the second pass is
+        // cheap. SET LOCAL dies with the transaction — the app's session
+        // never sees a relaxed setting.
+        const sets = bodies.join("\n;\n");
+        await conn.unsafe(
+          `BEGIN;\nSET LOCAL check_function_bodies = off;\n${sets}\n;` +
+            `SET LOCAL check_function_bodies = on;\n${sets}\n;COMMIT;`,
+        );
+      } catch (err) {
+        try { await conn.unsafe("ROLLBACK"); } catch { /* already aborted */ }
+        throw new Error(
+          `[epsilon/migrate] db/fn failed: ${err}\n` +
+            `If this is "cannot change return type" or "cannot change name of input parameter", ` +
+            `CREATE OR REPLACE cannot alter a signature — put ` +
+            `\`DROP FUNCTION IF EXISTS <name>(<old args>);\` in the next NUMBERED file, then edit db/fn.`,
+        );
+      }
+      log(`vocabulary: ${fns.length} file${fns.length === 1 ? "" : "s"} in db/fn`);
+      for (const name of fns) ran.push({ name: `fn/${name}`, hash: "", applied: true, fn: true });
+    }
     return ran;
   } finally {
     try { await conn`SELECT pg_advisory_unlock(${LOCK_KEY})`; } catch { /* connection may be dead */ }
@@ -135,9 +225,19 @@ export async function migrationStatus(sql: Sql, opts?: { dir?: string }): Promis
   const done = new Set<string>();
   for (const row of await sql`SELECT name FROM migrations`) done.add(row.name as string);
   const dir = opts?.dir ?? "db";
-  return migrationFiles(dir).map((name) => ({
-    name,
-    hash: "",
-    applied: done.has(name),
-  }));
+  return [
+    ...migrationFiles(dir).map((name) => ({
+      name,
+      hash: "",
+      applied: done.has(name),
+    })),
+    // Always "applied": db/fn is replayed every boot, so pending is not a
+    // state it can be in.
+    ...functionFiles(dir).map((name) => ({
+      name: `fn/${name}`,
+      hash: "",
+      applied: true,
+      fn: true as const,
+    })),
+  ];
 }

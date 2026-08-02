@@ -7,6 +7,55 @@ will ship.
 
 ## [Unreleased]
 
+0.9.0 is a SUBTRACTION release — the first one. Nine releases have each
+added (1,650 → 3,834 lines) while the pitch that justifies vendoring at all
+says "small enough to read". `db/fn/` is the first item and the only one
+that deletes a *concept*; the queued deletions follow.
+
+### Added
+
+- **`db/fn/` — a function body is not a migration.** Forward-only exists
+  because DDL is not replayable: a `CREATE TABLE` cannot run twice.
+  `CREATE OR REPLACE FUNCTION` can — that is what `OR REPLACE` means.
+  Applying one rule to both is the most expensive mistake in the stack, and
+  it is measurable: japan defines `trip_apply` **ten times** to express one
+  function, 79% of its `db/` is function bodies, and the copy-per-edit
+  ritual has already produced a silent data-visibility bug (a later file
+  copied an older body over a widened one and un-shared every board).
+
+  `db/` now splits by what the SQL *is*. `db/NNN-*.sql` stays schema —
+  numbered, hash-recorded, forward-only. `db/fn/*.sql` is vocabulary:
+  unnumbered, never recorded, replayed wholesale every boot, **edited in
+  place** like the TypeScript beside it. The numbered pass runs first, so a
+  function may reference a table the same boot created.
+
+  Three properties make it safe rather than merely convenient. **Order-free:**
+  SQL bodies are validated at CREATE time, so a function calling another
+  would otherwise depend on filename order — the pass runs the set twice in
+  one transaction, once with `check_function_bodies = off` so everything
+  exists, once with it ON so every body is still validated against the
+  complete vocabulary. (One pass would have traded an ordering bug for a
+  worse one: a typo installing silently and failing at call time, in front
+  of a user.) **Atomic:** one transaction for the directory — a
+  half-swapped vocabulary is worse than an old one. **Schema DDL is
+  REFUSED**, not warned: it cannot survive a second boot, so `migrate()`
+  throws naming the file and the fix, rather than letting Postgres say
+  "relation already exists" from inside a two-pass swap.
+
+  A signature change still needs a number — `CREATE OR REPLACE` cannot alter
+  a return type or an argument name — and the failure says so, with the
+  `DROP FUNCTION IF EXISTS` line to write. Pinned in migrate.test.ts (replay,
+  edit-in-place, order-freedom, atomic rollback, the signature trap and its
+  documented fix, the DDL refusal) and driven on the embedded engine in
+  pglite.test.ts, because the vocabulary pass is ordinary Postgres but PGlite
+  is a wasm build and assumptions there are worth nothing.
+
+  Opt-in and backwards compatible: no `db/fn/` directory means no change.
+  epsilon's own `001`–`005` and `100`/`101` keep their bodies where they are
+  — moving them would change those files' hashes and every deployed ledger
+  would refuse to boot. [UPGRADING.md](UPGRADING.md) has the per-function
+  migration recipe (copy the NEWEST body, touch no numbered file).
+
 ## [0.8.1] — 2026-08-02
 
 A shakedown review (7 dimensions, each adversarially verified) found a hole

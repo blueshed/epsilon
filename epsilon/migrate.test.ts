@@ -1,10 +1,10 @@
 // Migrations: ordered, recorded, idempotent, forward-only, transactional.
 import { describe, test, expect, beforeAll, afterAll, afterEach } from "bun:test";
 import { SQL } from "bun";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { migrate, migrationStatus, migrationFiles } from "./migrate";
+import { migrate, migrationStatus, migrationFiles, functionFiles } from "./migrate";
 
 // Test db namespaced by app (package.json name) — see pg.test.ts's note.
 const APP = ((await Bun.file(new URL("../package.json", import.meta.url)).json()).name as string)
@@ -33,12 +33,17 @@ afterAll(async () => { await sql.end(); });
 
 afterEach(async () => {
   await sql.unsafe("DROP TABLE IF EXISTS migrations, m_a, m_b, m_c CASCADE");
+  await sql.unsafe("DROP FUNCTION IF EXISTS m_greet(text); DROP FUNCTION IF EXISTS m_shout(text)");
   if (dir) rmSync(dir, { recursive: true, force: true });
 });
 
 function fixture(files: Record<string, string>): string {
   dir = mkdtempSync(join(tmpdir(), "eps-mig-"));
-  for (const [name, body] of Object.entries(files)) writeFileSync(join(dir, name), body);
+  for (const [name, body] of Object.entries(files)) {
+    // "fn/foo.sql" writes into the vocabulary directory.
+    if (name.startsWith("fn/")) mkdirSync(join(dir, "fn"), { recursive: true });
+    writeFileSync(join(dir, name), body);
+  }
   return dir;
 }
 
@@ -110,5 +115,102 @@ describe("migrate", () => {
     ]);
     expect(a.length + b.length).toBe(1);                      // exactly one ran it
     await other.end();
+  });
+});
+
+// A function body is NOT a migration: CREATE OR REPLACE is idempotent by
+// construction, so hash-locking it forces a full copy per edit. db/fn is
+// replayed every boot and never recorded.
+describe("db/fn — the vocabulary, edited in place", () => {
+  test("replays on every boot, and an EDIT just takes effect", async () => {
+    const d = fixture({
+      "001-a.sql": "CREATE TABLE m_a (id int)",
+      "fn/greet.sql": "CREATE OR REPLACE FUNCTION m_greet(n text) RETURNS text AS $$ SELECT 'hi ' || n $$ LANGUAGE sql;",
+    });
+    const first = await migrate(sql, { dir: d, ...quiet });
+    expect(first.map((m) => m.name)).toEqual(["001-a.sql", "fn/greet.sql"]);
+    expect(first.find((m) => m.fn)?.applied).toBe(true);
+    expect((await sql`SELECT m_greet('pete') AS r`)[0]!.r).toBe("hi pete");
+
+    // The ledger records SCHEMA only — the vocabulary is not in it.
+    const ledger = await sql`SELECT name FROM migrations`;
+    expect(ledger.map((r: any) => r.name)).toEqual(["001-a.sql"]);
+
+    // Edit the file in place. No new number, no copy, no drift error.
+    writeFileSync(join(d, "fn", "greet.sql"),
+      "CREATE OR REPLACE FUNCTION m_greet(n text) RETURNS text AS $$ SELECT 'hello ' || n $$ LANGUAGE sql;");
+    const second = await migrate(sql, { dir: d, ...quiet });
+    expect(second.map((m) => m.name)).toEqual(["fn/greet.sql"]);   // 001 already applied
+    expect((await sql`SELECT m_greet('pete') AS r`)[0]!.r).toBe("hello pete");
+  });
+
+  test("order within db/fn carries no meaning — functions may call each other", async () => {
+    // greet.sql sorts BEFORE shout.sql but calls it. Without
+    // check_function_bodies=off this fails on a missing function.
+    const d = fixture({
+      "fn/greet.sql": "CREATE OR REPLACE FUNCTION m_greet(n text) RETURNS text AS $$ SELECT m_shout('hi ' || n) $$ LANGUAGE sql;",
+      "fn/shout.sql": "CREATE OR REPLACE FUNCTION m_shout(t text) RETURNS text AS $$ SELECT upper(t) $$ LANGUAGE sql;",
+    });
+    await migrate(sql, { dir: d, ...quiet });
+    expect((await sql`SELECT m_greet('pete') AS r`)[0]!.r).toBe("HI PETE");
+  });
+
+  test("the vocabulary swaps atomically — one bad file leaves the old set intact", async () => {
+    const d = fixture({
+      "fn/greet.sql": "CREATE OR REPLACE FUNCTION m_greet(n text) RETURNS text AS $$ SELECT 'v1 ' || n $$ LANGUAGE sql;",
+    });
+    await migrate(sql, { dir: d, ...quiet });
+    expect((await sql`SELECT m_greet('x') AS r`)[0]!.r).toBe("v1 x");
+
+    writeFileSync(join(d, "fn", "greet.sql"),
+      "CREATE OR REPLACE FUNCTION m_greet(n text) RETURNS text AS $$ SELECT 'v2 ' || n $$ LANGUAGE sql;");
+    writeFileSync(join(d, "fn", "zbroken.sql"), "CREATE OR REPLACE FUNCTION m_bad() RETURNS int AS $$ this is not sql $$ LANGUAGE sql;");
+
+    await expect(migrate(sql, { dir: d, ...quiet })).rejects.toThrow("db/fn failed");
+    expect((await sql`SELECT m_greet('x') AS r`)[0]!.r).toBe("v1 x");   // rolled back whole
+  });
+
+  test("a SIGNATURE change is refused, and the error names the fix", async () => {
+    const d = fixture({
+      "fn/greet.sql": "CREATE OR REPLACE FUNCTION m_greet(n text) RETURNS text AS $$ SELECT n $$ LANGUAGE sql;",
+    });
+    await migrate(sql, { dir: d, ...quiet });
+
+    // Return type change — exactly what CREATE OR REPLACE cannot do.
+    writeFileSync(join(d, "fn", "greet.sql"),
+      "CREATE OR REPLACE FUNCTION m_greet(n text) RETURNS int AS $$ SELECT length(n) $$ LANGUAGE sql;");
+    await expect(migrate(sql, { dir: d, ...quiet })).rejects.toThrow("DROP FUNCTION IF EXISTS");
+
+    // The documented fix: drop it in a NUMBERED file, then the edit lands.
+    writeFileSync(join(d, "002-drop.sql"), "DROP FUNCTION IF EXISTS m_greet(text)");
+    await migrate(sql, { dir: d, ...quiet });
+    expect((await sql`SELECT m_greet('four') AS r`)[0]!.r).toBe(4);
+  });
+
+  test("schema DDL in db/fn is REFUSED — it could not survive a second boot", async () => {
+    const d = fixture({
+      "fn/oops.sql": "CREATE TABLE m_b (id int);\nCREATE OR REPLACE FUNCTION m_greet(n text) RETURNS text AS $$ SELECT n $$ LANGUAGE sql;",
+    });
+    // Refused BEFORE anything runs, naming the file and the fix — rather
+    // than letting the second validation pass fail with "already exists",
+    // which explains nothing.
+    await expect(migrate(sql, { dir: d, ...quiet })).rejects.toThrow("NUMBERED file");
+    expect((await sql`SELECT to_regclass('m_b') AS t`)[0]!.t).toBeNull();
+  });
+
+  test("the numbered pass runs FIRST — a function may use a table just created", async () => {
+    const d = fixture({
+      "001-a.sql": "CREATE TABLE m_a (id int, label text)",
+      "fn/greet.sql": "CREATE OR REPLACE FUNCTION m_greet(n text) RETURNS bigint AS $$ SELECT count(*) FROM m_a WHERE label = n $$ LANGUAGE sql;",
+    });
+    await migrate(sql, { dir: d, ...quiet });       // same boot, both land
+    expect(Number((await sql`SELECT m_greet('nope') AS r`)[0]!.r)).toBe(0);
+  });
+
+  test("no db/fn directory is not an error", async () => {
+    const d = fixture({ "001-a.sql": "CREATE TABLE m_a (id int)" });
+    expect(functionFiles(d)).toEqual([]);
+    const ran = await migrate(sql, { dir: d, ...quiet });
+    expect(ran.map((m) => m.name)).toEqual(["001-a.sql"]);
   });
 });

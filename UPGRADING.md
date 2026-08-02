@@ -25,6 +25,58 @@ Commit before you start. The tool assumes a clean tree.
 
 ---
 
+## → 0.9.0 (unreleased)
+
+**Runtime: automatic. Nothing breaks, and nothing is required of you.**
+`db/fn/` is opt-in: an app with no such directory behaves exactly as it did.
+
+### `db/fn/` — stop copying function bodies
+
+Forward-only is the right rule for DDL and the wrong one for
+`CREATE OR REPLACE FUNCTION`, which is idempotent by construction. `db/fn/*.sql`
+is unnumbered, not hash-recorded, and replayed wholesale every boot — you
+**edit those files in place**.
+
+Moving an existing app across is incremental and safe. Per function:
+
+1. Copy its **latest** body — the one from the highest-numbered file that
+   defines it — into `db/fn/<name>.sql`. Take the newest; that is the whole
+   point, and copying an older one is exactly the bug this prevents.
+2. Leave every numbered file **untouched**. They are hash-recorded and
+   already applied; editing one throws on the next boot. The vocabulary pass
+   runs after them and replaces whatever they created.
+3. Delete nothing from `db/`. The old definitions are inert — overwritten on
+   every boot by `db/fn/`.
+
+Then stop writing new numbered files for function changes.
+
+```
+db/
+  001-epsilon.sql        ← untouched, still recorded
+  ...
+  024-say-who.sql        ← untouched
+  fn/
+    trip_apply.sql       ← the one live definition, edited in place
+    trip_open.sql
+```
+
+Two things to know before you start:
+
+- **A signature change still needs a number.** `CREATE OR REPLACE` cannot
+  alter a return type or an argument name. Put
+  `DROP FUNCTION IF EXISTS foo(old args);` in the next numbered file, then
+  edit `db/fn`. `migrate()`'s error says this when it happens.
+- **Schema DDL in `db/fn/` is refused at boot**, by design — it could not
+  survive a second start. Tables, columns, indexes and seeds keep their
+  numbers.
+
+Order inside `db/fn/` carries no meaning: the pass creates everything with
+`check_function_bodies = off`, then re-runs the same set with it on, so
+functions may call each other regardless of filename and every body is still
+validated. The whole directory is one transaction.
+
+---
+
 ## → 0.8.1
 
 **Runtime: automatic.** `bun run epsilon:upgrade v0.8.1` covers all of it.

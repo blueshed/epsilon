@@ -143,5 +143,11 @@ users/sessions, reload-worthy for doc tables.
   defect class. rel.test.ts's law describe is the worked call.
 - **Auth before docs** on `requireAuth` hosts; re-auth belongs in
   `onConnect` — it runs on every reconnect, before docs re-open.
-- **Never edit an applied migration.** Add the next number (comment-only
-  edits count — the ledger records the hash).
+- **Two kinds of SQL, two rules.** `db/NNN-*.sql` is SCHEMA: never edit one
+  once applied, add the next number (comment-only edits count — the ledger
+  records the hash). `db/fn/*.sql` is VOCABULARY — stored functions,
+  replayed every boot, never recorded: **edit those in place.** A new doc
+  type's dispatch and composition belong in `db/fn/`; only its tables need a
+  number. Changing a function's SIGNATURE is the exception — `CREATE OR
+  REPLACE` cannot, so `DROP FUNCTION IF EXISTS foo(old args)` goes in the
+  next numbered file, then you edit `db/fn`.

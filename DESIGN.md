@@ -69,6 +69,25 @@ SVG has always worked: a caller building rows with `createElementNS` hands `list
 
 `list()`, `when()` and `mount()` now **report** it and name the fix. They do not adopt the namespace, and that is the medium tax being declined deliberately: adopting means RECREATING the element, and railroad can only do that because its props system re-applies every reactive binding to the new node. Epsilon has no props system, so a recreate would silently drop whatever the caller attached by hand — `addEventListener` above all. Losing a click handler is a worse failure than an unpainted circle you are being told about.
 
+## A function body is not a migration (2026-08-02)
+
+Forward-only exists because **DDL is not replayable**: a `CREATE TABLE` cannot run twice. `CREATE OR REPLACE FUNCTION` *can* — that is what `OR REPLACE` means. Applying one rule to both was the most expensive mistake in the stack, and it was measurable: the one deployed consumer defined `trip_apply` **ten times** to express one function, 79% of its `db/` was function bodies, and the copy-per-edit ritual had already produced a silent data-visibility bug (a later file copied an older body over a widened one, and un-shared every board).
+
+So `db/` splits by what the SQL *is*, not where it lives:
+
+- `db/NNN-*.sql` — **schema**. Numbered, ordered, hash-recorded, forward-only. Tables, columns, indexes, types, seeds. Never edited once applied.
+- `db/fn/*.sql` — **vocabulary**. Unnumbered, not recorded, replayed wholesale every boot. Edited in place, like the TypeScript beside it.
+
+Three properties make it safe rather than merely convenient:
+
+- **Order-free.** SQL-language bodies are validated at `CREATE` time, so a function calling another would otherwise depend on filename order. The pass runs the set TWICE in one transaction — once with `check_function_bodies = off` so everything exists, once with it on so every body is still validated against the complete vocabulary. Order-freedom without losing the compiler is worth the second pass; re-creating a function is metadata.
+- **Atomic.** One transaction for the whole directory. A half-swapped vocabulary is worse than an old one.
+- **Schema DDL is refused, not warned.** A `CREATE TABLE` in `db/fn/` cannot survive the second boot, so `migrate()` throws at the file with the reason — rather than letting Postgres say "relation already exists" from inside a two-pass swap, which explains nothing.
+
+The numbered pass runs first, so a function may reference a table the same boot just created. The one thing that still needs a number is a **signature change**: `CREATE OR REPLACE` cannot alter a return type or an argument name, so `DROP FUNCTION IF EXISTS foo(old args)` goes in the next numbered file. The failure says so.
+
+Not done here: epsilon's own `001`–`005` and `100`/`101` keep their function bodies where they are. Moving them would change those files' hashes and every deployed ledger would refuse to boot. New core behaviour goes to `db/fn/`; existing bodies stay put, harmlessly.
+
 ## Storage tiers — where stored functions live (Peter, 2026-07-28)
 
 Two tiers, one boundary rule:

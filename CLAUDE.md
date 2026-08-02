@@ -9,6 +9,7 @@ schema-native users. Merges the ideas of `../delta` and `../railroad`.
 
 - `server.ts`, `index.html`, `src/` — the app (the part users make theirs).
 - `epsilon/` — the runtime + its tests. Tests are the contract; DESIGN.md is the why.
+- `db/fn/` — stored functions: unnumbered, NOT hash-recorded, replayed every boot in one transaction. Edit in place. A signature change needs `DROP FUNCTION` in a numbered file first.
 - `db/` — numbered migrations: 001–002 core (doc registry, auth), 003 the doc kit (locking, audit, undo, history), 004 housekeeping, 005 gone. 001–099 are CORE and FROZEN once released — new core behavior is the next number, never an edit. The app's doc types start at 100 (`100-board.sql`). See DESIGN.md "The doc kit" and "Upgrades".
 
 ## Rules
