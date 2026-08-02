@@ -53,6 +53,30 @@ op touches that slice, never on a sibling's keystroke. `text(sig)`/`effect`
 are the state-channel fallback (always correct; the only choice for
 `map()`ed values, which carry no ops).
 
+**Screens, not one page** (0.8.0). `routes(target, table)` is the hash
+router; `route(pattern)` is a `Signal<params | null>`; `navigate(path)`
+moves. Never navigate with `location.href` or `location.reload()` — that
+reloads a WebSocket app, re-authenticating and re-opening every doc.
+Params change WITHIN a pattern without re-running the handler
+(`/trips/1` → `/trips/2` updates `params$`), so open the doc once and let
+the lens follow the param.
+
+```ts
+mount(document.getElementById("app")!, () =>            // the app root's scope
+  when(signedIn, () => shell(), () => loginForm()));    // swaps on truthiness only
+routes(main, { "/": () => tripList(), "/trips/:id": (p, p$) => trip(p$) });
+```
+
+`mount()` is what a top-level `bind`/`list`/`when` warns for the want of.
+`when()` swaps only when truthiness FLIPS — inside a branch, react with a
+lens, not by rebuilding.
+
+**SVG:** build nodes with `document.createElementNS("http://www.w3.org/
+2000/svg", tag)`. `createElement("circle")` in an SVG parent is an HTML
+element that never paints; `list`/`when`/`mount` warn, and deliberately do
+not rewrite it — that would mean recreating the node and dropping your
+listeners.
+
 A doc signal KEEPS its last value while the socket is down (the reconnect's
 snapshot resets it), so render live-ness from `onDisconnect`, never from the
 doc — a presence list left alone stays green and lies.

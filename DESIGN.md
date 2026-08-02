@@ -51,7 +51,23 @@ Any line not paying one of these taxes is deletable.
 - `list()` routes **membership only** (add/remove/root-reconcile). Field ops never reach it — each row renders from its own `at()` lens, so content updates flow lens → binding. No diffing anywhere; snapshots diff *key sets*, and surviving rows keep their nodes.
 - `bind(lens, set)` is the **precise scalar path** (2026-07-29, from the field report's §4): set() runs only when an op touches the lens's slice — sibling writes never reach it; ancestor replaces and snapshots fall through like `list()`'s reconcile. O(change) for field content.
 - `text(sig)` is the state-channel binding — the always-correct fallback, one effect per node, and the only choice for computed/`map()` values (they carry no ops).
+- `when(cond, truthy, falsy?)` (0.8.0) swaps on the **truthiness transition only** — a branch that stays truthy keeps its nodes and its bindings, so a value change inside it flows through a lens instead of rebuilding. Same rule as `list()`, applied to a region instead of a collection.
+- `mount(target, render)` (0.8.0) is the **app root**: it brackets a dispose scope, so the scope rules hold all the way down, and returns the disposer. A top-level `bind`/`list`/`when` warns because it has no owner; this is the answer.
 - Known v0 looseness: lens `get()` tracks the root, so state *effects* over-fire on unrelated changes (correct, not minimal) — reach for `bind` where that matters.
+
+## Routing (route.ts, 0.8.0)
+
+The gap was found by comparing two apps on the two stacks: `hump` (railroad) has a list view and a detail view; `japan` (epsilon) navigates by `location.href = "?t=5"` and `location.reload()` — a full reload of a WebSocket app, re-auth and re-open every doc, because there was no router. Its one-page information architecture is partly a consequence of that absence.
+
+- **Ported from railroad whole, not rewritten.** `signal.ts` already exports the exact set railroad's router imports, so the port was an import path. What came with it is the point: the async scope balance (never leave a scope pushed across an await), the run-id guard that drops a stale resolution after navigation, an idempotent dispose that can't drive the shared hash refcount negative. Re-deriving those would mean re-finding them.
+- **Hash, not History.** Epsilon serves its own HTML from `Bun.serve`; History mode needs a catch-all on every deployment and a rewrite rule on every static host in front of one. Hash costs neither and works the day you scaffold. Open question, not a closed one — see Open items.
+- **Params change without teardown.** `/trips/1` → `/trips/2` updates `params$` and does not re-run the handler. That is the property a doc app needs: open the doc once, let the lens follow the param, rather than closing and re-opening the subscription on every id change.
+
+## SVG — reported, never rewritten (0.8.0)
+
+SVG has always worked: a caller building rows with `createElementNS` hands `list()` nodes already in the right namespace, which is how japan draws seventy stations. The hole was `document.createElement("circle")` — an HTML element in an SVG parent, which the browser keeps in the tree and never paints.
+
+`list()`, `when()` and `mount()` now **report** it and name the fix. They do not adopt the namespace, and that is the medium tax being declined deliberately: adopting means RECREATING the element, and railroad can only do that because its props system re-applies every reactive binding to the new node. Epsilon has no props system, so a recreate would silently drop whatever the caller attached by hand — `addEventListener` above all. Losing a click handler is a worse failure than an unpainted circle you are being told about.
 
 ## Storage tiers — where stored functions live (Peter, 2026-07-28)
 
@@ -473,8 +489,21 @@ and only the SQL part wanted machinery — which existed:
 
 ## Open items
 
-- None right now. (`epsilon_prune` runs at boot and daily since 0.5.0; an
-  external cron remains fine.)
+- **JSX** (0.8.0, deferred deliberately). The remaining half of the
+  railroad gap. `japan/index.ts` is 2,787 lines of imperative DOM; hump's
+  entire client — graph engine, drawer, panels, CSS, server — is 3,563 and
+  reads declaratively. Bun transpiles JSX natively (`jsx: react-jsx` plus
+  `jsxImportSource`, no build step), so the constraint survives. The cost
+  is ~500 lines (railroad's `jsx.ts` minus its `list`, which epsilon's
+  op-routed one beats), taking the runtime past 4k and denting "small
+  enough to read in one context window". Its own release, its own
+  decision. `provide`/`inject` waits on the same call — prop-threading is
+  a JSX-tree problem.
+- **History-mode routing.** Hash was chosen so a scaffold needs no server
+  config; epsilon owns its server, so History is available in a way it
+  wasn't to railroad. Wants a field report, not a guess.
+- (`epsilon_prune` runs at boot and daily since 0.5.0; an external cron
+  remains fine.)
 
 ## Non-goals
 

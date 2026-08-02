@@ -1,5 +1,5 @@
 /**
- * UI — ops to pixels. Three primitives, no diffing.
+ * UI — ops to pixels. Five primitives, no diffing.
  *
  *   text(sig)          — a Text node an effect keeps current (state channel:
  *                        always correct, the fallback — and the only choice
@@ -15,17 +15,77 @@
  *                        at() lens, so content updates flow through the lens
  *                        to whatever bindings the row made. list() is ~a
  *                        routing table; the lens is the update path.
+ *   when(cond, t, f?)  — conditional region. Swaps on the TRUTHINESS
+ *                        transition only, so a branch that stays truthy is
+ *                        never rebuilt and keeps its DOM and its bindings.
+ *   mount(target, fn)  — the app root: brackets a dispose scope around fn so
+ *                        the scope rules hold all the way down, and returns
+ *                        the disposer that unwinds it.
  *
  * Identity: rows are keyed by the collection's own ids (Record<string, T>) —
  * minted by the store, carried through the ops, never guessed. Order is
  * arrival order; position is model data (see DESIGN.md non-goals).
+ *
+ * when() and mount() are ports from railroad (0.11.0).
+ *
+ * SVG: every region here works inside <svg> — japan draws seventy stations
+ * through list() — because a caller building rows with createElementNS hands
+ * us nodes that are already in the right namespace. What epsilon does NOT do
+ * is railroad's silent adoption pass. That shim exists for JSX, which emits
+ * createElement("circle") and must repair the namespace afterwards; repairing
+ * means RECREATING the element, and railroad can only get away with it
+ * because its props system re-applies every reactive binding to the new node.
+ * Epsilon has no props system: a recreate here would silently drop whatever
+ * the caller attached by hand — addEventListener above all. Losing a click
+ * handler is a worse failure than the one being fixed, so instead an element
+ * that lands in an SVG parent in the wrong namespace is REPORTED, with the
+ * fix, the same way a scopeless binding is. See DESIGN.md, the medium tax.
  */
 
 import {
-  effect, trackDispose, pushDisposeScope, popDisposeScope, hasActiveDisposeScope,
+  effect, computed, trackDispose, pushDisposeScope, popDisposeScope, hasActiveDisposeScope,
   type OpSignal, type ReadonlySignal, type Dispose,
 } from "./signal";
 import { splitPath, escapeToken } from "./op";
+
+/** Shared guardrail: when()/list() return DOM nodes, not disposers, so outside
+ *  a dispose scope their effects are unreachable — a guaranteed leak the first
+ *  time the UI unmounts. */
+function warnScopeless(helper: string): void {
+  console.warn(
+    `[epsilon/ui] ${helper}() created outside a dispose scope — its effects ` +
+      "can never be torn down. Render it inside a list() row, a routes() " +
+      "handler, or mount().",
+  );
+}
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+/** An HTML-namespaced element inside <svg> renders as nothing — the browser
+ *  keeps it in the tree and never paints it, which is why this is worth a word
+ *  rather than a silent nothing. Costs one namespaceURI compare on the parent
+ *  unless you are actually rendering into SVG. <foreignObject> is the one SVG
+ *  element whose children ARE html, so adoption stops there. */
+function checkSvgNamespace(helper: string, nodes: Node[], parent: Node | null): void {
+  if (
+    !(parent instanceof Element) ||
+    parent.namespaceURI !== SVG_NS ||
+    parent.localName === "foreignObject"
+  ) return;
+  for (const n of nodes) {
+    if (n instanceof Element && n.namespaceURI !== SVG_NS) {
+      console.warn(
+        `[epsilon/ui] ${helper}() inserted <${n.localName}> into <${parent.localName}>, ` +
+          "but it was built with document.createElement, so it is an HTML " +
+          "element in an SVG parent and will never paint. Build it with " +
+          `document.createElementNS("${SVG_NS}", "${n.localName}"). ` +
+          "Nothing is rewritten for you — that would mean recreating the node " +
+          "and dropping any listener you attached.",
+      );
+      return; // one word per region is enough
+    }
+  }
+}
 
 /** A Text node kept current by an effect. */
 export function text(sig: ReadonlySignal<unknown>): Text {
@@ -56,11 +116,7 @@ export function list<T>(
   sig: OpSignal<Record<string, T> | null | undefined>,
   render: (row: OpSignal<T>, id: string) => Node,
 ): Node {
-  if (!hasActiveDisposeScope()) {
-    console.warn(
-      "[epsilon/ui] list() created outside a dispose scope — its effects can never be torn down.",
-    );
-  }
+  if (!hasActiveDisposeScope()) warnScopeless("list");
   const anchor = document.createComment("list");
   const rows = new Map<string, { nodes: Node[]; dispose: Dispose }>();
   let disposed = false;
@@ -77,6 +133,7 @@ export function list<T>(
       dispose = popDisposeScope(); // balanced even when render throws
     }
     const nodes = rendered instanceof DocumentFragment ? [...rendered.childNodes] : [rendered];
+    checkSvgNamespace("list", nodes, anchor.parentNode);
     anchor.parentNode?.insertBefore(rendered, anchor);
     rows.set(id, { nodes, dispose });
   }
@@ -130,4 +187,123 @@ export function list<T>(
   frag.appendChild(anchor);
   queueMicrotask(() => { if (!disposed && sig.peek() != null) reconcile(); });
   return frag;
+}
+
+/**
+ * Conditional region. Swaps DOM only when truthiness TRANSITIONS — a value
+ * change within the same branch ("a" → "b", 1 → 2) does not rebuild it, so
+ * the branch keeps its nodes and whatever bind()/list() it made. React to
+ * value changes with a signal inside the branch, the way a list() row does.
+ *
+ *   when(signedIn, () => dashboard(), () => loginForm())
+ *
+ * `condition` is a signal or a plain function (wrapped in a computed).
+ */
+export function when(
+  condition: ReadonlySignal<unknown> | (() => unknown),
+  truthy: () => Node,
+  falsy?: () => Node,
+): Node {
+  if (!hasActiveDisposeScope()) warnScopeless("when");
+  const anchor = document.createComment("when");
+  let currentNodes: Node[] = [];
+  let currentDispose: Dispose | null = null;
+  let wasTruthy: boolean | undefined = undefined;
+  let disposed = false;
+
+  const sig: ReadonlySignal<unknown> = typeof condition === "function"
+    ? computed(condition)
+    : condition;
+
+  function swap(): void {
+    // The first swap is deferred (the anchor has no parent until the returned
+    // fragment is appended), so a queued microtask can fire AFTER the owning
+    // scope tore down — e.g. a list() row added and removed in one flush.
+    // Without this guard it rebuilds the branch and leaks its effects: the
+    // disposer lands in currentDispose, which nothing reads once cleanup has
+    // run. Checking anchor.parentNode is not enough — after a routes()
+    // teardown the anchor can still sit in a detached-but-parented subtree.
+    if (disposed) return;
+    const isTruthy = !!sig.get();
+    if (isTruthy === wasTruthy) return;
+    wasTruthy = isTruthy;
+
+    if (currentDispose) currentDispose();
+    for (const n of currentNodes) n.parentNode?.removeChild(n);
+    currentNodes = [];
+
+    pushDisposeScope();
+    let result: Node | null = null;
+    try {
+      result = isTruthy ? truthy() : (falsy ? falsy() : null);
+    } finally {
+      currentDispose = popDisposeScope(); // balanced even when a branch throws
+    }
+
+    if (result && anchor.parentNode) {
+      currentNodes = result instanceof DocumentFragment
+        ? [...result.childNodes]
+        : [result];
+      checkSvgNamespace("when", currentNodes, anchor.parentNode);
+      anchor.parentNode.insertBefore(result, anchor.nextSibling);
+    }
+  }
+
+  effect(() => {
+    sig.get(); // track
+    if (!anchor.parentNode) queueMicrotask(swap);
+    else swap();
+  });
+
+  // The active branch's scope is otherwise disposed only by the NEXT swap —
+  // without this, its effects outlive the parent scope (route or row
+  // teardown) and go on writing to detached DOM.
+  trackDispose(() => {
+    disposed = true; // makes any still-queued swap() a no-op
+    if (currentDispose) currentDispose();
+    currentDispose = null;
+    for (const n of currentNodes) n.parentNode?.removeChild(n);
+    currentNodes = [];
+  });
+
+  const frag = document.createDocumentFragment();
+  frag.appendChild(anchor);
+  return frag;
+}
+
+/**
+ * The app root. Brackets a dispose scope around `render` so everything it
+ * creates — effects, binds, lists, whens — tears down when the returned
+ * disposer runs, which also removes the rendered nodes.
+ *
+ *   const dispose = mount(document.getElementById("app")!, () => App());
+ *
+ * Use this (or routes(), which brackets its own per-handler scopes) for an
+ * app root. Without one, a top-level bind()/list()/when() has no owner: that
+ * is the warning they print, and this is the answer to it. Nested mounts
+ * compose — the inner disposer is tracked in the outer scope.
+ */
+export function mount(target: Element, render: () => Node): Dispose {
+  pushDisposeScope();
+  let result: Node;
+  try {
+    result = render();
+  } catch (err) {
+    popDisposeScope()(); // dispose whatever was created before the throw
+    throw err;
+  }
+  const scopeDispose = popDisposeScope();
+  const nodes = result instanceof DocumentFragment ? [...result.childNodes] : [result];
+  checkSvgNamespace("mount", nodes, target);
+  target.appendChild(result);
+
+  let disposed = false;
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    scopeDispose();
+    for (const n of nodes) n.parentNode?.removeChild(n);
+  };
+  trackDispose(dispose); // nested mounts compose with an outer scope
+  return dispose;
 }

@@ -7,6 +7,112 @@ will ship.
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-08-01
+
+The top of the stack, taken back from railroad. Epsilon's claim is that it
+merges delta and railroad — and comparing two real apps showed the second
+half of that was not true. `hump` (railroad) has a list view and a detail
+view; `japan` (epsilon) has one page, because epsilon's whole UI surface
+was `list`/`text`/`bind` and there was nowhere else to put anything. Three
+primitives become five, and none of it is new invention: it is railroad's,
+ported with its scars.
+
+### Added
+
+- **A router** (`epsilon/route.ts`) — `routes` / `route` / `navigate` /
+  `matchRoute`, exported from `epsilon/index.ts`. The gap was found by
+  comparing two real apps: `hump` (railroad) has a list view and a
+  per-itinerary view because railroad hands it `routes()`; `japan`
+  (epsilon) navigates between journeys with `location.href = "?t=5"` and
+  `location.reload()` — a full reload of a WebSocket app, re-auth and
+  re-open every doc, because epsilon's UI surface was `list`/`text`/`bind`
+  and nothing else. Its one-page information architecture is partly a
+  consequence.
+
+  Ported from railroad 0.11.0 **whole**, not rewritten: epsilon's
+  `signal.ts` already exports the exact primitive set railroad's router
+  imports (`Signal`, `signal`, `computed`, `effect`, the dispose-scope
+  trio), so the port is an import path and the log prefix. What came with
+  it is the reason — the async scope balance (never leave a scope pushed
+  across an await, or a parent pops the wrong one and teardown recurses),
+  the run-id guard that drops a stale resolution after navigation, and an
+  idempotent dispose that can't drive the shared hash refcount negative.
+  Those were found the hard way once already.
+
+  Hash-based, deliberately: epsilon serves its own HTML from `Bun.serve`,
+  and a History-mode router needs a catch-all on every deployment plus a
+  rewrite on every static host in front of one. Hash costs neither and
+  works the day you scaffold. History mode is a live question, not a
+  closed one.
+
+  The property that matters for a doc app is pinned in `route.test.ts`:
+  `/trips/1` → `/trips/2` updates `params$` and does **not** re-run the
+  handler, so a route opens its doc once and lets the lens follow the
+  param — rather than closing and re-opening the subscription on every id
+  change.
+
+- **`when()` and `mount()`** (`epsilon/ui.ts`), also ported from railroad.
+  `when(cond, truthy, falsy?)` swaps on the TRUTHINESS transition only — a
+  branch that stays truthy keeps its nodes and its bindings, so a value
+  change inside it flows through a lens rather than rebuilding, which is
+  the same rule `list()` already follows for membership. `mount(target,
+  render)` is the app root: it brackets a dispose scope so the scope rules
+  hold all the way down, and returns the disposer that unwinds it. Without
+  one, a top-level `bind()`/`list()`/`when()` had no owner — which is what
+  they have always warned about, with no answer in the box until now.
+
+- **An SVG diagnostic** (`epsilon/ui.ts`). SVG has always WORKED — japan
+  draws seventy stations through `list()` — because a caller building rows
+  with `createElementNS` hands over nodes already in the right namespace.
+  The hole was the other path: an element built with `document
+  .createElement("circle")` lands in an SVG parent as HTML and never
+  paints, silently. `list()`, `when()` and `mount()` now say so, and name
+  the fix. They do NOT rewrite it: railroad can adopt the namespace only
+  because its props system re-applies every reactive binding to the
+  recreated element, and epsilon has no props system — a recreate here
+  would drop whatever the caller attached by hand, `addEventListener`
+  above all. Losing a click handler is worse than the bug being fixed.
+  Pinned both ways in `ui.test.ts`, including that the reported node stays
+  in the tree with its listener live, and that `<foreignObject>`'s HTML
+  children pass without a word.
+
+### Changed
+
+- **The demo app is routed** (`index.html`, `index.ts`, `app.test.ts`) —
+  which is how the router earned the release rather than just passing its
+  own unit tests. The demo had grown its OWN router: `openBoard` wrote
+  `location.hash`, a regex parsed it back, and a `hashchange` listener
+  dispatched. That is the ad-hoc thing `routes()` exists to delete, and
+  it was sitting in the template being copied into every scaffold.
+
+  Now `<main id="view">` is the route target, `/board/:id` is the board
+  and `/` is a placeholder, and `navigate()` replaces every direct
+  `openBoard` call. The board list and tally stay outside the target and
+  remain visible — list beside detail, not list THEN detail.
+
+  Two things the wiring taught, both now commented where they bite:
+  handlers must hold element REFS rather than call `getElementById`,
+  because routes() appends the fragment after the handler returns; and the
+  boot hash must be set BEFORE routes() reads it — `location.hash` updates
+  synchronously but `hashchange` does not fire until a later task, so
+  routing through the event renders the placeholder and flashes.
+
+  `app.test.ts` drives all of it in a real browser: a cold load resolving
+  to `#/board/1` with no flash, the view swap in both directions
+  (`#board-name` existing or not IS the swap), and the board coming back
+  live — its `list()` re-rendering a card written before the round trip.
+  The pre-existing `history.back()`/`forward()` and `←` assertions pass
+  unchanged, which is the real proof: navigation behaviour is identical,
+  the hand-rolled router is just gone.
+
+### Fixed
+
+- `ui.test.ts` registered happy-dom unconditionally. `bun test` loads every
+  file into one process and load order is not the order in the test script,
+  so a second DOM suite made whichever body ran second throw
+  ("Happy DOM has already been globally registered"). Both registrations
+  are now conditional, and both files pass alone and together.
+
 ## [0.7.1] — 2026-08-01
 
 ### Added

@@ -47,6 +47,31 @@ describe("the app, end to end", () => {
       (t) => t.includes("guest"),
     );
     expect(who).toContain("here:");
+
+    // The router, in a real browser. A cold load resolves to the shared
+    // board before first paint — no placeholder flash, because the hash is
+    // set before routes() reads it.
+    expect(await view.evaluate<string>("location.hash")).toBe("#/board/1");
+
+    // Leaving the pattern tears the board down; re-entering rebuilds it.
+    // #board-name existing or not IS the view swap.
+    await view.evaluate("location.hash = '#/'");
+    await waitFor(
+      () => view.evaluate<boolean>("!!document.querySelector('#pick')"),
+      (v) => v,
+    );
+    expect(await view.evaluate<boolean>("!!document.querySelector('#board-name')")).toBe(false);
+
+    await view.evaluate("location.hash = '#/board/1'");
+    await waitFor(
+      () => view.evaluate<string>("document.querySelector('#board-name')?.textContent ?? ''"),
+      (t) => t === "main",
+    );
+    // The board came back live, not as a corpse: its list() re-rendered the
+    // card written before the round trip.
+    expect(await view.evaluate<string>("document.querySelector('#log').textContent"))
+      .toContain("hello from a real browser");
+
     server.stop(true);
   });
 

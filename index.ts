@@ -2,8 +2,11 @@
 // lens. Adds go to "/-" — the SERVER mints ids (Postgres sequences here).
 // With auth on, you get YOUR boards (mine:<uid>): creating one is an op on
 // that doc; opening one is just another doc name.
-import { connect, list, text, bind, effect, pushDisposeScope, popDisposeScope } from "./epsilon";
-import type { OpSignal, Dispose, DocHandle } from "./epsilon";
+import {
+  connect, list, text, bind, effect, routes, navigate,
+  pushDisposeScope, popDisposeScope, trackDispose,
+} from "./epsilon";
+import type { OpSignal, Signal, Dispose, DocHandle } from "./epsilon";
 import type { Board, Card, Member, Tally } from "./types";
 
 interface BoardRef { id: number | string; name: string; shared?: boolean }
@@ -12,12 +15,32 @@ interface Mine { boards: Record<string, BoardRef> }
 const authDialog = document.getElementById("auth") as HTMLDialogElement;
 const authError = document.getElementById("auth-error")!;
 const mineSection = document.getElementById("mine")!;
-const boardName = document.getElementById("board-name")!;
-const boardBack = document.getElementById("board-back") as HTMLButtonElement;
-const log = document.getElementById("log")!;
-const share = document.getElementById("share")!;
-const membersUl = document.getElementById("members")!;
-const who = document.getElementById("who")!;
+const view = document.getElementById("view")!;
+
+/** Tiny builder — the board's markup lives here now, because routes() owns
+ *  its target's children and a handler must be able to build them fresh. */
+function el<K extends keyof HTMLElementTagNameMap>(
+  tag: K, attrs: Record<string, string> = {}, ...kids: (Node | string)[]
+): HTMLElementTagNameMap[K] {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
+  n.append(...kids);
+  return n;
+}
+
+// The board's own elements, rebuilt per visit by boardView() below.
+// Held as refs, not looked up: routes() appends the handler's fragment AFTER
+// the handler returns, so a getElementById inside it would find nothing.
+let boardName!: HTMLElement;
+let boardBack!: HTMLButtonElement;
+let log!: HTMLElement;
+let share!: HTMLElement;
+let membersUl!: HTMLElement;
+let who!: HTMLElement;
+let cardForm!: HTMLFormElement;
+let cardInput!: HTMLInputElement;
+let memberForm!: HTMLFormElement;
+let memberInput!: HTMLInputElement;
 
 // A native <dialog>, not window.confirm(): stylable like the rest of the
 // app, and driveable by the same clicks a test already uses for #auth — a
@@ -74,7 +97,6 @@ function openBoard(name: string): void {
   boardBack.hidden = name === "board:1";
   disposeBoard?.();
   log.replaceChildren();
-  location.hash = `#/${name}`;
   // Acquire before releasing: a same-name re-open keeps the handle alive
   // (refcount), a switch lets the old doc close — the server unsubscribes
   // and can evict it. No leak per visited board.
@@ -96,7 +118,7 @@ function openBoard(name: string): void {
   // the shared board; the mine list already lost its row via the mirror.
   effect(() => {
     if (doc.get() != null || doc.v === 0) return;
-    queueMicrotask(() => { if (currentBoard === name) openBoard("board:1"); });
+    queueMicrotask(() => { if (currentBoard === name) navigate("/board/1"); });
   });
   effect(() => {
     const here = pres.get();
@@ -148,8 +170,6 @@ function openBoard(name: string): void {
   );
   disposeBoard = popDisposeScope();
 
-  const memberForm = document.getElementById("member-form") as HTMLFormElement;
-  const memberInput = document.getElementById("new-member") as HTMLInputElement;
   memberForm.onsubmit = (e) => {
     e.preventDefault();
     const email = memberInput.value.trim();
@@ -160,14 +180,12 @@ function openBoard(name: string): void {
     memberInput.value = "";
   };
 
-  const form = document.getElementById("form") as HTMLFormElement;
-  const input = document.getElementById("input") as HTMLInputElement;
-  form.onsubmit = (e) => {
+  cardForm.onsubmit = (e) => {
     e.preventDefault();
-    if (!input.value.trim()) return;
+    if (!cardInput.value.trim()) return;
     // No local append — the echo (with the server-minted id) renders it.
-    cards.apply([{ op: "add", path: "/-", value: { text: input.value } }]);
-    input.value = "";
+    cards.apply([{ op: "add", path: "/-", value: { text: cardInput.value } }]);
+    cardInput.value = "";
   };
 
   // Rename in place: edit the title, blur (or Enter) sends one replace op.
@@ -183,19 +201,75 @@ function openBoard(name: string): void {
   };
 }
 
-const hashBoard = () => /^#\/(board:\d+)$/.exec(location.hash)?.[1];
+/**
+ * The `/board/:id` view. routes() calls this ONCE per entry to the pattern
+ * and hands it a params signal — so /board/1 → /board/2 does not rebuild
+ * this shell, it just re-runs the effect below. The shell persists; only
+ * the doc-bound content is torn down and reopened, which is the whole
+ * reason params$ exists.
+ */
+function boardView(params$: Signal<Record<string, string>>): Node {
+  boardBack = el("button", { id: "board-back", hidden: "" }, "←");
+  boardName = el("h2", { id: "board-name" });
+  who = el("p", { id: "who" });
+  log = el("ul", { id: "log" });
+  membersUl = el("ul", { id: "members" });
+  memberInput = el("input", { id: "new-member", type: "email", placeholder: "share with an email, press enter" });
+  memberForm = el("form", { id: "member-form" }, memberInput);
+  share = el("section", { id: "share", hidden: "" },
+    el("h3", {}, "members"), memberForm, membersUl);
+  cardInput = el("input", { id: "input", placeholder: "type, press enter, watch the other tab", autofocus: "" });
+  cardForm = el("form", { id: "form" }, cardInput);
 
-// The hash is navigation truth: openBoard writes it; back/forward (and a
-// hand-edited URL) land here. Only a real change opens — openBoard's own
-// hash write echoes back with currentBoard already set.
-addEventListener("hashchange", () => {
-  const name = hashBoard() ?? "board:1";
-  if (name !== currentBoard) openBoard(name);
+  // Deterministic, unlike history.back(): always board 1, even after a
+  // reload or a bookmarked link where there is no "back" to have.
+  boardBack.onclick = () => navigate("/board/1");
+
+  const frag = document.createDocumentFragment();
+  frag.append(
+    el("div", { id: "board-header" }, boardBack, boardName),
+    who,
+    cardForm,
+    log,
+    share,
+  );
+
+  // The param IS the navigation truth now — back/forward and a hand-edited
+  // URL all arrive here, and openBoard no longer writes the hash back.
+  effect(() => {
+    const name = `board:${params$.get().id}`;
+    if (name !== currentBoard) openBoard(name);
+  });
+
+  // Leaving the pattern entirely: drop the docs, so the server unsubscribes
+  // and can evict. openBoard's own scope is disposed by routes().
+  trackDispose(() => {
+    disposeBoard?.();
+    disposeBoard = null;
+    boardDoc?.close();
+    presenceDoc?.close();
+    boardDoc = presenceDoc = null;
+    currentBoard = null;
+  });
+
+  return frag;
+}
+
+// A cold load with no hash lands on the shared board — in-memory mode (no
+// auth gate) then just works; a requireAuth host raises the dialog via
+// onError instead. Set BEFORE routes() reads the hash: location.hash
+// updates synchronously but `hashchange` does not fire until a later task,
+// so going through the event would render the placeholder and flash. A
+// hash already in the URL is honoured; replace() keeps a bare "#" out of
+// the history.
+if (!location.hash || location.hash === "#" || location.hash === "#/") {
+  location.replace("#/board/1");
+}
+
+routes(view, {
+  "/board/:id": (_p, params$) => boardView(params$),
+  "/": () => el("p", { id: "pick" }, "pick a board, or make one above."),
 });
-
-// Deterministic, unlike history.back(): always board:1, even after a reload
-// or a bookmarked link where there is no "back" to have.
-boardBack.onclick = () => openBoard("board:1");
 
 // --- your boards (authenticated mode) --------------------------------------
 
@@ -213,7 +287,7 @@ function showMine(userId: number | string): void {
       const li = document.createElement("li");
       const name = document.createElement("span");
       name.appendChild(text(row.map((b) => (b ? b.name + (b.shared ? " · shared" : "") : ""))));
-      name.onclick = () => openBoard(`board:${id}`);
+      name.onclick = () => navigate(`/board/${id}`);
       const del = document.createElement("button");
       del.textContent = "✕";
       del.onclick = async () => {
@@ -246,7 +320,11 @@ function showMine(userId: number | string): void {
     input.value = "";
   };
 
-  openBoard(hashBoard() ?? "board:1");
+  // The board's FIRST open happened before we had an identity and a
+  // requireAuth host refused it. Re-open the one we are on — the route
+  // hasn't changed, so nothing else would.
+  if (currentBoard) openBoard(currentBoard);
+  else navigate("/board/1");
 }
 
 // --- auth ------------------------------------------------------------------
@@ -396,6 +474,5 @@ addPasskeyBtn.onclick = async () => {
 
 // --- boot ------------------------------------------------------------------
 
-// In-memory mode (no auth gate): the shared board just works. If the host
-// requires auth, this open triggers the dialog via onError instead.
-openBoard(hashBoard() ?? "board:1");
+// (Boot lands beside routes() above — the hash must be set before the
+// router reads it.)
