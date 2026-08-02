@@ -7,6 +7,95 @@ will ship.
 
 ## [Unreleased]
 
+## [0.8.1] — 2026-08-02
+
+A shakedown review (7 dimensions, each adversarially verified) found a hole
+in the protocol, a bug the poll path had been quietly covering for the
+listen path, a throttle keyed on the wrong thing, and three published
+numbers that were false. [UPGRADING.md](UPGRADING.md) is new and has the
+per-release trail — nothing here needs a migration, and nothing breaks.
+
+### Added
+
+- **`doc.write(ops)` — the answered write.** `apply()` returns void, which
+  is exactly what makes one call work on a signal, a lens and a remote doc
+  alike; the shadow of that is a writer who cannot learn the id storage
+  minted. Every app grew the same workaround: watch the echo and guess
+  which row is yours by matching its VALUE — japan's is 21 lines with a
+  ten-second timeout, and the CLI does it too (`cli.ts`, "the first ops
+  after my apply are mine"). Two people adding "Kyoto" in the same second
+  guess wrong.
+
+  `write()` resolves with the RESOLVED ops — server-minted ids in their
+  paths — and rejects when the authority refuses. On the wire it is the
+  ops frame plus an optional `id`, answered on the SAME frame shape a
+  `call()` uses, so there is no second message shape and the client's
+  existing reply demux handles it unchanged. Without an id the frame
+  behaves exactly as before: `apply()` is untouched, on the wire and in
+  its silence.
+
+  It lives on `DocHandle` ONLY, never on `OpSignal` or a lens — `Lens.apply`
+  delegates to the root and returns void, so a lens cannot honour the
+  contract and pretending otherwise would break the one-write-path rule.
+  Pinned in doc.test.ts (including two clients racing on the same value,
+  each getting its own id) and in rel.test.ts against a real Postgres
+  sequence.
+
+### Fixed
+
+- **A refused WRITE is now distinguishable from a refused OPEN.** Both
+  arrived as `{doc, error}`, so the only way to tell them apart was to read
+  the error prose — which japan does, in a chain of string matches ending
+  in "Everything else … is a refused WRITE." The frame now carries
+  `write: true`, surfaced as a third `onError(doc, error, meta)` argument;
+  two-argument handlers still compile. A rejected write also stops settling
+  the doc's `ready`, which it never should have — the doc is open and
+  working, one write was refused.
+- **A doc that died while the LISTEN connection was down is noticed on
+  reconnect.** `doc_drop` deletes the op log, so the reconnect's catch-up
+  found nothing and reported success over a doc that no longer existed:
+  every sibling process went on hosting and serving a deleted board until
+  it restarted. The poll path has had a death-detector since 0.6.0; the two
+  delivery modes now share one, hoisted to `pgSync` scope. The regression
+  test drives it honestly — it terminates the real LISTEN backend, drops
+  the doc while the socket is down, and waits for the reconnect. Verified
+  to TIME OUT with the fix removed.
+- **The auth throttle is keyed on IP *and* email, not IP alone.** Behind a
+  PaaS edge — which DEPLOY.md recommends — `remoteAddress` is the load
+  balancer, so the defaults gave ALL users combined ten login attempts a
+  minute, and one person fat-fingering a password locked out the rest.
+  Keying on the identity under attack splits that namespace. Deliberately
+  NOT per-socket, which the review proposed: a per-socket counter resets by
+  reconnecting, which is no throttle at all. The overflow eviction now
+  drops only EXPIRED slots first, so flooding the map can no longer reset
+  everyone's window in one `clear()`.
+
+### Changed
+
+- **"~1.7k lines" was 3.8k**, in README, package.json and the skill
+  description — the number that justifies vendoring at all, true at v0.2.0
+  and never revised, and copied into every scaffold. Corrected in all
+  three. DESIGN.md already budgeted JSX against "past 4k" in the same
+  release, so the repo was contradicting itself.
+- `UPGRADING.md` (new) carries the per-release upgrade trail: what
+  `epsilon:upgrade` handles, and what it deliberately does not (`db/`, app
+  files) and therefore needs from you by hand.
+
+### Known, not fixed here
+
+Queued for 0.9.0, where they can have their own migration note:
+
+- **`db/fn/` — stop treating a stored function body as a migration.**
+  Forward-only exists because DDL is not replayable; `CREATE OR REPLACE
+  FUNCTION` is. Applying one rule to both is the most expensive mistake in
+  the stack: japan defines `trip_apply` ten times to express one function,
+  79% of its `db/` is function bodies, and the ritual has already produced
+  a silent data-visibility bug.
+- **Four exports that pay no tax** — `applyOps` and `untrack` have zero
+  call sites anywhere; `batch` and `migrationStatus` have exactly one each,
+  their own tests. Removing exports is a breaking change, so they wait for
+  a minor.
+
 ## [0.8.0] — 2026-08-01
 
 The top of the stack, taken back from railroad. Epsilon's claim is that it

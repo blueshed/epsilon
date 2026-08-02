@@ -8,7 +8,7 @@ cd my-app && bun dev     # two tabs, type in one, watch the other
 ```
 
 **There is no library to install.** The runtime is the [`epsilon/`](epsilon/)
-folder in your app — ~1.7k lines of TypeScript you own, with its own tests.
+folder in your app — ~3.8k lines of TypeScript you own, with its own tests.
 `bun test` verifies your stack, in your repo, forever. Edit it; it's yours.
 
 ## The knowns

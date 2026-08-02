@@ -36,12 +36,19 @@ import { valueAt, type Op } from "./op";
 type ClientMsg =
   | { action: "open"; doc: string }
   | { action: "close"; doc: string }
-  | { action: "ops"; doc: string; ops: Op[] }
+  // `id` OPTIONAL: without it a write is fire-and-forget (apply(), the
+  // location-transparent path); with it the server replies on the SAME
+  // frame shape a call() uses, so the resolved ops — server-minted ids
+  // included — come home. No second message shape; see doc.write().
+  | { action: "ops"; doc: string; ops: Op[]; id?: number }
   | { action: "call"; id: number; method: string; params?: unknown };
 
 type ServerMsg =
   | { doc: string; v: number; ops: Op[] }
-  | { doc: string; error: string }
+  // `write: true` marks a refused WRITE. Without it this frame is a refused
+  // OPEN — two unrelated events that used to be indistinguishable, leaving
+  // consumers to classify by regexing the error prose.
+  | { doc: string; error: string; write?: true }
   | { id: number; result?: unknown; error?: string };
 
 // ---------------------------------------------------------------------------
@@ -61,7 +68,7 @@ export interface DocOpts {
    * minting included: `-` ids are storage's to assign on this path.
    * `userId` is the authenticated writer (audit trail — doc_ops.by_user).
    */
-  write?: (ops: Op[], userId?: number | string) => void | Promise<void>;
+  write?: (ops: Op[], userId?: number | string) => void | Op[] | Promise<void | Op[]>;
   /**
    * Identity gate for the OPEN snapshot: return the snapshot for this user,
    * or null/undefined to refuse (the client sees "not found" and is NOT
@@ -387,15 +394,29 @@ export function createHost(opts?: {
           }
         } else if (msg.action === "ops") {
           try {
+            let resolved: Op[];
             if (entry.write) {
               // Storage is the authority (relational tier): it applies,
               // mints ids, and re-enters via host.receive().
-              await entry.write(msg.ops, ws.data?.user?.id);
+              resolved = (await entry.write(msg.ops, ws.data?.user?.id)) || msg.ops;
             } else {
-              entry.sig.apply(mintIds(entry.sig.peek(), msg.ops));
+              resolved = mintIds(entry.sig.peek(), msg.ops);
+              entry.sig.apply(resolved);
+            }
+            // Only an id-bearing write gets a reply — apply() stays exactly
+            // as silent as it was, so this is additive on the wire.
+            if (msg.id != null) {
+              ws.send(JSON.stringify({ id: msg.id, result: resolved } satisfies ServerMsg));
             }
           } catch (err) {
-            ws.send(JSON.stringify({ doc: msg.doc, error: String(err) } satisfies ServerMsg));
+            // The refusal goes back to the WRITER via its id when it has one
+            // (a rejected promise at the call site); otherwise it takes the
+            // doc-scoped path, now marked so it can be told from a refused open.
+            if (msg.id != null) {
+              ws.send(JSON.stringify({ id: msg.id, error: String(err) } satisfies ServerMsg));
+            } else {
+              ws.send(JSON.stringify({ doc: msg.doc, error: String(err), write: true } satisfies ServerMsg));
+            }
           }
         }
       },
@@ -425,6 +446,9 @@ class RemoteDoc<T> extends Signal<T | null> {
   constructor(
     private send: (ops: Op[]) => void,
     private release: () => void,
+    private sendAwaited: (ops: Op[]) => Promise<Op[]> = () => {
+      throw new Error("[epsilon/doc] write() needs a remote");
+    },
   ) {
     super(null);
     this.arm();
@@ -458,6 +482,31 @@ class RemoteDoc<T> extends Signal<T | null> {
   override apply(ops: Op[]): void {
     this.assertOpen();
     this.send(ops);
+  }
+
+  /**
+   * apply(), but the authority answers. Resolves with the RESOLVED ops —
+   * server-minted ids in their paths — and REJECTS if the write is refused.
+   *
+   *   const [minted] = await trip.write([{ op: "add", path: "/legs/-", value }]);
+   *   select(minted.path.split("/").pop()!);          // the real id, first try
+   *
+   * Why it exists: apply() returns void so that one call works on a local
+   * signal, a lens, and a remote doc alike — location transparency. The
+   * shadow of that is a writer who cannot learn the id storage minted, and
+   * every app grew the same workaround: watch the echo and guess which row
+   * is yours by matching its VALUE. Two people adding "Kyoto" in the same
+   * second guess wrong.
+   *
+   * It lives on DocHandle ONLY, never on OpSignal or a lens — Lens.apply
+   * delegates to the root and returns void, so a lens cannot honour this
+   * contract, and pretending otherwise would break the one-write-path rule.
+   * Reach for apply() by default; reach for write() when you need the id
+   * back or the refusal in a catch.
+   */
+  write(ops: Op[]): Promise<Op[]> {
+    this.assertOpen();
+    return this.sendAwaited(ops);
   }
 
   /** Fresh pending `ready` after a refusal — called before a re-ask. @internal */
@@ -496,6 +545,10 @@ export type DocHandle<T> = OpSignal<T | null> & {
   ready: Promise<void>;
   /** Last server version applied; 0 = no snapshot yet. */
   readonly v: number;
+  /** apply() with an answer: resolves with the RESOLVED ops (server-minted
+   *  ids in their paths), rejects if the write is refused. Handle-only —
+   *  a lens delegates apply() to the root and cannot honour it. */
+  write(ops: Op[]): Promise<Op[]>;
   /** Release this handle; the last one closes the doc (see RemoteDoc.close). */
   close(): void;
 };
@@ -510,7 +563,11 @@ export interface Remote {
 export function connect(
   url: string,
   opts?: {
-    onError?: (doc: string, error: string) => void;
+    /** A doc-scoped refusal. `meta.write` is true when a WRITE was refused
+     *  and false/absent when an OPEN was — two unrelated events that shared
+     *  one shape until 0.8.1, leaving consumers to classify by error prose.
+     *  Third argument, so existing two-argument handlers still compile. */
+    onError?: (doc: string, error: string, meta?: { write?: true }) => void;
     /** Awaited on EVERY socket open — first connect and each reconnect —
      *  BEFORE queued calls flush and before docs (re)open. Authenticate here
      *  and a requireAuth host serves everything that follows. */
@@ -559,6 +616,21 @@ export function connect(
               if ((queuedOps[i] as { doc?: string }).doc === name) queuedOps.splice(i, 1);
             }
             send({ action: "close", doc: name });
+          },
+          (ops) => {
+            // The awaited write. Same queue as apply()'s — a write made
+            // while the socket is down flushes on reconnect — but it also
+            // registers a pending reply, so ws.onclose rejects it rather
+            // than leaving the caller hanging. Identical discipline to
+            // call(): a retry after reconnect is the caller's decision,
+            // because a write is not necessarily idempotent.
+            const id = nextId++;
+            const msg: ClientMsg = { action: "ops", doc: name, ops, id };
+            return new Promise<Op[]>((resolve, reject) => {
+              pending.set(id, { resolve, reject });
+              if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
+              else queuedOps.push(msg);
+            });
           },
         );
         docs.set(name, doc);
@@ -623,8 +695,10 @@ export function connect(
         return;
       }
       if ("error" in msg) {
-        docs.get(msg.doc)?.refuse(msg.error);
-        opts?.onError?.(msg.doc, msg.error);
+        // Only an OPEN refusal settles `ready` — a rejected write must not
+        // tear down a doc that is open and working.
+        if (!msg.write) docs.get(msg.doc)?.refuse(msg.error);
+        opts?.onError?.(msg.doc, msg.error, msg.write ? { write: true } : undefined);
         return;
       }
       const doc = docs.get(msg.doc);

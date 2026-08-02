@@ -94,12 +94,16 @@ export async function pgDoc<T>(
           `SELECT ${applyFn}($1, $2, $3) AS r`,
           [name, ops as unknown, userId ?? null],
         );
-        await pgReceive(host, sql, name, rows[0]!.r as { v: number | string; ops: Op[] });
+        const r = rows[0]!.r as { v: number | string; ops: Op[]; gone?: string[] };
+        await pgReceive(host, sql, name, r);
         // Docs this write dropped (`gone` — a board deleted from a mine
         // list) un-host HERE, watchers included: doc_drop's doorbell only
         // reaches processes with a listener, and the writer may have none
         // (PGlite; poll mode).
-        for (const g of (rows[0]!.r as { gone?: string[] }).gone ?? []) host.drop(g);
+        for (const g of r.gone ?? []) host.drop(g);
+        // The dispatch already resolved `-` against a sequence; hand those
+        // ops back so an awaited write() can report the id it minted.
+        return r.ops;
       },
       async open(userId) {
         if (guard) return (await guard(userId)) ? sig.peek() : null;
@@ -471,6 +475,30 @@ export async function pgSync(
 ): Promise<Sync> {
   const url = opts?.url ?? process.env.EPSILON_PG_URL;
 
+  // Names a sweep has seen a `docs` row for. Shared by BOTH delivery modes:
+  // a name that was present and stops being present was doc_dropped under
+  // us. Docs that never had a row (in-memory presence docs sharing the
+  // host) are never eligible, which is why membership is earned, not assumed.
+  const known = new Set<string>();
+
+  /** Which hosted docs still exist? Drops the ones that stopped existing.
+   *  The poll loop gets this for free from its own sweep; the listener needs
+   *  it explicitly on reconnect — doc_drop DELETEs the op log, so a doc that
+   *  died while the connection was down leaves catchUp() nothing to find and
+   *  it reports success over a corpse. */
+  async function sweepGone(): Promise<void> {
+    const names = host.names();
+    if (!names.length) return;
+    const rows = await sql`
+      SELECT name FROM docs
+      WHERE name IN (SELECT jsonb_array_elements_text(${names as any}))`;
+    const present = new Set<string>(rows.map((r: { name: string }) => r.name));
+    for (const name of names) {
+      if (present.has(name)) known.add(name);
+      else if (known.delete(name)) host.drop(name);
+    }
+  }
+
   // --- listen mode (pg installed, url known) ------------------------------
   if (url && opts?.mode !== "poll") {
     let ClientCtor: any;
@@ -507,8 +535,11 @@ export async function pgSync(
           });
           backoff = 200;
           // Anything committed while we were (re)connecting was NOTIFYd to
-          // nobody — catch every hosted doc up now, views included.
+          // nobody — catch every hosted doc up now, views included. A DEATH
+          // in that window notifies nobody either and leaves no op to catch
+          // up on, so ask the registry directly before recomposing views.
           for (const name of host.names()) await catchUp(host, sql, name);
+          await sweepGone();
           refreshViews(host);
         } catch (err) {
           console.error("[epsilon/pg] listen connect failed:", err);
@@ -537,10 +568,7 @@ export async function pgSync(
   // --- poll fallback ------------------------------------------------------
   let stopped = false;
   let inFlight = false;
-  // Names a sweep has seen a row for. A KNOWN name that stops coming back
-  // was doc_dropped under us — un-host it (host.drop). Docs that never had
-  // a row (in-memory presence docs sharing the host) are never eligible.
-  const known = new Set<string>();
+  // (`known` is declared above — both modes share one death-detector.)
   // Views watch docs this process may not host: their dependencies' (name, v)
   // pairs, remembered between sweeps — a bump, a new name, or a vanished one
   // is that view's doorbell. Swept only while a view is actually hosted.
@@ -622,19 +650,34 @@ export async function pgAuth(
   opts?: { maxAttempts?: number; windowMs?: number },
 ): Promise<void> {
   // bcrypt (cost 12) is deliberately expensive, which makes register/login a
-  // CPU faucet for anyone hammering them — a fixed window per client IP caps
-  // that. In-process on purpose: it protects THIS process's CPU; the SQL
-  // contract stays unthrottled. `authenticate` is exempt — it's one indexed
-  // SELECT, and every reconnect re-auths through it (onConnect).
+  // CPU faucet for anyone hammering them — a fixed window caps that.
+  // In-process on purpose: it protects THIS process's CPU; the SQL contract
+  // stays unthrottled. `authenticate` is exempt — it's one indexed SELECT,
+  // and every reconnect re-auths through it (onConnect).
+  //
+  // Keyed on IP **and email**, not IP alone. Behind a PaaS edge — which
+  // DEPLOY.md recommends — `remoteAddress` is the load balancer, so an
+  // IP-only key hands every user of the deployment ONE shared budget: ten
+  // logins a minute for everybody, and the first person to fat-finger a
+  // password locks out the rest. Adding the email splits the namespace by
+  // the thing actually under attack, so a real user's own retries are what
+  // count against them. Not per-SOCKET: that is free to reset by
+  // reconnecting, which is no throttle at all.
   const maxAttempts = opts?.maxAttempts ?? 10;
   const windowMs = opts?.windowMs ?? 60_000;
   const attempts = new Map<string, { n: number; resetAt: number }>();
-  function throttle(ws: any): void {
-    const key = String(ws?.remoteAddress ?? "?");
+  function throttle(ws: any, email?: string): void {
+    const key = `${ws?.remoteAddress ?? "?"}|${String(email ?? "").toLowerCase().trim()}`;
     const now = Date.now();
     const slot = attempts.get(key);
     if (!slot || now >= slot.resetAt) {
-      if (attempts.size > 10_000) attempts.clear();   // bounded memory
+      // Bounded memory. Evicting only EXPIRED slots keeps a flood from
+      // wiping live counters — the old blanket clear() meant an attacker
+      // could reset everyone's window by making the map big.
+      if (attempts.size > 10_000) {
+        for (const [k, s] of attempts) if (now >= s.resetAt) attempts.delete(k);
+        if (attempts.size > 10_000) attempts.clear();   // still full: give up, stay bounded
+      }
       attempts.set(key, { n: 1, resetAt: now + windowMs });
       return;
     }
@@ -649,8 +692,8 @@ export async function pgAuth(
   }
 
   host.method("register", async (params: { name?: string; email?: string; password?: string }, ws) => {
-    throttle(ws);
     const { name, email, password } = params ?? {};
+    throttle(ws, email);
     if (!name || !email || !password) throw new Error("name, email, and password required");
     let rows;
     try {
@@ -665,8 +708,8 @@ export async function pgAuth(
   });
 
   host.method("login", async (params: { email?: string; password?: string }, ws) => {
-    throttle(ws);
     const { email, password } = params ?? {};
+    throttle(ws, email);
     if (!email || !password) throw new Error("email and password required");
     // login() returns NULL for unknown email AND wrong password alike, with
     // uniform timing — the distinction never reaches the wire.

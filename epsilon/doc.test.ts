@@ -138,6 +138,89 @@ describe("decision 1: the server mints ids", () => {
   });
 });
 
+describe("write() — the answered write (0.8.1)", () => {
+  test("resolves with the RESOLVED ops, so the minted id comes home", async () => {
+    const a = client().doc<Board>("board");
+    await a.ready;
+
+    const resolved = await a.write([
+      { op: "add", path: "/cards/-", value: { title: "answered", done: false } } as any,
+    ]);
+
+    // No guessing, no matching by value: the id is IN the returned path.
+    expect(resolved.length).toBe(1);
+    const id = resolved[0]!.path.split("/").pop()!;
+    expect(id).not.toBe("-");
+    expect(id.length).toBe(36);
+    await until(() => a.peek()!.cards[id]?.title === "answered");
+  });
+
+  test("two writers racing on the same value each get their OWN id", async () => {
+    // The exact case value-matching gets wrong: same title, same instant.
+    const a = client().doc<Board>("board");
+    const b = client().doc<Board>("board");
+    await Promise.all([a.ready, b.ready]);
+
+    const [ra, rb] = await Promise.all([
+      a.write([{ op: "add", path: "/cards/-", value: { title: "Kyoto", done: false } } as any]),
+      b.write([{ op: "add", path: "/cards/-", value: { title: "Kyoto", done: false } } as any]),
+    ]);
+    const ida = ra[0]!.path.split("/").pop()!;
+    const idb = rb[0]!.path.split("/").pop()!;
+    expect(ida).not.toBe(idb);
+    await until(() => !!a.peek()!.cards[ida] && !!a.peek()!.cards[idb]);
+  });
+
+  test("REJECTS when the authority refuses, and tells the writer only", async () => {
+    const errors: string[] = [];
+    const a = client((_d, e) => errors.push(e)).doc<Board>("board");
+    await a.ready;
+
+    let err: Error | undefined;
+    try {
+      await a.write([{ op: "add", path: "/__proto__/hacked", value: true }]);
+    } catch (e) { err = e as Error; }
+
+    expect(err?.message).toContain("forbidden");
+    expect(({} as any).hacked).toBeUndefined();
+    // The refusal came back on the write's own id — it did NOT also spray
+    // the doc-scoped onError channel, which is for opens.
+    await new Promise((r) => setTimeout(r, 50));
+    expect(errors).toEqual([]);
+  });
+
+  test("write() through a closed handle throws, like apply()", async () => {
+    const a = client().doc<Board>("board");
+    await a.ready;
+    a.close();
+    expect(() => a.write([{ op: "replace", path: "/cards/1/done", value: true }])).toThrow("closed");
+  });
+});
+
+describe("a refused WRITE is distinguishable from a refused OPEN (0.8.1)", () => {
+  test("the error frame carries write:true; consumers stop regexing prose", async () => {
+    const seen: { doc: string; error: string; write?: boolean }[] = [];
+    const r = connect(url, {
+      onError(doc, error, meta) { seen.push({ doc, error, write: meta?.write }); },
+    });
+    remotes.push(r);
+
+    // A refused OPEN — no write flag.
+    r.doc("does-not-exist");
+    await until(() => seen.length > 0);
+    expect(seen[0]!.error).toContain("unknown doc");
+    expect(seen[0]!.write).toBeUndefined();
+
+    // A refused WRITE through the fire-and-forget path — flagged.
+    const board = r.doc<Board>("board");
+    await board.ready;
+    board.apply([{ op: "add", path: "/__proto__/nope", value: 1 }]);
+    await until(() => seen.length > 1);
+    expect(seen[1]!.error).toContain("forbidden");
+    expect(seen[1]!.write).toBe(true);
+  });
+});
+
 describe("reconnect — onConnect re-authenticates before docs re-open", () => {
   test("a dropped socket recovers its auth and its docs on its own", async () => {
     const h = createHost({ requireAuth: true });

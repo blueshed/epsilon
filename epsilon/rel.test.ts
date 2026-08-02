@@ -1235,3 +1235,86 @@ describe("the operator's door — no list, no door", () => {
     }
   });
 });
+
+// These run LAST and on their own board: the describes above are a SEQUENCE
+// ("board currently has 0 cards — removed above"), so a test that adds a row
+// mid-file breaks a later count.
+describe("write() — the answered write, through the relational tier (0.8.1)", () => {
+  test("write() hands back the SEQUENCE id the dispatch minted (0.8.1)", async () => {
+    const host = createHost();
+    await pgDoc<Board>(host, sql, "board:1", null as unknown as Board, { apply: "board_apply" });
+    const url = serve(host);
+    const board = client(url).doc<Board>("board:1");
+    await board.ready;
+
+    const resolved = await board.write([
+      { op: "add", path: "/cards/-", value: { text: "answered by postgres" } } as any,
+    ]);
+
+    // The stored function resolved `-` against a sequence; that resolution
+    // is what comes back, not a guess made by watching the echo.
+    expect(resolved.length).toBeGreaterThan(0);
+    const added = resolved.find((o) => o.path.startsWith("/cards/"))!;
+    const id = added.path.split("/").pop()!;
+    expect(id).toMatch(/^\d+$/);                        // a sequence id, not a uuid
+    const [row] = await sql`SELECT text FROM cards WHERE id = ${id}`;
+    expect(row.text).toBe("answered by postgres");      // the id names a REAL row
+    await until(() => board.peek()!.cards[id]?.text === "answered by postgres");
+  });
+
+  test("a refused relational write rejects the writer's promise", async () => {
+    const host = createHost({ requireAuth: true });
+    await pgAuth(host, sql);
+    await pgDoc<Board>(host, sql, "board:1", null as unknown as Board, { apply: "board_apply" });
+    const url = serve(host);
+    const r = client(url);
+    await r.call("login", { email: "pete@rel.test", password: "pw" });
+    const board = r.doc<Board>("board:1");
+    await board.ready;
+
+    let err: Error | undefined;
+    try {
+      await board.write([{ op: "add", path: "/__proto__/x", value: 1 }]);
+    } catch (e) { err = e as Error; }
+    expect(err).toBeDefined();
+    // The doc is still open and usable — a rejected write is not a refusal
+    // of the doc itself.
+    expect(board.peek()).not.toBeNull();
+  });
+});
+
+describe("a doc that dies while the listener is down (0.8.1)", () => {
+  test("LISTEN mode notices on reconnect — doc_drop leaves no op to catch up on", async () => {
+    // The bug: doc_drop DELETEs the op log, so catchUp() over a dropped doc
+    // finds nothing and reports SUCCESS. The poll loop caught this with its
+    // own sweep; the listener had no equivalent and kept hosting a corpse.
+    // The reconnect must happen INSIDE one pgSync — that is the only time
+    // the death-detector's memory of "this doc had a row" is meaningful.
+    const [u] = await sql`SELECT register('Listener', 'listener@gone.test', 'pw') AS u`;
+    const uid = Number(u.u.id);
+    await sql`INSERT INTO docs (name, v, data, open_fn) VALUES (${"mine:" + uid}, 0, NULL, 'mine_open')`;
+    const [made] = await sql`SELECT mine_apply(${"mine:" + uid},
+      ${[{ op: "add", path: "/boards/-", value: { name: "doomed" } }] as any}, ${uid}) AS r`;
+    const bid = Number(made.r.ops[0].value.id);
+
+    const host = createHost();
+    const sqlH = freshSql();
+    await pgDoc<Board>(host, sqlH, `board:${bid}`, null as unknown as Board, { apply: "board_apply" });
+    const sync = await pgSync(host, sqlH, { url: PG_URL });
+    stops.push(sync.stop);
+    expect(sync.mode).toBe("listen");
+    expect(host.names()).toContain(`board:${bid}`);
+
+    // Kill the LISTEN backend and drop the doc in the same breath: the
+    // doorbell rings into a dead socket, exactly as it would if Postgres
+    // bounced or the network blinked.
+    await sql`SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+              WHERE query LIKE ${"LISTEN%"} AND pid <> pg_backend_pid()`;
+    await sql`SELECT doc_drop(${"board:" + bid})`;
+    expect((await sql`SELECT 1 FROM docs WHERE name = ${"board:" + bid}`).length).toBe(0);
+
+    // The listener reconnects on its own; the sweep on that reconnect is
+    // the only thing that can notice. Without it this hangs until timeout.
+    await until(() => !host.names().includes(`board:${bid}`), 8000);
+  });
+});

@@ -1,6 +1,6 @@
 ---
 name: epsilon
-description: "This app's realtime stack — op-carrying signals, doc sync over one WebSocket, relational Postgres with stored-function writes, schema-native users with auth UI. The runtime is the epsilon/ folder IN this repo (read it — ~1.7k lines). Use for any shared state, live updates, multi-user, collaborative, or realtime work in this app. Do NOT add Firebase/Supabase/socket.io/React Query — the stack is already here."
+description: "This app's realtime stack — op-carrying signals, doc sync over one WebSocket, relational Postgres with stored-function writes, schema-native users with auth UI. The runtime is the epsilon/ folder IN this repo (read it — ~3.8k lines). Use for any shared state, live updates, multi-user, collaborative, or realtime work in this app. Do NOT add Firebase/Supabase/socket.io/React Query — the stack is already here."
 ---
 
 # epsilon — how this app does realtime
@@ -52,6 +52,20 @@ await remote.call("history", { doc: "board:2", before, after });   // the op log
 op touches that slice, never on a sibling's keystroke. `text(sig)`/`effect`
 are the state-channel fallback (always correct; the only choice for
 `map()`ed values, which carry no ops).
+
+**Need the id back? `write()`, not `apply()`** (0.8.1). `apply()` returns
+void — that is what makes one call work on a signal, a lens and a remote
+doc alike. When you need the id the server just minted, or the refusal in
+a `catch`, use the handle's `write()`:
+
+```ts
+const [minted] = await board.write([{ op: "add", path: "/cards/-", value: { text } }]);
+select(minted.path.split("/").pop()!);        // the real id, first try
+```
+
+Handle-only — a lens delegates `apply()` to its root and cannot answer.
+**Never watch the echo and match your new row by VALUE**: two people adding
+"Kyoto" in the same second pick each other's.
 
 **Screens, not one page** (0.8.0). `routes(target, table)` is the hash
 router; `route(pattern)` is a `Signal<params | null>`; `navigate(path)`
