@@ -1,7 +1,7 @@
 // The primitive's contract, pinned. Each describe maps to a DESIGN.md claim.
 import { describe, test, expect } from "bun:test";
 import {
-  signal, computed, effect, pushDisposeScope, popDisposeScope,
+  signal, computed, effect, batch, pushDisposeScope, popDisposeScope,
 } from "./signal";
 import type { Op } from "./op";
 
@@ -240,6 +240,45 @@ describe("a lens tracks its own slice", () => {
     expect(runs).toBe(1);                                 // sibling, ignored
     doc.apply([{ op: "replace", path: "/r/x/n", value: 9 }]);
     expect(runs).toBe(2);
+    dispose();
+  });
+});
+
+// Restored in 0.9.1. Deleted in 0.9.0 on the reasoning that apply(ops[])
+// already batches "the only channel an app writes through" — which missed
+// that an app also holds plain local signals, and two sets on two DIFFERENT
+// signals are not ops on one doc. japan's line.ts broke on the upgrade.
+describe("batch() — coalesce across several signals", () => {
+  test("dependents run once, not once per set", () => {
+    const me = signal<string | null>(null);
+    const refused = signal("nope");
+    let runs = 0;
+    pushDisposeScope();
+    effect(() => { me.get(); refused.get(); runs++; });
+    const dispose = popDisposeScope();
+    expect(runs).toBe(1);
+
+    me.set("pete");
+    refused.set("");
+    expect(runs).toBe(3);                       // unbatched: one flush each
+
+    runs = 0;
+    batch(() => { me.set("ann"); refused.set("x"); });
+    expect(runs).toBe(1);                       // one flush for both
+    dispose();
+  });
+
+  test("a throw inside still releases the depth and flushes", () => {
+    const a = signal(0);
+    let runs = 0;
+    pushDisposeScope();
+    effect(() => { a.get(); runs++; });
+    const dispose = popDisposeScope();
+    runs = 0;
+    expect(() => batch(() => { a.set(1); throw new Error("boom"); })).toThrow("boom");
+    expect(runs).toBe(1);                       // not stranded
+    a.set(2);
+    expect(runs).toBe(2);                       // depth released
     dispose();
   });
 });

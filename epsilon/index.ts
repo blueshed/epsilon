@@ -2,7 +2,7 @@
 export type { Op } from "./op";
 export { splitPath, valueAt } from "./op";
 export {
-  Signal, signal, computed, effect,
+  Signal, signal, computed, effect, batch,
   pushDisposeScope, popDisposeScope, trackDispose, hasActiveDisposeScope,
 } from "./signal";
 export type { OpSignal, ReadonlySignal, SignalOptions, Dispose } from "./signal";

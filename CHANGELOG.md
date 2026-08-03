@@ -7,6 +7,23 @@ will ship.
 
 ## [Unreleased]
 
+## [0.9.1] — 2026-08-02
+
+### Fixed
+
+- **`batch()` is back.** 0.9.0 removed it on the reasoning that
+  `apply(ops[])` "already batches the only channel an app writes through."
+  That was wrong: an app also holds plain local signals, and two `.set()`
+  calls on two DIFFERENT signals are not ops on one doc — nothing else
+  coalesces them. The scan that found "one call site, its own test" ran
+  against committed code while the real consumer was still in a working
+  tree, so the removal looked safe and wasn't. japan's `client/line/line.ts`
+  broke on the upgrade: `batch(() => { me.set(user); refused.set(""); })`.
+  Restored with tests that pin the coalescing and the throw path.
+
+  The lesson is the removal criterion, not the function: "no call sites"
+  measured across one repo at one moment is not evidence of no consumers.
+
 ## [0.9.0] — 2026-08-02
 
 The first release that ends **smaller than the one before it**: 3,834 →

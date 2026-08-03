@@ -33,6 +33,8 @@ type OpsHandler = (ops: Op[] | undefined) => void;
 
 let currentListener: Listener | null = null;
 let currentDeps: Set<Signal<any>> | null = null;
+let batchDepth = 0;
+const pendingEffects = new Set<Listener>();
 
 // === Flush scheduler (railroad's, verbatim in behavior) ===
 
@@ -215,6 +217,10 @@ export class Signal<T> implements OpSignal<T> {
       catch (err) { console.error("[epsilon/signal] onOps handler threw:", err); }
     }
     if (this.listeners.size === 0) return;
+    if (batchDepth > 0) {
+      for (const l of this.listeners) pendingEffects.add(l);
+      return;
+    }
     scheduleListeners(this.listeners);
   }
 
@@ -413,4 +419,41 @@ export function computed<T>(
 
 export function signal<T>(initialValue: T, options?: SignalOptions<T>): Signal<T> {
   return new Signal(initialValue, options);
+}
+
+/**
+ * Coalesce writes across SEVERAL signals so dependent effects run once.
+ *
+ *   batch(() => { me.set(user); refused.set(""); });
+ *
+ * Removed in 0.9.0 on the grounds that `apply(ops[])` already batches "the
+ * only channel an app writes through" — which was wrong. An app also holds
+ * plain local signals, and two `.set()` calls on two DIFFERENT signals are
+ * not ops on one doc; nothing else coalesces them. Restored in 0.9.1 when
+ * the upgrade broke exactly that call in the field.
+ */
+export function batch(fn: () => void): void {
+  let flushError: unknown;
+  let flushThrew = false;
+  batchDepth++;
+  try {
+    fn();
+  } finally {
+    batchDepth--;
+    if (batchDepth === 0 && pendingEffects.size > 0) {
+      const pending = [...pendingEffects];
+      pendingEffects.clear();
+      if (activeFlush) {
+        enqueue(activeFlush, pending);
+      } else {
+        try {
+          scheduleListeners(pending);
+        } catch (err) {
+          flushThrew = true;
+          flushError = err;
+        }
+      }
+    }
+  }
+  if (flushThrew) throw flushError;
 }
