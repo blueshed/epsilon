@@ -7,10 +7,42 @@ will ship.
 
 ## [Unreleased]
 
-0.9.0 is a SUBTRACTION release — the first one. Nine releases have each
-added (1,650 → 3,834 lines) while the pitch that justifies vendoring at all
-says "small enough to read". `db/fn/` is the first item and the only one
-that deletes a *concept*; the queued deletions follow.
+## [0.9.0] — 2026-08-02
+
+The first release that ends **smaller than the one before it**: 3,834 →
+3,768. Nine releases had each added while the pitch that justifies
+vendoring says "small enough to read", and nobody was measuring. Two
+concepts deleted, one grain inverted.
+
+### Changed
+
+- **A lens tracks its own slice, and `bind()` is gone.** The skill said, in
+  bold, in its rules section: *"`list()` for collections, `bind()` for
+  scalars… no effects that rebuild rows from `doc.data`."* The only
+  production app answered with **116 effects and zero binds**.
+
+  That is not the app being wrong. `Lens.get()` delegated tracking to the
+  ROOT — DESIGN.md called it "known v0 looseness" — so an effect over a
+  lens re-ran on every unrelated write. Correct, never minimal. `bind()`
+  existed to buy back precision the ops channel already had, and nobody
+  paid, because cheap-and-correct beats precise-and-correct every time.
+
+  `Lens.onOps` already knew exactly which ops reach a slice: it rebases
+  descendants, collapses ancestor writes, skips siblings. `get()` threw all
+  of that away. It now tracks a per-lens tick fed by that same `onOps`, so
+  `effect(() => …lens.get())` **is** the precise scalar path — and `bind()`
+  had nothing left to do. The cheap path is now the correct one, and nobody
+  has to read a rule.
+
+  This is 0.7.0's own lesson applied to ourselves. That release found an
+  agent following the grain — *"a dead read cost five lines, a live one
+  forty"* — and **inverted the grain instead of restating the rule.**
+  Nobody had done it for `bind`; restating was tried in three documents and
+  failed 116 times. DESIGN.md now carries the rule: *do not restate a rule
+  the grain fights — change the grain.*
+
+  One cost: a lens read reactively outside a dispose scope now warns,
+  because it holds a subscription. Same rule `list()` already had.
 
 ### Added
 
@@ -70,6 +102,10 @@ that deletes a *concept*; the queued deletions follow.
   wrapped around a latent bug — a computed already returned by `route()`
   closes over the nulled signal and silently stops updating. A page has one
   hash for the life of the page. Own it once.
+- **`bind()`** — superseded by the lens fix above. `ui.ts` is three
+  primitives now (`text`, `list`, `mount`) rather than five.
+- **`when()`** — shipped in 0.8.0, never prescribed in any document, and no
+  consumer in any app by 0.9.0. Two days old.
 - **The bare `Promise<Node>` route handler.** The file documented it as
   leaking in the stack's own terms (post-await bindings have no owner scope
   — browser JS has no AsyncContext). Shipping a shape whose own docs say
