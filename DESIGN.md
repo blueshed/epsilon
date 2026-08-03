@@ -19,7 +19,7 @@ board.apply(ops);   // mutate in place + notify, passing the ops along
 | Doc | broadcast ops | `doc.apply(ops)` — no dataVersion, no touch |
 | `at("/cards")` | narrowed ops | lens signal: rebases paths, narrows value |
 | `list()` | row ops | routes: add→create, remove→delete; content flows per-row |
-| `bind()` | slice ops | one setter, run only when its slice is touched |
+| `at()` lens | slice ops | tracks its OWN slice — an effect over it is the precise path |
 | `.map()` | — | computed values; falls back to recompute |
 
 ## What this deletes (vs delta + railroad)
@@ -49,11 +49,10 @@ Any line not paying one of these taxes is deletable.
 ## The pixels (v0 — ui.ts)
 
 - `list()` routes **membership only** (add/remove/root-reconcile). Field ops never reach it — each row renders from its own `at()` lens, so content updates flow lens → binding. No diffing anywhere; snapshots diff *key sets*, and surviving rows keep their nodes.
-- `bind(lens, set)` is the **precise scalar path** (2026-07-29, from the field report's §4): set() runs only when an op touches the lens's slice — sibling writes never reach it; ancestor replaces and snapshots fall through like `list()`'s reconcile. O(change) for field content.
+- **A lens read in an `effect` is the precise scalar path** (0.9.0). `Lens.get()` tracks its own slice: sibling writes never reach it; ancestor replaces and snapshots fall through like `list()`'s reconcile. O(change) for field content, with no second primitive.
 - `text(sig)` is the state-channel binding — the always-correct fallback, one effect per node, and the only choice for computed/`map()` values (they carry no ops).
-- `when(cond, truthy, falsy?)` (0.8.0) swaps on the **truthiness transition only** — a branch that stays truthy keeps its nodes and its bindings, so a value change inside it flows through a lens instead of rebuilding. Same rule as `list()`, applied to a region instead of a collection.
-- `mount(target, render)` (0.8.0) is the **app root**: it brackets a dispose scope, so the scope rules hold all the way down, and returns the disposer. A top-level `bind`/`list`/`when` warns because it has no owner; this is the answer.
-- Known v0 looseness: lens `get()` tracks the root, so state *effects* over-fire on unrelated changes (correct, not minimal) — reach for `bind` where that matters.
+- `mount(target, render)` (0.8.0) is the **app root**: it brackets a dispose scope, so the scope rules hold all the way down, and returns the disposer. A top-level `list()` or lens read warns because it has no owner; this is the answer.
+- **Fixed in 0.9.0** (was "known v0 looseness"): lens `get()` used to track the ROOT, so effects over-fired on unrelated changes — correct, never minimal. `bind()` existed to buy that precision back, and the only production app answered with 116 effects and zero binds, because the imprecise path was the cheap one. The lens now tracks its own slice, so the cheap path IS the precise one and `bind()` was deleted. **Do not restate a rule the grain fights — change the grain.**
 
 ## Routing (route.ts, 0.8.0)
 
@@ -67,7 +66,7 @@ The gap was found by comparing two apps on the two stacks: `hump` (railroad) has
 
 SVG has always worked: a caller building rows with `createElementNS` hands `list()` nodes already in the right namespace, which is how japan draws seventy stations. The hole was `document.createElement("circle")` — an HTML element in an SVG parent, which the browser keeps in the tree and never paints.
 
-`list()`, `when()` and `mount()` now **report** it and name the fix. They do not adopt the namespace, and that is the medium tax being declined deliberately: adopting means RECREATING the element, and railroad can only do that because its props system re-applies every reactive binding to the new node. Epsilon has no props system, so a recreate would silently drop whatever the caller attached by hand — `addEventListener` above all. Losing a click handler is a worse failure than an unpainted circle you are being told about.
+`list()` and `mount()` now **report** it and name the fix. They do not adopt the namespace, and that is the medium tax being declined deliberately: adopting means RECREATING the element, and railroad can only do that because its props system re-applies every reactive binding to the new node. Epsilon has no props system, so a recreate would silently drop whatever the caller attached by hand — `addEventListener` above all. Losing a click handler is a worse failure than an unpainted circle you are being told about.
 
 ## A function body is not a migration (2026-08-02)
 

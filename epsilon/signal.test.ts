@@ -179,3 +179,67 @@ describe("safety", () => {
     dispose();
   });
 });
+
+// The grain inversion (0.9.0). Before this, Lens.get() tracked the ROOT, so
+// an effect over a lens re-ran on every unrelated write — correct, never
+// minimal. That is the whole reason bind() existed, and the reason japan
+// wrote 116 effects and zero binds: the cheap path was the imprecise one.
+describe("a lens tracks its own slice", () => {
+  test("a sibling write does NOT re-run an effect over the lens", () => {
+    const doc = signal<{ cards: Record<string, { title: string }> }>({
+      cards: { "1": { title: "one" }, "2": { title: "two" } },
+    });
+    const seen: string[] = [];
+    pushDisposeScope();
+    const one = doc.at<string>("/cards/1/title");
+    effect(() => { seen.push(one.get()); });
+    const dispose = popDisposeScope();
+    expect(seen).toEqual(["one"]);
+
+    doc.apply([{ op: "replace", path: "/cards/2/title", value: "sibling" }]);
+    expect(seen).toEqual(["one"]);                       // untouched
+
+    doc.apply([{ op: "replace", path: "/cards/1/title", value: "mine" }]);
+    expect(seen).toEqual(["one", "mine"]);               // its own path
+
+    doc.apply([{ op: "replace", path: "/cards/1", value: { title: "row" } }]);
+    expect(seen).toEqual(["one", "mine", "row"]);        // an ancestor replace
+
+    doc.set({ cards: { "1": { title: "snap" } } });
+    expect(seen).toEqual(["one", "mine", "row", "snap"]); // a root snapshot
+
+    dispose();
+    doc.apply([{ op: "replace", path: "/cards/1/title", value: "late" }]);
+    expect(seen.length).toBe(4);                          // torn down
+  });
+
+  test("recompute-from-state still holds — the law is not traded away", () => {
+    const doc = signal<{ a: { b: number } }>({ a: { b: 1 } });
+    pushDisposeScope();
+    const b = doc.at<number>("/a/b");
+    let last = 0;
+    effect(() => { last = b.get(); });
+    const dispose = popDisposeScope();
+
+    // An op that never mentions /a/b but replaces its ancestor.
+    doc.apply([{ op: "replace", path: "/a", value: { b: 42 } }]);
+    expect(last).toBe(42);
+    expect(b.get()).toBe(42);        // peek and track agree
+    dispose();
+  });
+
+  test("composed lenses narrow further, not wider", () => {
+    const doc = signal<{ r: Record<string, { n: number }> }>({ r: { x: { n: 1 }, y: { n: 1 } } });
+    let runs = 0;
+    pushDisposeScope();
+    const xn = doc.at("/r").at<number>("/x/n");
+    effect(() => { xn.get(); runs++; });
+    const dispose = popDisposeScope();
+    expect(runs).toBe(1);
+    doc.apply([{ op: "replace", path: "/r/y/n", value: 9 }]);
+    expect(runs).toBe(1);                                 // sibling, ignored
+    doc.apply([{ op: "replace", path: "/r/x/n", value: 9 }]);
+    expect(runs).toBe(2);
+    dispose();
+  });
+});

@@ -14,7 +14,7 @@ if (typeof globalThis.document === "undefined") {
 import { describe, test, expect } from "bun:test";
 import { signal, effect, pushDisposeScope, popDisposeScope, type OpSignal } from "./signal";
 import { createHost, connect } from "./doc";
-import { list, text, bind, when, mount } from "./ui";
+import { list, text, mount } from "./ui";
 
 interface Card { id: number; title: string; done: boolean }
 type Cards = Record<string, Card>;
@@ -101,17 +101,18 @@ describe("list() — membership router", () => {
   });
 });
 
-describe("bind() — the precise scalar path", () => {
+describe("a lens in an effect — the precise scalar path", () => {
   test("sibling ops never fire it; its own path, ancestors, and snapshots do", () => {
     const sig = signal<{ cards: Cards }>({ cards: two() });
     const calls: string[] = [];
     pushDisposeScope();
-    bind(sig.at<string>("/cards/1/title"), (v) => calls.push(String(v)));
+    const title = sig.at<string>("/cards/1/title");
+    effect(() => { calls.push(String(title.get())); });
     const dispose = popDisposeScope();
     expect(calls).toEqual(["one"]);                                   // initial paint
 
     sig.apply([{ op: "replace", path: "/cards/2/title", value: "sibling" }]);
-    expect(calls).toEqual(["one"]);                                   // the §4 fix: not re-run
+    expect(calls).toEqual(["one"]);                                   // not re-run
 
     sig.apply([{ op: "replace", path: "/cards/1/title", value: "mine" }]);
     expect(calls).toEqual(["one", "mine"]);
@@ -127,7 +128,7 @@ describe("bind() — the precise scalar path", () => {
     expect(calls.length).toBe(4);                                     // torn down
   });
 
-  test("a bound DOM prop rides the ops channel end to end", async () => {
+  test("a row's lens rides the ops channel end to end", async () => {
     const sig = signal<Cards | null>(two());
     const root = document.createElement("ul");
     let runs = 0;
@@ -135,17 +136,18 @@ describe("bind() — the precise scalar path", () => {
     root.appendChild(
       list(sig, (row) => {
         const li = document.createElement("li");
-        bind(row.at<string>("/title"), (t) => { runs++; li.textContent = t ?? ""; });
+        const t = row.at<string>("/title");
+        effect(() => { runs++; li.textContent = t.get() ?? ""; });
         return li;
       }),
     );
     const dispose = popDisposeScope();
     document.body.appendChild(root);
     await tick();
-    expect(runs).toBe(2);                                             // one initial set per row
+    expect(runs).toBe(2);                                             // one per row
 
     sig.apply([{ op: "replace", path: "/1/title", value: "edited" }]);
-    expect(runs).toBe(3);                                             // ONLY row 1 re-ran
+    expect(runs).toBe(3);                                             // ONLY row 1
     expect(root.textContent).toBe("editedtwo");
     dispose();
   });
@@ -186,82 +188,6 @@ describe("postgres to pixel (minus postgres)", () => {
 });
 
 // === when(), mount(), and the SVG guard ===
-
-describe("when()", () => {
-  test("swaps on the truthiness transition only — a truthy branch is never rebuilt", async () => {
-    const root = document.createElement("div");
-    document.body.appendChild(root);
-    const cond = signal<string>("");
-    let builds = 0;
-
-    const dispose = mount(root, () =>
-      when(cond, () => {
-        builds++;
-        const el = document.createElement("p");
-        effect(() => { el.textContent = cond.get(); });
-        return el;
-      }, () => document.createElement("hr")),
-    );
-    await tick();
-    expect(root.querySelector("hr")).not.toBeNull();
-    expect(builds).toBe(0);
-
-    cond.set("a");
-    await tick();
-    expect(root.querySelector("p")?.textContent).toBe("a");
-    expect(builds).toBe(1);
-
-    // Still truthy — the branch keeps its node AND its effect.
-    const node = root.querySelector("p")!;
-    cond.set("b");
-    await tick();
-    expect(builds).toBe(1);
-    expect(root.querySelector("p")).toBe(node);
-    expect(node.textContent).toBe("b");
-
-    cond.set("");
-    await tick();
-    expect(root.querySelector("p")).toBeNull();
-    expect(root.querySelector("hr")).not.toBeNull();
-    dispose();
-  });
-
-  test("a branch's effects are disposed when the parent scope tears down", async () => {
-    const root = document.createElement("div");
-    document.body.appendChild(root);
-    const cond = signal(true);
-    let cleanups = 0;
-
-    const dispose = mount(root, () =>
-      when(cond, () => {
-        const el = document.createElement("p");
-        effect(() => () => { cleanups++; });
-        return el;
-      }),
-    );
-    await tick();
-    expect(cleanups).toBe(0);
-
-    dispose();
-    expect(cleanups).toBe(1);
-    expect(root.children.length).toBe(0);
-  });
-
-  test("accepts a plain function as the condition", async () => {
-    const root = document.createElement("div");
-    document.body.appendChild(root);
-    const n = signal(0);
-    const dispose = mount(root, () =>
-      when(() => n.get() > 2, () => document.createElement("b")),
-    );
-    await tick();
-    expect(root.querySelector("b")).toBeNull();
-    n.set(5);
-    await tick();
-    expect(root.querySelector("b")).not.toBeNull();
-    dispose();
-  });
-});
 
 describe("mount()", () => {
   test("disposes everything it bracketed, and removes its nodes", async () => {
@@ -320,7 +246,8 @@ describe("SVG", () => {
     const dispose = mount(svg, () =>
       list(cards, (row) => {
         const c = document.createElementNS(SVG_NS, "circle");
-        bind(row.at<string>("/title"), (t) => c.setAttribute("aria-label", t));
+        const t = row.at<string>("/title");
+        effect(() => c.setAttribute("aria-label", t.get() ?? ""));
         return c;
       }),
     );

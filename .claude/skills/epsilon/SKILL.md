@@ -41,17 +41,20 @@ const remote = connect(`${location.protocol === "https:" ? "wss" : "ws"}://${loc
 const board = remote.doc<Board>("board:1");
 await board.ready;               // REJECTS if the open is refused (also reported via onError)
 const cards = board.at<Record<string, Card>>("/cards");
-list(cards, (card) => { ...bind(card.at<string>("/text"), (t) => { el.textContent = t ?? ""; })... });
+list(cards, (card) => { const t = card.at<string>("/text"); effect(() => { el.textContent = t.get() ?? ""; }); ... });
 cards.apply([{ op: "add", path: "/-", value: { text } }]);         // server mints; echo renders
 await remote.call("login" | "register" | "authenticate", params);  // then re-ask: remote.doc("board:1")
 await remote.call("undo", { doc: "board:2" });                     // YOUR last write, reverted ({ v } for a specific one)
 await remote.call("history", { doc: "board:2", before, after });   // the op log back: newest first, named, paged by v
 ```
 
-`bind(lens, set)` is the precise scalar path — set() re-runs only when an
-op touches that slice, never on a sibling's keystroke. `text(sig)`/`effect`
-are the state-channel fallback (always correct; the only choice for
-`map()`ed values, which carry no ops).
+**A lens read inside an `effect` IS the precise path** — the effect re-runs
+only when an op touches that slice, never on a sibling's keystroke. Narrow
+with `at()` first, then read: `const t = row.at("/title"); effect(() => …
+t.get())`. Reading the whole doc in an effect (`doc.get()`) tracks the whole
+doc, which is correct but re-runs on every write — narrow, then read.
+(There is no `bind()`. Until 0.9.0 a lens tracked the root, so `bind` existed
+to buy back precision; the lens is precise now and `bind` was deleted.)
 
 **Need the id back? `write()`, not `apply()`** (0.8.1). `apply()` returns
 void — that is what makes one call work on a signal, a lens and a remote
@@ -76,18 +79,15 @@ Params change WITHIN a pattern without re-running the handler
 the lens follow the param.
 
 ```ts
-mount(document.getElementById("app")!, () =>            // the app root's scope
-  when(signedIn, () => shell(), () => loginForm()));    // swaps on truthiness only
+mount(document.getElementById("app")!, () => shell());   // the app root's scope
 routes(main, { "/": () => tripList(), "/trips/:id": (p, p$) => trip(p$) });
 ```
 
-`mount()` is what a top-level `bind`/`list`/`when` warns for the want of.
-`when()` swaps only when truthiness FLIPS — inside a branch, react with a
-lens, not by rebuilding.
+`mount()` is what a top-level `list()` or lens-read warns for the want of.
 
 **SVG:** build nodes with `document.createElementNS("http://www.w3.org/
 2000/svg", tag)`. `createElement("circle")` in an SVG parent is an HTML
-element that never paints; `list`/`when`/`mount` warn, and deliberately do
+element that never paints; `list`/`mount` warn, and deliberately do
 not rewrite it — that would mean recreating the node and dropping your
 listeners.
 
@@ -132,8 +132,9 @@ users/sessions, reload-worthy for doc tables.
   a dispatch also stamps `updated_by`/`updated_at`, the echo must widen from
   the scalar path to the whole row, or a recompute won't match what clients
   hold.
-- **`list()` for collections, `bind()` for scalars, lenses for content.**
-  No effects that rebuild rows from `doc.data`.
+- **`list()` for collections; a NARROWED lens read in an effect for scalars.**
+  `at()` down to the field, then `get()` — an effect over the whole doc is
+  correct but re-runs on every write.
 - **Close what you leave.** `remote.doc()` handles are refcounted — call
   `.close()` when a view is done with a doc. Writes through a closed
   handle throw.

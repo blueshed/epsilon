@@ -1,32 +1,33 @@
 /**
- * UI — ops to pixels. Five primitives, no diffing.
+ * UI — ops to pixels. THREE primitives, no diffing.
  *
- *   text(sig)          — a Text node an effect keeps current (state channel:
- *                        always correct, the fallback — and the only choice
- *                        for computed/map() values, which carry no ops).
- *   bind(lens, set)    — the PRECISE scalar path: set() runs only when an op
- *                        TOUCHES the lens's slice (the lens rebases and
- *                        filters), not on every root change. O(change) for
- *                        field content, the way list() is for membership.
+ *   text(sig)          — a Text node an effect keeps current.
  *   list(sig, render)  — a keyed region that routes MEMBERSHIP ops only:
  *                        add → create row, remove → drop row, root → reconcile
  *                        key sets. Field and row-content ops never touch
- *                        list() at all — each row is rendered from its own
- *                        at() lens, so content updates flow through the lens
- *                        to whatever bindings the row made. list() is ~a
- *                        routing table; the lens is the update path.
- *   when(cond, t, f?)  — conditional region. Swaps on the TRUTHINESS
- *                        transition only, so a branch that stays truthy is
- *                        never rebuilt and keeps its DOM and its bindings.
+ *                        list() at all — each row renders from its own at()
+ *                        lens. list() is ~a routing table; the lens is the
+ *                        update path.
  *   mount(target, fn)  — the app root: brackets a dispose scope around fn so
  *                        the scope rules hold all the way down, and returns
  *                        the disposer that unwinds it.
+ *
+ * There is no bind(). Until 0.9.0 a lens's get() tracked the ROOT, so an
+ * effect over a lens re-ran on every unrelated write — correct but never
+ * minimal — and bind() existed to buy back the precision the ops channel
+ * already had. The only production app answered that with 116 effects and
+ * zero binds, because the imprecise path was the cheap one. 0.9.0 narrowed
+ * Lens.get() to track its own slice instead, so `effect(() => …lens.get())`
+ * IS the precise scalar path, and bind() had nothing left to do.
+ *
+ * There is no when() either — it shipped in 0.8.0, was never prescribed
+ * anywhere, and had no consumer in any app by 0.9.0.
  *
  * Identity: rows are keyed by the collection's own ids (Record<string, T>) —
  * minted by the store, carried through the ops, never guessed. Order is
  * arrival order; position is model data (see DESIGN.md non-goals).
  *
- * when() and mount() are ports from railroad (0.11.0).
+ * mount() is a port from railroad (0.11.0).
  *
  * SVG: every region here works inside <svg> — japan draws seventy stations
  * through list() — because a caller building rows with createElementNS hands
@@ -92,24 +93,6 @@ export function text(sig: ReadonlySignal<unknown>): Text {
   const node = document.createTextNode("");
   effect(() => { node.textContent = String(sig.get() ?? ""); });
   return node;
-}
-
-/**
- * Ops-driven scalar binding. set() runs once now, then only when an op
- * touches this slice: sibling writes never reach it (Lens.onOps rebases and
- * drops them), while ancestor replaces and snapshot/recompute fall through
- * exactly as list()'s reconcile does. Reads by peek() — the value, not the
- * op, is what's rendered (the law). Returns the unsubscribe; auto-disposed
- * inside a dispose scope, like every onOps.
- */
-export function bind<T>(sig: OpSignal<T>, set: (value: T) => void): () => void {
-  if (!hasActiveDisposeScope()) {
-    console.warn(
-      "[epsilon/ui] bind() created outside a dispose scope — it can never be torn down.",
-    );
-  }
-  set(sig.peek());
-  return sig.onOps(() => set(sig.peek()));
 }
 
 export function list<T>(
@@ -186,88 +169,6 @@ export function list<T>(
   const frag = document.createDocumentFragment();
   frag.appendChild(anchor);
   queueMicrotask(() => { if (!disposed && sig.peek() != null) reconcile(); });
-  return frag;
-}
-
-/**
- * Conditional region. Swaps DOM only when truthiness TRANSITIONS — a value
- * change within the same branch ("a" → "b", 1 → 2) does not rebuild it, so
- * the branch keeps its nodes and whatever bind()/list() it made. React to
- * value changes with a signal inside the branch, the way a list() row does.
- *
- *   when(signedIn, () => dashboard(), () => loginForm())
- *
- * `condition` is a signal or a plain function (wrapped in a computed).
- */
-export function when(
-  condition: ReadonlySignal<unknown> | (() => unknown),
-  truthy: () => Node,
-  falsy?: () => Node,
-): Node {
-  if (!hasActiveDisposeScope()) warnScopeless("when");
-  const anchor = document.createComment("when");
-  let currentNodes: Node[] = [];
-  let currentDispose: Dispose | null = null;
-  let wasTruthy: boolean | undefined = undefined;
-  let disposed = false;
-
-  const sig: ReadonlySignal<unknown> = typeof condition === "function"
-    ? computed(condition)
-    : condition;
-
-  function swap(): void {
-    // The first swap is deferred (the anchor has no parent until the returned
-    // fragment is appended), so a queued microtask can fire AFTER the owning
-    // scope tore down — e.g. a list() row added and removed in one flush.
-    // Without this guard it rebuilds the branch and leaks its effects: the
-    // disposer lands in currentDispose, which nothing reads once cleanup has
-    // run. Checking anchor.parentNode is not enough — after a routes()
-    // teardown the anchor can still sit in a detached-but-parented subtree.
-    if (disposed) return;
-    const isTruthy = !!sig.get();
-    if (isTruthy === wasTruthy) return;
-    wasTruthy = isTruthy;
-
-    if (currentDispose) currentDispose();
-    for (const n of currentNodes) n.parentNode?.removeChild(n);
-    currentNodes = [];
-
-    pushDisposeScope();
-    let result: Node | null = null;
-    try {
-      result = isTruthy ? truthy() : (falsy ? falsy() : null);
-    } finally {
-      currentDispose = popDisposeScope(); // balanced even when a branch throws
-    }
-
-    if (result && anchor.parentNode) {
-      currentNodes = result instanceof DocumentFragment
-        ? [...result.childNodes]
-        : [result];
-      checkSvgNamespace("when", currentNodes, anchor.parentNode);
-      anchor.parentNode.insertBefore(result, anchor.nextSibling);
-    }
-  }
-
-  effect(() => {
-    sig.get(); // track
-    if (!anchor.parentNode) queueMicrotask(swap);
-    else swap();
-  });
-
-  // The active branch's scope is otherwise disposed only by the NEXT swap —
-  // without this, its effects outlive the parent scope (route or row
-  // teardown) and go on writing to detached DOM.
-  trackDispose(() => {
-    disposed = true; // makes any still-queued swap() a no-op
-    if (currentDispose) currentDispose();
-    currentDispose = null;
-    for (const n of currentNodes) n.parentNode?.removeChild(n);
-    currentNodes = [];
-  });
-
-  const frag = document.createDocumentFragment();
-  frag.appendChild(anchor);
   return frag;
 }
 

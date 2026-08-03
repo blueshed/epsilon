@@ -240,11 +240,32 @@ class Lens<T> implements OpSignal<T> {
     private prefix: string,
   ) {}
 
+  /** Bumped only when an op TOUCHES this slice — the same test onOps applies.
+   *  Created on first tracked read, so an untracked peek()/set() lens costs
+   *  nothing. */
+  private tick: Signal<number> | null = null;
+
   get(): T {
-    // Delegate tracking to the root: effects over-fire on unrelated root
-    // changes but always recompute correctly (the law). Precision lives in
-    // the ops channel, which routing consumers use instead.
-    return valueAt(this.root.get(), this.prefix) as T;
+    // Track THIS SLICE, not the root. onOps already knows precisely which ops
+    // reach here — it rebases descendants, collapses ancestor writes, and
+    // skips siblings — so the ops channel's precision drives the state
+    // channel too. Before 0.9.0 this delegated to root.get(), which meant an
+    // effect over a lens re-ran on every unrelated write: correct, never
+    // minimal, and the reason bind() existed at all.
+    if (!this.tick) {
+      const t = (this.tick = new Signal(0));
+      const unsub = this.onOps(() => t.set(t.peek() + 1));
+      if (hasActiveDisposeScope()) trackDispose(unsub);
+      else {
+        console.warn(
+          "[epsilon/signal] a lens was read reactively outside a dispose scope — " +
+            "its subscription can never be torn down. Read it inside a list() row, " +
+            "a routes() handler, or mount().",
+        );
+      }
+    }
+    this.tick.get();                       // the dependency
+    return valueAt(this.root.peek(), this.prefix) as T;
   }
 
   peek(): T {

@@ -3,7 +3,7 @@
 // With auth on, you get YOUR boards (mine:<uid>): creating one is an op on
 // that doc; opening one is just another doc name.
 import {
-  connect, list, text, bind, effect, routes, navigate,
+  connect, list, text, effect, routes, navigate,
   pushDisposeScope, popDisposeScope, trackDispose,
 } from "./epsilon";
 import type { OpSignal, Signal, Dispose, DocHandle } from "./epsilon";
@@ -127,18 +127,21 @@ function openBoard(name: string): void {
   });
   // Each row shows all three verbs: the checkbox REPLACES /done, the text
   // rides the lens, ✕ REMOVES the card. No local mutation — echoes render.
-  // bind() is the precise path: an op into ANOTHER card never re-runs these.
+  // A lens read in an effect is the precise path: an op into ANOTHER card
   log.appendChild(
     list(cards, (card, id) => {
       const li = document.createElement("li");
       const done = document.createElement("input");
       done.type = "checkbox";
       const label = document.createElement("span");
-      bind(card.at<boolean>("/done"), (d) => {
+      const doneL = card.at<boolean>("/done");
+      const textL = card.at<string>("/text");
+      effect(() => {
+        const d = doneL.get();
         done.checked = !!d;
         label.style.textDecoration = d ? "line-through" : "";
       });
-      bind(card.at<string>("/text"), (t) => { label.textContent = t ?? ""; });
+      effect(() => { label.textContent = textL.get() ?? ""; });
       done.onchange = () => card.at("/done").set(done.checked);
       const del = document.createElement("button");
       del.textContent = "✕";
