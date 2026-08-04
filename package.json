@@ -1,11 +1,11 @@
 {
   "name": "epsilon",
-  "version": "0.9.2",
+  "version": "0.9.3",
   "private": true,
   "type": "module",
   "description": "One op stream, Postgres to pixel — bun create blueshed/epsilon my-app. The runtime lives in your app: epsilon/, ~3.8k lines, tests included.",
   "epsilon": {
-    "base": "v0.9.2"
+    "base": "v0.9.3"
   },
   "scripts": {
     "dev": "bun --hot server.ts",

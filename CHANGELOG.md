@@ -7,6 +7,18 @@ will ship.
 
 ## [Unreleased]
 
+## [0.9.3] — 2026-08-02
+
+### Fixed
+
+- **The scaffold's own test failed the moment an app adopted `db/fn`.**
+  `pg.test.ts` asserted `migrate()` returns `[]` on a second run —
+  "idempotent: nothing re-runs". `db/fn` always replays, by design, so a
+  vendored copy of that test breaks in any app that uses the feature. It
+  now filters the `fn` entries: the LEDGER is idempotent, the vocabulary is
+  replayed, and those are different claims. Found by japan, whose 23
+  vocabulary files turned one assertion into a 140-line diff.
+
 ## [0.9.2] — 2026-08-02
 
 ### Fixed

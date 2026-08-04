@@ -82,7 +82,10 @@ beforeAll(async () => {
   // the ledger, and migrates fresh.
   await sql.unsafe("DROP SCHEMA public CASCADE; CREATE SCHEMA public");
   await migrate(sql, { dir: DB_DIR });
-  expect(await migrate(sql, { dir: DB_DIR })).toEqual([]);   // idempotent: nothing re-runs
+  // The LEDGER is idempotent — no numbered file re-runs. db/fn always
+  // replays by design, so filter it out rather than asserting an empty
+  // result: an app that adopts db/fn would otherwise fail this line.
+  expect((await migrate(sql, { dir: DB_DIR })).filter((m) => !m.fn)).toEqual([]);
 });
 
 afterAll(async () => {
