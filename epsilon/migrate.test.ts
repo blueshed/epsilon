@@ -177,6 +177,27 @@ describe("db/fn — the vocabulary, edited in place", () => {
     expect((await sql`SELECT m_greet('four') AS r`)[0]!.r).toBe(4);
   });
 
+  test("DML inside a function BODY is not schema DDL — the gate looks outside", async () => {
+    // Every real dispatch function is full of INSERT/UPDATE/DELETE. Testing
+    // the raw file text refused six of japan's twenty-three functions on the
+    // first real migration — the gate matched statements inside $$ … $$.
+    const d = fixture({
+      "001-a.sql": "CREATE TABLE m_a (id int, label text)",
+      "fn/greet.sql": `CREATE OR REPLACE FUNCTION m_greet(n text) RETURNS text AS $$
+BEGIN
+INSERT INTO m_a (label) VALUES (n);
+UPDATE m_a SET label = n WHERE label IS NULL;
+DELETE FROM m_a WHERE label = 'x';
+RETURN n;
+END;
+$$ LANGUAGE plpgsql;`,
+    });
+    const ran = await migrate(sql, { dir: d, ...quiet });
+    expect(ran.map((m) => m.name)).toEqual(["001-a.sql", "fn/greet.sql"]);
+    expect((await sql`SELECT m_greet('ok') AS r`)[0]!.r).toBe("ok");
+    await migrate(sql, { dir: d, ...quiet });                 // and it replays
+  });
+
   test("schema DDL in db/fn is REFUSED — it could not survive a second boot", async () => {
     const d = fixture({
       "fn/oops.sql": "CREATE TABLE m_b (id int);\nCREATE OR REPLACE FUNCTION m_greet(n text) RETURNS text AS $$ SELECT n $$ LANGUAGE sql;",

@@ -87,6 +87,13 @@ export function functionFiles(dir: string): string[] {
   return readdirSync(fnDir).filter((f) => f.endsWith(".sql")).sort();
 }
 
+/** Dollar-quoted bodies removed. A statement INSIDE a function body is not
+ *  a statement the FILE executes — and every real dispatch function is full
+ *  of INSERT/UPDATE/DELETE. Testing the raw text refused six of the first
+ *  app's twenty-three functions, which is the whole point of db/fn. */
+const outsideBodies = (sql: string) =>
+  sql.replace(/\$([A-Za-z_]*)\$[\s\S]*?\$\1\$/g, "");
+
 /** Statements a replayed file cannot contain and stay idempotent. Unlike
  *  the sub-100 warning this is a GATE — such a file cannot survive a second
  *  boot, so there is nothing to warn about and everything to refuse. */
@@ -175,7 +182,7 @@ export async function migrate(
         // time the app starts. Refusing here with the reason beats letting
         // Postgres say "relation already exists" from inside a two-pass
         // vocabulary swap, which explains nothing.
-        if (NOT_REPLAYABLE.test(text)) {
+        if (NOT_REPLAYABLE.test(outsideBodies(text))) {
           throw new Error(
             `[epsilon/migrate] db/fn/${name} contains schema DDL, and db/fn is REPLAYED on ` +
               `every boot. Move that statement to the next NUMBERED file; db/fn is for ` +

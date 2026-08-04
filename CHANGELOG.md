@@ -7,6 +7,22 @@ will ship.
 
 ## [Unreleased]
 
+## [0.9.2] — 2026-08-02
+
+### Fixed
+
+- **`db/fn`'s DDL gate matched statements INSIDE function bodies**, which
+  made it refuse the very files it exists for. The check ran over raw file
+  text with `^…/m`, so a body containing `INSERT INTO`, `UPDATE …` or
+  `DELETE FROM` at the start of a line tripped it — and every real dispatch
+  function is full of those. It refused **six of japan's twenty-three**
+  functions on the first real migration, including `trip_apply`, the
+  function the whole feature was built for.
+
+  Dollar-quoted bodies are now stripped before the test: a statement inside
+  a function is not a statement the file executes. 0.9.0's tests only used
+  `SELECT`-bodied one-liners, so nothing caught it until real SQL arrived.
+
 ## [0.9.1] — 2026-08-02
 
 ### Fixed
