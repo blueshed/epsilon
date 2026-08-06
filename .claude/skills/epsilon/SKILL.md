@@ -144,6 +144,13 @@ users/sessions, reload-worthy for doc tables.
   defect class. rel.test.ts's law describe is the worked call.
 - **Auth before docs** on `requireAuth` hosts; re-auth belongs in
   `onConnect` — it runs on every reconnect, before docs re-open.
+- **A method is not a side door.** `host.method(name, fn)` requires a session
+  on a `requireAuth` host, exactly like doc traffic. `{ open: true }` is ONLY
+  for methods that mint a session (login/register/authenticate) or run before
+  one can exist (passkey login). Marking a read `open` hands it out to
+  anyone: the SQL permits read a NULL user as "the host asking as itself",
+  which is the full copy. This gate arrived in 0.10.1 because `history` and
+  `undo` did not have it.
 - **Two kinds of SQL, two rules.** `db/NNN-*.sql` is SCHEMA: never edit one
   once applied, add the next number (comment-only edits count — the ledger
   records the hash). `db/fn/*.sql` is VOCABULARY — stored functions,

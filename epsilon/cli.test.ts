@@ -54,14 +54,14 @@ beforeAll(() => {
     ws.data ??= {};
     ws.data.user = { id: 7, name: "Pete" };
     return { token: "tok-7", user: ws.data.user };
-  });
+  }, { open: true });
   h.method("authenticate", (p: { token?: string }, ws) => {
     if (p?.token !== "tok-7") throw new Error("invalid or expired session");
     ws.data ??= {};
     ws.data.user = { id: 7, name: "Pete" };
     return ws.data.user;
-  });
-  h.method("logout", (_p, ws) => { if (ws.data) delete ws.data.user; return { ok: true }; });
+  }, { open: true });
+  h.method("logout", (_p, ws) => { if (ws.data) delete ws.data.user; return { ok: true }; }, { open: true });
   authServer = Bun.serve({ port: 0, fetch: h.fetch, websocket: h.websocket });
   h.setServer(authServer);
   authUrl = `ws://localhost:${authServer.port}${h.path}`;

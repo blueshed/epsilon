@@ -21,8 +21,12 @@ This file is for *your app*.
 - `server.ts` — the authority: which docs exist, who may open them.
 - `index.ts` / `index.html` / `index.css` / `types.ts` — the app, at project root.
 - `app.test.ts` — the app driven in a real browser.
-- `db/` — your migrations, numbered from **100**. `001`–`099` are epsilon's
-  and frozen. Stored functions live in `db/fn/`, edited in place.
+- `db/` — your migrations, numbered from **102** (`100`/`101` are the demo's;
+  `001`–`099` are epsilon's and frozen). A new doc type's TABLES need a
+  number; its `_open`/`_apply` functions go in `db/fn/`, edited in place —
+  `db/fn/session.sql` is the shape. `db/100-board.sql` defines its functions
+  inline because it predates `db/fn/` and its hash is recorded in every
+  deployed ledger; copy its logic, not its filing.
 
 The kanban board is the scaffold's **demo** — a worked example of a doc type
 end to end, and yours to delete once this app has its own. README.md lists
@@ -30,7 +34,7 @@ exactly which files it is.
 
 ## House rules
 
-- **Bun only** — never npm/npx/node. No build step.
+- **Bun only** (≥ 1.3.14) — never npm/npx/node. No build step.
 - Add your own here. This file is yours; the skill is upstream's.
 
 ## Commands
@@ -43,7 +47,7 @@ bun run check        # tsc --noEmit, strict
 bun test             # everything; suites needing a service skip and say why
 bun run test         # the curated no-service list
 bun run test:pglite  # the relational tier on embedded Postgres — no database needed
-bun run db:up        # compose Postgres on :5599, for test:pg
+bun run db:up        # compose Postgres on :5599, for test:pg (needs Docker)
 bun run test:pg      # durability, fan-out, users
 bun run test:app     # the real app in a real browser (Bun ≥ 1.3.14)
 bun run ci           # all of it, database up and down

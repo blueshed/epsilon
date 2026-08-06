@@ -30,6 +30,7 @@
 import type { Host } from "./doc";
 import type { Sql } from "./pg";
 import type { User } from "./pg";
+import { rateLimiter } from "./pg";
 
 // --- bytes ------------------------------------------------------------------
 
@@ -157,6 +158,7 @@ async function verifySignature(jwk: Jwk, sig: Uint8Array, data: Uint8Array): Pro
 // --- authenticator data -----------------------------------------------------
 
 const FLAG_UP = 0x01;
+const FLAG_UV = 0x04;
 const FLAG_AT = 0x40;
 
 interface AuthData {
@@ -207,9 +209,31 @@ export function pgPasskey(
     /** Pin the web origins allowed to run ceremonies (recommended in
      *  production). Default: the origin the SOCKET connected from. */
     origins?: string[];
+    /**
+     * Whether the authenticator must VERIFY the human (PIN, biometric) and
+     * not merely observe a touch. "preferred" (the default) asks for it and
+     * accepts a credential without it — the browser decides, and the UV flag
+     * is advisory. "required" both asks and ENFORCES: a ceremony that comes
+     * back without the UV bit set is refused. Choose "required" when a
+     * passkey is the only factor guarding something that matters; the cost is
+     * authenticators that cannot verify stop working.
+     */
+    userVerification?: "preferred" | "required";
+    /** Cap on passkey_login_begin per address per minute (default 30) — it
+     *  is pre-auth and it names credentials, so it is rate limited. */
+    maxBeginPerMinute?: number;
   },
 ): void {
   const rpName = opts?.rpName ?? "epsilon-app";
+  const uv = opts?.userVerification ?? "preferred";
+  /** Refuse a ceremony that lacks the flag we said was required. Asking
+   *  without checking is the gap: "required" in the request is a HINT until
+   *  the server enforces it here. */
+  const checkUv = (flags: number) => {
+    if (uv === "required" && (flags & FLAG_UV) === 0) {
+      throw new Error("user verification required — this authenticator did not verify you");
+    }
+  };
 
   function checkOrigin(origin: string | undefined, ws: any): string {
     if (!origin) throw new Error("origin required");
@@ -248,7 +272,7 @@ export function pgPasskey(
         { type: "public-key", alg: -7 },     // ES256
         { type: "public-key", alg: -257 },   // RS256 (Windows Hello)
       ],
-      authenticatorSelection: { residentKey: "preferred", userVerification: "preferred" },
+      authenticatorSelection: { residentKey: "preferred", userVerification: uv },
       attestation: "none",
     };
   });
@@ -270,6 +294,7 @@ export function pgPasskey(
     const att = cborDecode(b64u.dec(params.attestationObject)) as Map<unknown, unknown>;
     const auth = parseAuthData(att.get("authData") as Uint8Array);
     if ((auth.flags & FLAG_UP) === 0) throw new Error("user presence required");
+    checkUv(auth.flags);
     if (!auth.credId || !auth.coseKey) throw new Error("no attested credential");
     if (b64u.enc(await sha256(new TextEncoder().encode(rpId))) !== b64u.enc(auth.rpIdHash)) {
       throw new Error("rp mismatch");
@@ -287,7 +312,17 @@ export function pgPasskey(
     return { ok: true, id };
   });
 
+  // passkey_login_begin is reachable before any session exists and answers
+  // with a user's credential ids, so an unthrottled one is an account
+  // enumeration oracle: a non-empty list proves the email is registered.
+  // Keyed on address alone — the caller supplies the email, so keying on it
+  // would let an enumerator rotate past their own budget.
+  const beginLimit = rateLimiter(opts?.maxBeginPerMinute ?? 30, 60_000);
+
   host.method("passkey_login_begin", async (params: { email?: string }, ws) => {
+    if (!beginLimit.hit(String(ws?.remoteAddress ?? "?"))) {
+      throw new Error("too many attempts — try again later");
+    }
     // With an email: that user's credential ids (the non-discoverable
     // path). Without: empty allowCredentials — the browser offers the
     // resident passkeys it holds for this site.
@@ -297,8 +332,8 @@ export function pgPasskey(
       allowCredentials = ((row?.c ?? []) as { id: string }[])
         .map((c) => ({ type: "public-key", id: c.id }));
     }
-    return { challenge: mint(ws, "get"), allowCredentials, userVerification: "preferred" };
-  });
+    return { challenge: mint(ws, "get"), allowCredentials, userVerification: uv };
+  }, { open: true });   // the sign-in door: no session exists yet
 
   host.method("passkey_login_finish", async (params: {
     id?: string; clientDataJSON?: string; authenticatorData?: string; signature?: string; userHandle?: string;
@@ -320,6 +355,7 @@ export function pgPasskey(
     const authBytes = b64u.dec(params.authenticatorData);
     const auth = parseAuthData(authBytes);
     if ((auth.flags & FLAG_UP) === 0) throw new Error("user presence required");
+    checkUv(auth.flags);
     if (b64u.enc(await sha256(new TextEncoder().encode(rpId))) !== b64u.enc(auth.rpIdHash)) {
       throw new Error("rp mismatch");
     }
@@ -339,5 +375,5 @@ export function pgPasskey(
     ws.data ??= {};
     ws.data.user = user;
     return { token: session.token as string, user };
-  });
+  }, { open: true });   // the sign-in door: it MINTS the session
 }

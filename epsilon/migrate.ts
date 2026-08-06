@@ -56,7 +56,22 @@ async function ensureTable(sql: Sql): Promise<void> {
     )`);
 }
 
-const hash = (text: string) => Bun.hash(text).toString(16);
+/**
+ * The ledger's fingerprint. SHA-256, because this value is COMPARED ACROSS
+ * TIME: it is written once and re-checked on every boot for the life of the
+ * deployment, and a mismatch does not degrade — it refuses to start, accusing
+ * a file of having changed. `Bun.hash` was the wrong tool for that, not
+ * because it is weak (drift detection needs no cryptography) but because its
+ * default algorithm is not a documented stability contract. A Bun upgrade
+ * that changed it would have stopped every deployed epsilon app at once, with
+ * an error blaming the migrations.
+ *
+ * `legacyHash` is what those apps already have in their ledger, so a boot
+ * that finds one rewrites it in place instead of accusing the file — the
+ * upgrade is silent and one-way. Remove it when no 0.10-era ledger remains.
+ */
+const hash = (text: string) => Bun.SHA256.hash(text, "hex");
+const legacyHash = (text: string) => Bun.hash(text).toString(16);
 
 /** Released core migrations — 001–099 are epsilon's range, frozen once
  *  released; new core behavior ships as the next number. App migrations
@@ -68,6 +83,7 @@ const CORE = new Set([
   "003-doc-kit.sql",
   "004-housekeeping.sql",
   "005-gone.sql",
+  "006-session-digest.sql",
 ]);
 
 /** List migration files in order — `NNN-name.sql`, numerically sorted. The
@@ -97,8 +113,14 @@ const outsideBodies = (sql: string) =>
 /** Statements a replayed file cannot contain and stay idempotent. Unlike
  *  the sub-100 warning this is a GATE — such a file cannot survive a second
  *  boot, so there is nothing to warn about and everything to refuse. */
+// FUNCTION, VIEW, PROCEDURE and TRIGGER are in the list on purpose: the
+// likeliest mistake in a functions directory is a bare `CREATE FUNCTION`
+// (no OR REPLACE), which works on the FIRST boot and fails on every one
+// after with a raw "already exists" from inside the two-pass swap — the
+// unexplained failure this gate exists to prevent. UNIQUE INDEX and the
+// IF NOT EXISTS spellings are covered by the same shapes.
 const NOT_REPLAYABLE =
-  /^\s*(CREATE\s+(?!OR\s+REPLACE)(TABLE|INDEX|TYPE|EXTENSION|SEQUENCE)|ALTER\s+TABLE|INSERT\s+INTO|UPDATE\s+|DELETE\s+FROM)/im;
+  /^\s*(CREATE\s+(?!OR\s+REPLACE)(UNIQUE\s+)?(TABLE|INDEX|TYPE|EXTENSION|SEQUENCE|FUNCTION|VIEW|PROCEDURE|TRIGGER|AGGREGATE|DOMAIN|SCHEMA)|ALTER\s+TABLE|INSERT\s+INTO|UPDATE\s+|DELETE\s+FROM|DROP\s+)/im;
 
 /**
  * Apply every pending migration. Returns what ran (empty = already current).
@@ -140,6 +162,13 @@ export async function migrate(
 
       if (prev !== undefined) {
         if (prev !== h) {
+          // Before accusing the file, check whether the LEDGER is simply
+          // older than the hash function (pre-0.10.1 rows hold a Bun.hash
+          // value). Same bytes, different algorithm: upgrade the row quietly.
+          if (prev === legacyHash(text)) {
+            await conn.unsafe(`UPDATE migrations SET hash = '${h}' WHERE name = '${name.replace(/'/g, "''")}'`);
+            continue;
+          }
           throw new Error(
             `[epsilon/migrate] ${name} changed after it was applied. ` +
               `Migrations are forward-only — revert it and add the next numbered file ` +

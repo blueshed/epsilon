@@ -282,3 +282,35 @@ describe("batch() — coalesce across several signals", () => {
     dispose();
   });
 });
+
+describe("the flush scheduler's guarantees (pinned here, not just inherited)", () => {
+  test("a diamond settles ONCE, with both legs already current", () => {
+    // Glitch-freedom is what the topological buckets buy: `sum` depends on
+    // two computeds over one source, so a naive scheduler runs it twice —
+    // once with a stale leg, which is a value that never legitimately existed.
+    const a = signal(1);
+    pushDisposeScope();
+    const left = computed(() => a.get() * 2);
+    const right = computed(() => a.get() * 10);
+    const seen: number[] = [];
+    effect(() => { seen.push(left.get() + right.get()); });
+    const dispose = popDisposeScope();
+
+    expect(seen).toEqual([12]);
+    seen.length = 0;
+    a.set(2);
+    expect(seen).toEqual([24]);        // once — never an intermediate 22 or 14
+    dispose();
+  });
+
+  test("a self-feeding effect is stopped, not left to spin the process down", () => {
+    // The guard is the difference between a bug that names itself and a tab
+    // that locks up. It has to THROW, and the message has to say what it is.
+    const a = signal(0);
+    pushDisposeScope();
+    expect(() => {
+      effect(() => { a.set(a.get() + 1); });   // writes what it reads
+    }).toThrow(/infinite loop/i);
+    popDisposeScope()();
+  });
+});

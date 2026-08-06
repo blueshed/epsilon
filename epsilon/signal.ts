@@ -4,9 +4,11 @@
  * Two channels per signal:
  *   state — effects/computeds re-run on change and recompute from value.
  *           ALWAYS correct on its own; ops are never required (the law).
- *   ops   — onOps(handler) receives the exact change as Op[] (or undefined,
- *           meaning "recompute"). Routing consumers (keyed lists, DOM
- *           patchers) use this to skip diffing entirely.
+ *   ops   — onOps(handler) receives the exact change as Op[]. Routing
+ *           consumers (keyed lists, DOM patchers) use this to skip diffing
+ *           entirely. Always ops: a "recompute" sentinel was designed and
+ *           never needed, because the STATE channel above already is one —
+ *           every consumer may ignore ops and re-read, which is the law.
  *
  * Core API:
  *   signal(v, opts?)       — create
@@ -405,6 +407,23 @@ export function effect(fn: () => void | (() => void)): () => void {
   execute();
 
   return dispose;
+}
+
+/**
+ * Run `fn` with no listener attached: signals read inside it do NOT become
+ * dependencies of the surrounding effect.
+ *
+ * The case it exists for is calling user code from inside an effect. The
+ * router's effect tracks the hash and then invokes a route handler; without
+ * this, every signal that handler reads at top level becomes a dependency of
+ * the ROUTER, so an unrelated write re-runs route matching (and, mid-async,
+ * tears the screen down and rebuilds it). Effects created inside `fn` are
+ * unaffected — they install their own listener when they run.
+ */
+export function untrack<T>(fn: () => T): T {
+  const prev = currentListener;
+  currentListener = null;
+  try { return fn(); } finally { currentListener = prev; }
 }
 
 export function computed<T>(

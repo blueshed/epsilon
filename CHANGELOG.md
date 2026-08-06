@@ -7,6 +7,136 @@ will ship.
 
 ## [Unreleased]
 
+## [0.10.1] — 2026-08-06
+
+A review of 0.10.0 as released, and the fixes it found. Almost all of this
+is repair, not design: `call` was never auth-gated, which made two of the
+built-in methods a way into any private doc; the production defaults were
+development's; and the docs a newcomer meets first disagreed with each other
+and with the code.
+
+**Action required despite the patch number.** Apps that register their own
+`host.method()` must say which are pre-auth doors, and anyone using the
+operator's door must set `EPSILON_ADMIN_SECRET`. Both are one line, and
+UPGRADING.md has them. Nothing in the client API changed.
+
+### Security
+
+- **`call` is gated like doc traffic (`epsilon/doc.ts`).** The `call` branch
+  returned BEFORE the `requireAuth` check, so every registered method was
+  reachable without a session. Two were exploitable as shipped, both verified
+  against a running server: `history` returned the complete op log of a doc
+  the same socket had just been refused (`pgHistory` passes `null` for a
+  session-less socket, and `doc_history` reads NULL as "the host asking as
+  itself" — the permit always passed), and `undo` with an explicit `v`
+  reverted another user's write on any doc a NULL user may touch, which
+  includes the seeded ownerless `board:1` the scaffold ships. Methods now
+  need a session; `{ open: true }` marks the ones that MINT a session
+  (login/register/authenticate/logout and the passkey login pair) and is the
+  only exemption. **Breaking for apps with their own methods** — see
+  UPGRADING.md.
+- **The operator's door needs a secret** (`EPSILON_ADMIN_SECRET`). It ran
+  arbitrary SQL behind an allowlist of emails, and registration is open and
+  unverified, so on a fresh deployment whoever registered the operator's
+  address first owned the database. With a list configured and no secret the
+  door refuses to open rather than opening weakly, and every statement is
+  now logged.
+- **Session tokens are stored as a digest** (`db/006`, `db/fn/session.sql`).
+  They were bearer credentials kept in the clear, so any dump or admin SELECT
+  handed over live logins. Tokens also grew from a 122-bit uuid to 256 bits.
+  Existing sessions survive: the migration hashes the column in place.
+  Adds `session_end_all` — sign out everywhere.
+- **Origin allowlist on the WebSocket upgrade** (`EPSILON_ORIGINS`).
+  WebSockets are not bound by the same-origin policy, so any page a signed-in
+  user visited could speak the protocol as them.
+- **Passkeys**: `userVerification: "required"` is now enforced rather than
+  merely requested (the UV flag was never checked), and `passkey_login_begin`
+  — pre-auth, and it names a user's credentials — is rate limited.
+- **Auth throttling gained a per-address budget.** The IP+email key never
+  bounded CPU: rotating the email minted a fresh budget every time, so the
+  bcrypt work — cost 12, deliberately expensive — had no ceiling at all. The
+  per-account budget still does what it was for; the new per-address one is
+  deliberately loose, because behind a PaaS edge it is shared by everybody.
+
+### Production
+
+- `development: { hmr, console }` is behind `NODE_ENV` — every deploy was
+  serving Bun's dev mode, including client `console` piped into server logs.
+- Under `NODE_ENV=production` a missing database is now a **startup failure**.
+  A misspelled `EPSILON_PG_DIR` used to boot, pass its healthcheck, and serve
+  every doc to the internet with no auth.
+- WebSocket limits: 1 MiB frames, 120s idle, backpressure close. Op batches
+  are capped at 500 — one batch is one transaction holding one row lock for
+  its whole length, and the embedded engine serialises every query through
+  one chain, so an unbounded batch is one client's hold on everyone. The
+  bound is structural rather than tuned; `maxOpsPerBatch` raises it.
+- Graceful shutdown: stop the server, stop sync, then close the database.
+  Every redeploy had been hard-killing PGlite mid-transaction.
+- `/health` touches the database, and `railway.json` points at it; `/` returned
+  200 from the static bundle whether or not the database was alive. Pinned to
+  one replica, since the embedded tier owns its directory.
+- Presence docs refuse client writes and validate their whole name. Any member
+  could forge or delete another user's presence entry, or host an invented
+  `presence:<anything>:<id>` and use it as a free broadcast channel.
+- `compose.yml` binds to `127.0.0.1` — Docker's port publishing goes through
+  the host firewall, so the old mapping put a Postgres with a committed
+  password on any public interface.
+
+### Fixed
+
+- **A rejected write no longer executes anyway.** `onclose` rejected pending
+  promises but left their messages queued, so the reconnect flushed them and
+  the server ran what the caller had been told failed — a caller who retried
+  applied it twice. Id-bearing messages are now dropped with their promise;
+  fire-and-forget writes still queue, which is `apply()`'s contract.
+- `db/fn/`'s gate missed a bare `CREATE FUNCTION` — the likeliest mistake in a
+  functions directory, which works on the first boot and fails on every one
+  after.
+- The migration ledger hashes with SHA-256 instead of `Bun.hash`, whose
+  default algorithm is not a stability contract; had it changed, every
+  deployed app would have refused to boot accusing its migrations. Existing
+  ledgers are recognised and upgraded in place.
+- Route handlers run untracked (new `untrack` export). A signal read at
+  handler top level subscribed the ROUTER, so unrelated writes re-ran route
+  matching — and mid-async tore the screen down and rebuilt it.
+- Dynamic doc prefixes resolve LONGEST first; registration order used to
+  decide, so `board:` silently shadowed `board:archived:`.
+- `remote.doc()` after `close()` throws instead of returning a handle that
+  never settles. A failed `pgDoc` un-hosts itself instead of serving `empty`
+  at v=0 forever. The CLI's mutation commands use `write()`, so a concurrent
+  writer's broadcast can't be printed as your echo. `.epsilon-token` is
+  written 0600. `escapeToken` is exported.
+
+### Added
+
+- **`epsilon/export.ts`** (`bun run epsilon:export`) — the missing half of
+  "scaling up is a config change". README told people to `pg_dump` the
+  embedded tier, which is impossible: PGlite has no port. This emits the data
+  as SQL, in foreign-key order, with sequences reset past every id already
+  minted. Verified end to end: embedded → dump → wire Postgres, byte-identical
+  docs and a post-move write that doesn't collide.
+- `epsilon:upgrade` refuses a dirty tree (`EPSILON_UPGRADE_DIRTY=1` overrides)
+  and prints the release notes link on the CONFLICT path, which is exactly
+  when it was missing.
+- Tests for what wasn't covered: the auth gate, the write/reconnect
+  double-execute, gap classification and client resync, the upgrade conflict
+  and dirty-tree paths, diamond glitch-freedom, and the infinite-loop guard.
+
+### Documentation
+
+- The scaffold said to number migrations from 101 (taken), the skill said 100
+  (also taken); it is **102**. The "delete the demo" table said to keep
+  `index.html`, which loads the deleted files by name and would not boot —
+  it now says what to rewrite and what to port. New-doc-type guidance points
+  at `db/fn/` and explains why `100-board.sql` looks different.
+- README gains an environment-variable table, a production checklist, the
+  embedded→server procedure, and a backup/retention section that says out
+  loud that `epsilon_prune` is a 30-day cap on undo depth and the audit trail.
+- A first run shows a sign-in dialog; the READMEs now say so rather than
+  promising "two tabs, type in one".
+- DESIGN.md: the `undefined = recompute` sentinel never existed in code, the
+  in-memory tier DOES mint ids, and the doorbell's `v` is not read.
+
 ## [0.10.0] — 2026-08-06
 
 A minor, not a patch: the doc-native storage tier is gone, so `pgDoc`'s

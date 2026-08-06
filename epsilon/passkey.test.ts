@@ -230,8 +230,11 @@ describe.skipIf(!DB_UP)("passkeys — passwordless over the same wire", () => {
   });
 
   test("register_begin refuses an unauthenticated socket", async () => {
+    // ADDING a passkey needs a session, so the host's call gate turns this
+    // away before the method runs (0.10.1). Only the LOGIN pair is a door —
+    // it has to work when no session exists yet, which the tests above drive.
     const r = client();
-    await expect(r.call("passkey_register_begin")).rejects.toThrow(/sign in first/);
+    await expect(r.call("passkey_register_begin")).rejects.toThrow(/unauthenticated/);
   });
 
   test("the runtime's decoders round-trip the fixtures", async () => {

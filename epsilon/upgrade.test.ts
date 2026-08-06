@@ -92,6 +92,63 @@ describe("epsilon:upgrade — taking a new runtime is mechanical", () => {
     expect(pkg.epsilon.base).toBe("v0.2.0");                   // ready for the next take
   });
 
+  test("genuine divergence CONFLICTS: markers land, base is not stamped, the notes are printed", async () => {
+    // The flagship promise of owning the source — "conflicts surface exactly
+    // where you truly diverged" — and the path that decides whether an app
+    // can trust the tool. Both sides edit the SAME line, which is the one
+    // thing three-way cannot resolve.
+    const up = upstream();
+    const app = scaffold(up);
+
+    writeFileSync(join(up, "epsilon/thing.ts"), "export const a = 2;\n\n\n\n\nexport const z = 1;\n");
+    commit(up, "v0.2.0");
+    sh(up, ["git", "tag", "v0.2.0"]);
+
+    writeFileSync(join(app, "epsilon/thing.ts"), "export const a = 99; // mine\n\n\n\n\nexport const z = 1;\n");
+    commit(app, "diverged on the same line");
+
+    const r = sh(app, ["bun", UPGRADE], { EPSILON_UPSTREAM: up });
+    expect(r.code).toBe(1);
+    expect(r.err).toContain("conflicts");
+
+    // Markers, so the human can see both sides.
+    const thing = readFileSync(join(app, "epsilon/thing.ts"), "utf8");
+    expect(thing).toContain("<<<<<<<");
+    expect(thing).toContain("export const a = 2;");     // upstream's side is present
+    expect(thing).toContain("export const a = 99;");    // and so is yours
+
+    // NOT stamped: the app is still on v0.1.0 until someone resolves this,
+    // so a re-run after resolving takes the same delta rather than skipping it.
+    const pkg = JSON.parse(readFileSync(join(app, "package.json"), "utf8"));
+    expect(pkg.epsilon.base).toBe("v0.1.0");
+
+    // And the release notes are named HERE, where they are actually wanted.
+    expect(r.out + r.err).toContain("UPGRADING.md");
+  });
+
+  test("a dirty tree is refused before anything is written", async () => {
+    const up = upstream();
+    const app = scaffold(up);
+    writeFileSync(join(up, "epsilon/thing.ts"), "export const a = 2;\n\n\n\n\nexport const z = 1;\n");
+    commit(up, "v0.2.0");
+    sh(up, ["git", "tag", "v0.2.0"]);
+
+    // Dirt somewhere the upgrade does not touch: the guard is about the tree
+    // being clean, not about this file being in the patch.
+    writeFileSync(join(app, "notes.md"), "half-finished thought\n");
+
+    const r = sh(app, ["bun", UPGRADE], { EPSILON_UPSTREAM: up });
+    expect(r.code).toBe(1);
+    expect(r.err).toContain("uncommitted changes");
+    // Untouched: the guard runs before the apply, so nothing was written.
+    expect(readFileSync(join(app, "epsilon/thing.ts"), "utf8")).toContain("export const a = 1;");
+
+    // Meant it? Then it proceeds and the upgrade lands.
+    const forced = sh(app, ["bun", UPGRADE], { EPSILON_UPSTREAM: up, EPSILON_UPGRADE_DIRTY: "1" });
+    expect(forced.code).toBe(0);
+    expect(readFileSync(join(app, "epsilon/thing.ts"), "utf8")).toContain("export const a = 2;");
+  });
+
   test("already current: no-op; missing base: refused loudly", async () => {
     const up = upstream();
     const app = scaffold(up);

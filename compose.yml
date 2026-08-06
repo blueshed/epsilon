@@ -1,3 +1,6 @@
+# A Postgres for the TESTS (`bun run test:pg`) and for local development.
+# Not a production database: the password is in this file, and the whole
+# thing is disposable — `bun run db:down` deletes the volume with it.
 services:
   postgres:
     image: postgres:16-alpine
@@ -6,7 +9,11 @@ services:
       POSTGRES_PASSWORD: epsilon
       POSTGRES_DB: epsilon
     ports:
-      - "5599:5432"
+      # Bound to LOCALHOST, not 0.0.0.0. Docker's port publishing punches
+      # through the host firewall, so a bare "5599:5432" on a machine with a
+      # public interface is an internet-facing Postgres whose password is
+      # committed to this repo.
+      - "127.0.0.1:5599:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U epsilon"]
       interval: 1s

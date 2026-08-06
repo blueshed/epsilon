@@ -165,7 +165,7 @@ export async function proveLaw<T>(drive: LawDrive<T>): Promise<void> {
 
   // The resolved echo, captured as it lands — what the diagnosis quotes.
   let echo: Op[] = [];
-  const off = handle.onOps((ops) => { if (ops) echo = ops; });
+  const off = handle.onOps((ops) => { echo = ops; });   // always Op[]; see signal.ts
 
   const recompute = async (doc: string): Promise<unknown> => {
     const [row] = await sql`SELECT doc_open(${doc}) AS d`;

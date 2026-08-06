@@ -17,7 +17,7 @@
  * — which is why `version` is `0.0.0` upstream and the epsilon release is
  * recorded in `epsilon.base` instead.
  */
-import { existsSync, mkdirSync, renameSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 /** Template-only: epsilon's own history and plumbing, meaningless in an app. */
@@ -44,6 +44,17 @@ export function scaffoldInit(root: string): void {
     const dest = join(root, to);
     mkdirSync(join(dest, ".."), { recursive: true });
     renameSync(src, dest);
+  }
+
+  // tsconfig.json ships as-is (Bun only rewrites package.json), and upstream's
+  // `include` names `.scaffold/**` so this very file typechecks in the template
+  // repo. That path is about to stop existing, so drop it here rather than
+  // leaving every scaffolded app with a glob pointing at nothing.
+  const tsconfig = join(root, "tsconfig.json");
+  if (existsSync(tsconfig)) {
+    const before = readFileSync(tsconfig, "utf8");
+    const after = before.replace(/,\s*"\.scaffold\/\*\*\/\*\.ts"/, "");
+    if (after !== before) writeFileSync(tsconfig, after);
   }
 
   rmSync(join(root, ".scaffold"), { recursive: true, force: true });

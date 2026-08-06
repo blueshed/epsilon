@@ -64,7 +64,7 @@
  */
 
 import {
-  Signal, signal, computed, effect,
+  Signal, signal, computed, effect, untrack,
   pushDisposeScope, popDisposeScope, trackDispose,
 } from "./signal";
 import type { Dispose, ReadonlySignal } from "./signal";
@@ -317,7 +317,7 @@ export function routes(
             teardown();
             activePattern = pattern;
             try {
-              run(handler, params);
+              untrack(() => run(handler, params));
             } catch (err) {
               console.error("[epsilon/route] handler threw:", err);
             }
@@ -329,7 +329,12 @@ export function routes(
         teardown();
         activePattern = pattern;
         try {
-          run(handler, params);
+          // UNTRACKED: this effect's dependency is the hash, and nothing else.
+          // A signal the handler reads at top level would otherwise subscribe
+          // the ROUTER — so an unrelated write re-runs route matching, mints a
+          // fresh params object for every consumer, and (if a render is still
+          // in flight) tears the screen down and starts it again.
+          untrack(() => run(handler, params));
         } catch (err) {
           // Handler errors must not kill the router or leak the dep set on
           // the hash signal. run()'s try/catch already balanced the dispose

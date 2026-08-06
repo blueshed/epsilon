@@ -72,6 +72,24 @@ if (!base) {
   process.exit(1);
 }
 
+// A three-way apply writes into the working tree. With uncommitted work
+// already there, an upgrade that goes wrong cannot be told apart from your
+// own edits — and `git checkout .` would take both. UPGRADING.md said
+// "commit before you start", but UPGRADING.md is upstream's file and the
+// scaffold deletes it, so the tool has to say it itself.
+// EPSILON_UPGRADE_DIRTY=1 is the escape hatch for anyone who means it.
+const dirty = (await must(["status", "--porcelain"])).trim();
+if (dirty && !process.env.EPSILON_UPGRADE_DIRTY) {
+  console.error(
+    "[epsilon:upgrade] the working tree has uncommitted changes:\n" +
+      dirty.split("\n").slice(0, 10).map((l) => `  ${l}`).join("\n") +
+      "\n  Commit or stash first — the upgrade edits these same files, and afterwards\n" +
+      "  you want the diff to be upstream's work and nothing else.\n" +
+      "  (EPSILON_UPGRADE_DIRTY=1 overrides.)",
+  );
+  process.exit(1);
+}
+
 await must(["fetch", "--tags", "--force", UPSTREAM, "main"]);
 
 const target =
@@ -80,6 +98,19 @@ const target =
 if (!target) {
   console.error("[epsilon:upgrade] no release tag found upstream — pass a tag or sha explicitly.");
   process.exit(1);
+}
+
+/** The by-hand half — printed on SUCCESS and on CONFLICT alike. A conflict
+ *  is precisely when someone needs the release notes, and it used to be the
+ *  one path that exited without them. A web URL only makes sense for an
+ *  http(s) remote; a local path or ssh remote gets the plain instruction. */
+function byHand(): void {
+  const web = UPSTREAM.replace(/\.git$/, "");
+  console.log(
+    /^https?:\/\//.test(web)
+      ? `[epsilon:upgrade] what ${target} needs from you by hand: ${web}/blob/${target}/UPGRADING.md`
+      : `[epsilon:upgrade] read UPGRADING.md at ${target} upstream for anything needed by hand.`,
+  );
 }
 
 const baseSha = await must(["rev-parse", `${base}^{commit}`]);
@@ -102,6 +133,8 @@ if (patch.trim()) {
       // The three-way left markers exactly where this app truly diverged.
       console.error(`[epsilon:upgrade] applied with conflicts:\n${applied.err}`);
       console.error("[epsilon:upgrade] resolve the markers, run the tests, then commit — base is NOT yet stamped.");
+      console.error(`[epsilon:upgrade] re-run \`bun run epsilon:upgrade ${target}\` after resolving to stamp it.`);
+      byHand();
     } else {
       console.error(`[epsilon:upgrade] apply failed:\n${applied.err || applied.out}`);
     }
@@ -123,12 +156,4 @@ if (tests.exitCode !== 0) {
   process.exit(1);
 }
 console.log(`[epsilon:upgrade] done — review the diff and commit (base is now ${target}).`);
-
-// The by-hand half. A web URL only makes sense for an http(s) remote; a
-// local path or ssh remote gets the plain instruction instead.
-const web = UPSTREAM.replace(/\.git$/, "");
-console.log(
-  /^https?:\/\//.test(web)
-    ? `[epsilon:upgrade] what ${target} needs from you by hand: ${web}/blob/${target}/UPGRADING.md`
-    : `[epsilon:upgrade] read UPGRADING.md at ${target} upstream for anything needed by hand.`,
-);
+byHand();

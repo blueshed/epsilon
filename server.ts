@@ -25,6 +25,20 @@ export async function startServer(opts: StartOpts = {}) {
   const pgUrl = opts.pgUrl ?? process.env.EPSILON_PG_URL;
   const pgDir = opts.pgDir ?? (pgUrl ? undefined : process.env.EPSILON_PG_DIR);
 
+  // In-memory is a SHAPE PREVIEW: no auth, no permits, no persistence. It is
+  // also what you silently get by misspelling EPSILON_PG_DIR — and that
+  // deployment boots fine, passes its healthcheck, and serves every doc to
+  // the whole internet. So in production the preview must be asked for out
+  // loud; anything else is a typo, and a typo should stop the boot.
+  if (!pgUrl && !pgDir && process.env.NODE_ENV === "production" && !process.env.EPSILON_ALLOW_OPEN) {
+    throw new Error(
+      "[epsilon] refusing to start: NODE_ENV=production with no database.\n" +
+      "  In-memory mode has NO auth and NO permits — every doc is world-readable and world-writable.\n" +
+      "  Set EPSILON_PG_DIR=/data (embedded) or EPSILON_PG_URL=postgres://… (server).\n" +
+      "  If an open, stateless preview really is what you want here, set EPSILON_ALLOW_OPEN=1.",
+    );
+  }
+
   // Presence: being ON a board is WATCHING its presence doc — an ordinary
   // in-memory doc keyed by socket, written by the subscribe hooks and
   // evicted with its last watcher. Ephemeral and per-process by design:
@@ -32,8 +46,10 @@ export async function startServer(opts: StartOpts = {}) {
   let sid = 0;
   const presenceOf = (name: string) =>
     host.names().includes(name) ? host.doc<Record<string, { name: string }>>(name, {}) : null;
+  const wsOrigins = process.env.EPSILON_ORIGINS?.split(",").map((o) => o.trim()).filter(Boolean);
   const host: Host = createHost({
     requireAuth: !!(pgUrl || pgDir),
+    origins: wsOrigins,   // same allowlist the passkey ceremony pins to
     onSubscribe(doc, ws) {
       if (!doc.startsWith("presence:")) return;
       ws.data.sid ??= ++sid;
@@ -69,8 +85,12 @@ export async function startServer(opts: StartOpts = {}) {
     await pgAuth(host, db);                            // wire adapter over the SQL contract
     // Passkeys: register one while signed in, sign in with it ever after.
     // Ceremonies bind to the socket's own origin; pin { origins } in prod.
+    // EPSILON_ORIGINS pins which web origins may run a ceremony (comma
+    // separated, e.g. "https://app.example.com"). Unset keeps the zero-config
+    // default — the origin the socket itself connected from — which is right
+    // for development and worth being explicit about in production.
     const { pgPasskey } = await import("./epsilon/passkey");
-    pgPasskey(host, db, { rpName: "epsilon-app" });
+    pgPasskey(host, db, { rpName: process.env.EPSILON_RP_NAME ?? "epsilon-app", origins: wsOrigins });
 
     // Docs are DYNAMIC — names are data, hosted on first open.
     // board:<id> — public when owner_id is NULL (the seeded board:1),
@@ -139,12 +159,24 @@ export async function startServer(opts: StartOpts = {}) {
     // outlives its opener), so the open gate re-asks board_may for every
     // socket while it's hosted. In-memory docs have no doc_open to default
     // to — the gate is ours to fit.
+    // Presence is written by the SUBSCRIBE HOOKS, never by a client. Without
+    // a write hook the host applies whatever ops arrive, which let any member
+    // forge or delete someone else's entry and use the board as a free
+    // broadcast channel. `write` refusing everything makes it server-authored
+    // by construction; the hooks call sig.apply() directly and never come
+    // through here. The name is checked whole, so `presence:anything:1` can't
+    // ride in on a board id it happens to end with.
     host.docs("presence:", async (name, userId) => {
-      const id = Number(name.split(":")[2]);
-      if (!Number.isFinite(id) || !(await may(id, userId))) throw new Error(`unknown doc: ${name}`);
+      const parts = name.split(":");
+      const id = Number(parts[2]);
+      if (parts.length !== 3 || parts[1] !== "board" || !Number.isFinite(id)) {
+        throw new Error(`unknown doc: ${name}`);
+      }
+      if (!(await may(id, userId))) throw new Error(`unknown doc: ${name}`);
       let sig!: Signal<Record<string, { name: string }>>;
       sig = host.doc<Record<string, { name: string }>>(name, {}, {
         open: async (u) => ((await may(id, u)) ? sig.peek() : null),
+        write: () => { throw new Error("read-only: presence is written by the server"); },
       });
     });
 
@@ -162,12 +194,55 @@ export async function startServer(opts: StartOpts = {}) {
     host.docs("presence:", (name) => { host.doc(name, {}); });
   }
 
+  // Dev mode is a DEVELOPMENT tool: HMR plumbing served to whoever asks,
+  // verbose error pages, and client console output piped into this process's
+  // stdout — which is an unauthenticated log-injection channel on a public
+  // host. Bun's own signal (NODE_ENV) decides, so `bun dev` keeps hot reload
+  // and a deploy does not have to remember anything.
+  const dev = (process.env.NODE_ENV ?? "development") !== "production";
+
   const server = Bun.serve({
     port: opts.port ?? Number(process.env.PORT ?? 3000),   // PaaS routers assign PORT
-    routes: { "/": index },
+    routes: {
+      // Bun bundles this natively; wrapping it in a handler to add security
+      // headers defeats the bundler (you get the object stringified, not the
+      // app), so HSTS/CSP/X-Frame-Options belong at your TLS terminator —
+      // see README "Deploying". The defense that has to live here is the
+      // WebSocket origin allowlist above, which no proxy can do for you.
+      "/": index,
+      // A healthcheck that only proves the process is up restarts nothing
+      // when the thing that broke is the database — and the database is
+      // in-process on the embedded tier, so "up" and "usable" really can
+      // differ. One round trip, so a wedged pool fails the check.
+      "/health": async () => {
+        try {
+          if (sql) await sql`SELECT 1`;
+          return Response.json({ ok: true, db: sql ? "up" : "memory" });
+        } catch (err) {
+          return Response.json({ ok: false, error: String(err) }, { status: 503 });
+        }
+      },
+    },
     fetch: host.fetch,   // /ws upgrade; 404 for anything else
-    websocket: host.websocket,
-    development: { hmr: true, console: true },
+    websocket: {
+      ...host.websocket,
+      // A frame bigger than this is refused by Bun before it reaches the op
+      // path. 1 MiB is far above any real batch and far below the 16 MiB
+      // default, which a malicious client can send as fast as it can type.
+      maxPayloadLength: Number(process.env.EPSILON_MAX_PAYLOAD ?? 1024 * 1024),
+      // A socket that stops reading must not buffer without limit: past this
+      // much unsent fan-out, Bun closes it. One slow reader on a busy doc is
+      // the whole process's memory otherwise.
+      backpressureLimit: 16 * 1024 * 1024,
+      closeOnBackpressureLimit: true,
+      // Dead sockets hold their subscriptions — and their presence entries —
+      // until something notices they are gone. Safe for a quiet-but-live tab:
+      // Bun pings automatically and both browsers and Bun's own client pong at
+      // the protocol level, so idleness here means the peer is unreachable,
+      // not that the user stopped typing (verified, Bun 1.3.14).
+      idleTimeout: 120,
+    },
+    development: dev ? { hmr: true, console: true } : false,
   });
   host.setServer(server);
   return { server, host, sql, sync };
@@ -187,8 +262,19 @@ if (import.meta.main) {
     // Real boots only — tests spawn many servers and must not fight over
     // it. Removed on a clean exit; a crash can leave it stale.
     await Bun.write(".epsilon.pid", `${process.pid}\n`);
-    const bye = () => {
+    // Shut down in the order that keeps a restart clean: stop taking traffic,
+    // stop the sync loop, THEN close the database. On the embedded tier the
+    // database is in this process, so exiting without closing it kills PGlite
+    // mid-transaction — every redeploy was doing that. `true` drains in-flight
+    // requests rather than cutting them.
+    let leaving = false;
+    const bye = async () => {
+      if (leaving) return;                        // a second SIGTERM must not race the first
+      leaving = true;
       try { unlinkSync(".epsilon.pid"); } catch { /* already gone */ }
+      try { app.server.stop(true); } catch (err) { console.error("[epsilon] stop:", err); }
+      try { app.sync?.stop(); } catch (err) { console.error("[epsilon] sync stop:", err); }
+      try { await app.sql?.end?.(); } catch (err) { console.error("[epsilon] db close:", err); }
       process.exit(0);
     };
     process.on("SIGINT", bye);

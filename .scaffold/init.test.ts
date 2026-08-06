@@ -31,6 +31,7 @@ function fixture(): string {
   write(".scaffold/ci.yml", "APP CI");
   write("server.ts", "the app");            // bystander
   write("epsilon/LICENSE", "MIT © blueshed.co.uk");  // the notice that must travel
+  write("tsconfig.json", '{\n  "include": ["*.ts", "epsilon/**/*.ts", ".scaffold/**/*.ts"]\n}\n');
   return d;
 }
 
@@ -54,6 +55,19 @@ describe("scaffoldInit", () => {
       // Everything unnamed: untouched. The vendored notice travels, as MIT asks.
       expect(readFileSync(join(d, "server.ts"), "utf8")).toBe("the app");
       expect(readFileSync(join(d, "epsilon/LICENSE"), "utf8")).toBe("MIT © blueshed.co.uk");
+    } finally {
+      rmSync(d, { recursive: true, force: true });
+    }
+  });
+
+  test("drops the .scaffold glob from tsconfig — it points at a deleted directory", () => {
+    const d = fixture();
+    try {
+      scaffoldInit(d);
+      const ts = readFileSync(join(d, "tsconfig.json"), "utf8");
+      expect(ts).not.toContain(".scaffold");
+      expect(ts).toContain("epsilon/**/*.ts");     // the real sources still compile
+      expect(JSON.parse(ts).include).toEqual(["*.ts", "epsilon/**/*.ts"]);
     } finally {
       rmSync(d, { recursive: true, force: true });
     }

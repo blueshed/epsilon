@@ -120,8 +120,23 @@ export interface Host {
    * admits (a remove+re-add batch nets to nothing).
    */
   expel(name: string, userId?: number | string): Promise<void>;
-  /** Register an RPC method, callable from clients via remote.call(). */
-  method(name: string, fn: (params: any, ws: any) => unknown | Promise<unknown>): void;
+  /**
+   * Register an RPC method, callable from clients via remote.call().
+   *
+   * On a `requireAuth` host a method needs a session on the socket, exactly
+   * like doc traffic. `{ open: true }` is the opt-out, and it is only for
+   * the methods that MINT a session (login, register, authenticate) or run
+   * before one can exist (the passkey login ceremony) — the door has to be
+   * reachable from outside the room. Anything that reads or writes app
+   * state must not set it: `history` and `undo` did not have this gate
+   * until 0.10.1, and a call-shaped read is not covered by the doc permit
+   * a NULL user passes as "the host asking as itself".
+   */
+  method(
+    name: string,
+    fn: (params: any, ws: any) => unknown | Promise<unknown>,
+    opts?: { open?: boolean },
+  ): void;
   /**
    * Dynamic docs: when a client opens an unregistered name matching prefix,
    * the factory runs once (concurrent opens coalesce) and must register the
@@ -144,8 +159,18 @@ export interface Host {
 
 export function createHost(opts?: {
   path?: string;
-  /** When set, open/ops require ws.data.user (set by an auth method). */
+  /** When set, open/ops AND calls require ws.data.user (set by an auth
+   *  method registered with `{ open: true }`). */
   requireAuth?: boolean;
+  /** Ops accepted in one write. One batch is one transaction holding one
+   *  row lock, so this bounds how long a single client can stall a doc.
+   *  Default 500. */
+  maxOpsPerBatch?: number;
+  /** Web origins allowed to open a socket. Unset = any (local dev, a public
+   *  demo). Set it in production: a WebSocket is not bound by the same-origin
+   *  policy, so without it any page can talk to your server as your signed-in
+   *  user. Requests with no Origin header (CLI, tests) are unaffected. */
+  origins?: string[];
   /** Fired after a socket's FIRST successful open of a doc (snapshot already
    *  sent, so ops applied here reach the new subscriber in order). Presence
    *  is built on this pair — see server.ts. */
@@ -162,7 +187,10 @@ export function createHost(opts?: {
   // statically registered docs live for the process.
   type Entry = { sig: Signal<any>; v: number; subs: Set<any>; dynamic: boolean; write?: DocOpts["write"]; open?: DocOpts["open"] };
   const docs = new Map<string, Entry>();
-  const methods = new Map<string, (params: any, ws: any) => unknown | Promise<unknown>>();
+  const maxOps = opts?.maxOpsPerBatch ?? 500;
+  const allowedOrigins = opts?.origins ? new Set(opts.origins) : undefined;
+  type Method = { fn: (params: any, ws: any) => unknown | Promise<unknown>; open: boolean };
+  const methods = new Map<string, Method>();
   const prefixes = new Map<string, (name: string, userId?: number | string) => unknown | Promise<unknown>>();
   const pendingFactories = new Map<string, Promise<unknown>>();
   let server: any = null;
@@ -177,7 +205,12 @@ export function createHost(opts?: {
   async function resolveEntry(name: string, userId?: number | string): Promise<Entry | undefined> {
     const existing = docs.get(name);
     if (existing) return existing;
-    for (const [prefix, factory] of prefixes) {
+    // LONGEST prefix wins. Iterating the Map in insertion order made the
+    // answer depend on registration order, so registering "board:" before
+    // "board:archived:" silently shadowed the second — a bug that looks like
+    // the factory never running. Most specific is the only order that can't
+    // surprise you.
+    for (const [prefix, factory] of [...prefixes].sort((a, b) => b[0].length - a[0].length)) {
       if (!name.startsWith(prefix)) continue;
       let pending = pendingFactories.get(name);
       if (!pending) {
@@ -282,8 +315,8 @@ export function createHost(opts?: {
       for (const ws of targets) evict(name, entry, ws);
     },
 
-    method(name, fn) {
-      methods.set(name, fn);
+    method(name, fn, mopts) {
+      methods.set(name, { fn, open: mopts?.open === true });
     },
 
     docs(prefix, factory) {
@@ -292,9 +325,21 @@ export function createHost(opts?: {
 
     fetch(req: Request, srv: any) {
       const url = new URL(req.url);
+      if (url.pathname !== path) return new Response("not found", { status: 404 });
+      const origin = req.headers.get("origin");
+      // WebSockets are NOT subject to the same-origin policy: without this
+      // check any page the user visits can open a socket to a deployment they
+      // are signed in to and speak the protocol as them. `origins` is the
+      // allowlist; unset keeps every origin, which is right for local work
+      // and for a public read-only demo, and wrong for anything with a
+      // session behind it. A missing Origin header is a non-browser client
+      // (the CLI, a test) and is not what this defends against.
+      if (allowedOrigins && origin && !allowedOrigins.has(origin)) {
+        return new Response("forbidden origin", { status: 403 });
+      }
       // The socket remembers where it came from — passkey ceremonies bind
       // to this origin by default (epsilon/passkey.ts).
-      if (url.pathname === path && srv.upgrade(req, { data: { origin: req.headers.get("origin") } })) return undefined;
+      if (srv.upgrade(req, { data: { origin } })) return undefined;
       return new Response("not found", { status: 404 });
     },
 
@@ -311,13 +356,22 @@ export function createHost(opts?: {
         try { msg = JSON.parse(String(raw)); } catch { return; }
 
         if (msg.action === "call") {
-          const fn = methods.get(msg.method);
-          if (!fn) {
+          const m = methods.get(msg.method);
+          if (!m) {
             ws.send(JSON.stringify({ id: msg.id, error: `unknown method: ${msg.method}` } satisfies ServerMsg));
             return;
           }
+          // The SAME gate doc traffic gets, on the same socket state. This
+          // branch used to return before it, which made every method — the
+          // audit log read, undo, the operator's door — reachable without a
+          // session, and a NULL user reads as "the host itself" inside the
+          // SQL permits. Only session-minting methods opt out.
+          if (opts?.requireAuth && !m.open && ws.data?.user == null) {
+            ws.send(JSON.stringify({ id: msg.id, error: "unauthenticated" } satisfies ServerMsg));
+            return;
+          }
           try {
-            const result = await fn(msg.params, ws);
+            const result = await m.fn(msg.params, ws);
             ws.send(JSON.stringify({ id: msg.id, result } satisfies ServerMsg));
           } catch (err) {
             ws.send(JSON.stringify({ id: msg.id, error: String(err) } satisfies ServerMsg));
@@ -362,6 +416,14 @@ export function createHost(opts?: {
             ws.send(JSON.stringify({ doc: msg.doc, error: `unknown doc: ${msg.doc}` } satisfies ServerMsg));
             return;
           }
+          // Pair the version with the snapshot HERE, while nothing has been
+          // awaited since it was taken. A snapshot sent under a v it doesn't
+          // match is the one desync the protocol cannot detect: the client
+          // accepts the baseline, then silently ignores every op it already
+          // "has". The invariant an `open` hook must keep is the same one —
+          // return a value current as of the moment it returns, not one
+          // computed before its last await.
+          const v = entry.v;
           ws.subscribe(msg.doc);
           // Count each socket once — a gap-triggered re-open isn't a new sub.
           const isNew = !ws.data.docs.has(msg.doc);
@@ -371,7 +433,7 @@ export function createHost(opts?: {
           }
           // The snapshot IS an op — same vocabulary, same client code path.
           ws.send(JSON.stringify({
-            doc: msg.doc, v: entry.v,
+            doc: msg.doc, v,
             ops: [{ op: "replace", path: "", value: snapshot }],
           } satisfies ServerMsg));
           // After the send: ops the hook applies follow the snapshot in order.
@@ -380,6 +442,22 @@ export function createHost(opts?: {
             catch (err) { console.error("[epsilon/doc] onSubscribe hook threw:", err); }
           }
         } else if (msg.action === "ops") {
+          // One batch is one transaction, and on the relational tier it holds
+          // the doc's row lock for its whole length — so an unbounded batch is
+          // an unbounded hold, and the embedded engine runs every query through
+          // one chain, which means one client can make that everyone's problem.
+          // It also writes the ops AND their inverse into a single doc_ops row.
+          // The bound is structural, not tuned to a benchmark; 500 is far above
+          // any real edit, and maxOpsPerBatch raises it if you disagree.
+          if (!Array.isArray(msg.ops) || msg.ops.length > maxOps) {
+            ws.send(JSON.stringify({
+              doc: msg.doc, write: true,
+              error: Array.isArray(msg.ops)
+                ? `too many ops in one write: ${msg.ops.length} (max ${maxOps})`
+                : "ops must be an array",
+            } satisfies ServerMsg));
+            return;
+          }
           try {
             let resolved: Op[];
             if (entry.write) {
@@ -582,6 +660,10 @@ export function connect(
 
   const remote: Remote = {
     doc<T>(name: string) {
+      // Same guard call() has. Without it a doc asked for after close() gets
+      // a handle whose `ready` never settles and whose writes go nowhere —
+      // a hang with no error, which is the worst of both.
+      if (closed) throw new Error("closed");
       let doc = docs.get(name) as RemoteDoc<T> | undefined;
       if (!doc) {
         doc = new RemoteDoc<T>(
@@ -695,8 +777,23 @@ export function connect(
     ws.onclose = () => {
       // Fail fast rather than hang — a retried call after reconnect is the
       // caller's decision (it may not be idempotent, e.g. register).
+      //
+      // Then DROP what we just rejected. An id-bearing message is one whose
+      // promise has an owner; telling that owner "disconnected" and flushing
+      // the message anyway on reconnect means the server runs it while the
+      // caller believes it failed — so a caller who does the documented thing
+      // and retries executes it twice (a `register` rejected as disconnected
+      // still registered). Fire-and-forget writes carry no id and no promise:
+      // those keep queueing and flushing, which is apply()'s contract.
       for (const [, p] of pending) p.reject(new Error("disconnected"));
       pending.clear();
+      const drop = (q: ClientMsg[]) => {
+        for (let i = q.length - 1; i >= 0; i--) {
+          if ((q[i] as { id?: number }).id !== undefined) q.splice(i, 1);
+        }
+      };
+      drop(queuedOps);
+      drop(queued);
       try {
         opts?.onDisconnect?.(!closed);
       } catch (err) {

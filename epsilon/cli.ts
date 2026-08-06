@@ -119,7 +119,9 @@ try {
         ? { name: rest[0], email: rest[1], password: rest[2] }
         : { email: rest[0], password: rest[1] };
       const res = await remote.call<{ token: string; user: unknown }>(cmd, params);
-      writeFileSync(TOKEN_FILE, res.token + "\n");
+      // 0600: a session token is a bearer credential for seven days, and the
+      // default umask puts it in a world-readable file in the cwd.
+      writeFileSync(TOKEN_FILE, res.token + "\n", { mode: 0o600 });
       out(res.user);
       break;
     }
@@ -161,13 +163,16 @@ try {
         [{ op: "remove", path: a }];
       const doc = remote.doc(name);
       await doc.ready.catch(failDoc);
-      // The echo is the result — the resolved ops every subscriber saw.
-      let echo: { v: number; ops: Op[] } | null = null;
-      doc.onOps((o) => { if (o && !echo) echo = { v: doc.v, ops: o }; });
-      doc.apply(ops);
-      await until(() => echo !== null || docErrors.length > 0);
-      if (!echo) fail(docErrors[0]!);
-      out(echo);
+      // The echo is the result — the resolved ops, server-minted ids and all.
+      // write() answers on THIS write's own id; watching onOps for "the next
+      // ops that arrive" printed a concurrent writer's broadcast as your echo
+      // whenever someone else wrote in the same window.
+      try {
+        const resolved = await doc.write(ops);
+        out({ v: doc.v, ops: resolved });   // v read AFTER the echo landed
+      } catch (e) {
+        fail(e instanceof Error ? e.message : String(e));
+      }
       break;
     }
 
@@ -187,7 +192,14 @@ try {
     case "call": {
       const [method, params] = rest;
       if (!method) fail("usage: call <method> [params-json]");
-      out(await remote.call(method, loose(params)));
+      let p = loose(params);
+      // The admin door takes a secret as well as a session. Carry it from the
+      // environment so it stays out of shell history and out of the JSON the
+      // operator types; an explicit `secret` in the params still wins.
+      if (method === "admin" && process.env.EPSILON_ADMIN_SECRET) {
+        p = { secret: process.env.EPSILON_ADMIN_SECRET, ...(p as object ?? {}) };
+      }
+      out(await remote.call(method, p));
       break;
     }
 

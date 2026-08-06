@@ -8,7 +8,11 @@ board.apply(ops);   // mutate in place + notify, passing the ops along
 ```
 
 - `apply(ops)` replaces `touch()`; `set(v)` is sugar for one root-replace op.
-- Subscribers receive `(ops | undefined)`. `undefined` = recompute from state — always available, always correct.
+- Subscribers receive `Op[]`, always. An `undefined` = "recompute" sentinel
+  was specified early and never built, because it had no work to do: the
+  STATE channel is the recompute path, permanently available, and a consumer
+  that wants it just re-reads. Documented here because the phantom outlived
+  the design — `law.ts` still guarded against it.
 - **The law:** any consumer may ignore ops and re-read state. Correctness never depends on the fast path.
 
 ## What each layer does with ops
@@ -126,7 +130,7 @@ writing into `mine:<uid>` in the same transaction. The write hook re-enters
 the doc it wrote; nothing re-enters the sibling, and PGlite has no doorbell
 to ring. Symptom: a share landed in the tables and the member's list never
 moved, refresh included — a doc another socket still watches is served the
-hosted snapshot, not a fresh composition. Outgrow it → pg_dump into a wire
+hosted snapshot, not a fresh composition. Outgrow it → epsilon/export.ts (pg_dump cannot reach a portless engine) into a wire
 server, set `EPSILON_PG_URL`: scaling up is a config change because both
 engines speak the same schema. Measured: WASM boot ~2–7s by machine (once, at start),
 bcrypt cost 12 ~350ms — on par with native.
@@ -150,7 +154,9 @@ Two laws that fell out of Peter's review of the first cut:
   one read path for both tiers). A write must never rebuild the doc.
 - **NOTIFY is a doorbell, not a payload.** `{name, v}` (~40 bytes — the 8k
   limit is unreachable); listeners fetch ops from `doc_ops`, which is the
-  event log AND the audit trail (`by_user`, `at`).
+  event log AND the audit trail (`by_user`, `at`). The listener reads only
+  `name` (and `gone`, 0.5.0) and re-queries: `v` rides along unused, because
+  catch-up has to ask the log what it missed regardless of what the bell said.
 
 ## The doc kit (db/003-doc-kit.sql) — SQL reuse where it's core
 
@@ -533,7 +539,12 @@ and only the SQL part wanted machinery — which existed:
 
 ## Non-goals
 
-No vdom. No OT/CRDT (model is authoritative; LWW + resync). No offline. No UNDECLARED live queries (amended 2026-08-01) — a live read is a declared view (`pgView`: named composition, named dependencies, read-only); ad-hoc query subscriptions stay out. **No per-viewer composition** (decreed 2026-08-01, was a "known limit"): a doc reads the same to everyone permitted to read it — different views for different people are different doc NAMES (`mine:<uid>`, `tally:<uid>`), minted per identity. Per-subscriber recompose would fight "express the change, never recompose"; doc-granularity permits already scope identity. In-memory mode is a SHAPE PREVIEW, not a second implementation: uuid ids, no `-` identity resolution, no permits — keep identity-dependent UI behind auth.
+No vdom. No OT/CRDT (model is authoritative; LWW + resync). No offline. No UNDECLARED live queries (amended 2026-08-01) — a live read is a declared view (`pgView`: named composition, named dependencies, read-only); ad-hoc query subscriptions stay out. **No per-viewer composition** (decreed 2026-08-01, was a "known limit"): a doc reads the same to everyone permitted to read it — different views for different people are different doc NAMES (`mine:<uid>`, `tally:<uid>`), minted per identity. Per-subscriber recompose would fight "express the change, never recompose"; doc-granularity permits already scope identity. In-memory mode is a SHAPE PREVIEW, not a second implementation: ids are
+uuids rather than sequence numbers. It DOES resolve `/-` (mintIds in doc.ts —
+Decision 1 holds on every tier, and doc.test.ts pins it); what it lacks is a
+database, so `dev:memory` runs with no auth and the demo's docs carry no
+permits. An in-memory doc can still take an `open` gate — presence is one.
+Keep identity-dependent UI behind auth.
 
 ## Decisions (Peter, 2026-07-28)
 

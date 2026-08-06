@@ -25,4 +25,5 @@ jobs:
       - run: bun install
       - run: bun run check
       - run: bun run test
+      - run: bun run test:migrate
       - run: bun run test:pglite

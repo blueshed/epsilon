@@ -1180,7 +1180,8 @@ describe.skipIf(!DB_UP)("the operator's door — no list, no door", () => {
   test("unlisted callers are refused in words; the listed one gets rows", async () => {
     const host = createHost({ requireAuth: true });
     await pgAuth(host, sql);
-    const opened = pgAdmin(host, sql, { admins: ["  Boss@Door.TEST ", ""] });
+    const secret = "operator-secret";
+    const opened = pgAdmin(host, sql, { admins: ["  Boss@Door.TEST ", ""], secret });
     expect(opened).toBe(true);                       // padded and cased entries still count
     const url = serve(host);
 
@@ -1192,36 +1193,67 @@ describe.skipIf(!DB_UP)("the operator's door — no list, no door", () => {
     // A signed-in stranger is told WHY, not handed a uniform "unknown method"
     // — the door is only reachable by an authenticated socket anyway.
     let err = "";
-    try { await nobody.call("admin", { sql: "SELECT 1" }); } catch (e) { err = String(e); }
+    try { await nobody.call("admin", { sql: "SELECT 1", secret }); } catch (e) { err = String(e); }
     expect(err).toContain("not permitted");
 
-    // No session at all is its own answer.
+    // No session at all never reaches the method: the host's call gate turns
+    // it away first (0.10.1), which is the same answer doc traffic gets.
     const anon = client(url);
     err = "";
-    try { await anon.call("admin", { sql: "SELECT 1" }); } catch (e) { err = String(e); }
-    expect(err).toContain("no session");
+    try { await anon.call("admin", { sql: "SELECT 1", secret }); } catch (e) { err = String(e); }
+    expect(err).toContain("unauthenticated");
+
+    // The right person WITHOUT the secret is refused too — the allowlist is
+    // an email, and an email is registerable by whoever gets there first.
+    err = "";
+    try { await boss.call("admin", { sql: "SELECT 1" }); } catch (e) { err = String(e); }
+    expect(err).toContain("secret");
+    err = "";
+    try { await boss.call("admin", { sql: "SELECT 1", secret: "wrong" }); } catch (e) { err = String(e); }
+    expect(err).toContain("secret");
 
     // The listed operator reaches the database — the door's whole purpose on
     // a deployment whose Postgres has no port.
     const out = await boss.call<{ rows: { email: string }[] }>("admin", {
       sql: "SELECT email FROM users WHERE email = 'nobody@door.test'",
+      secret,
     });
     expect(out.rows[0]!.email).toBe("nobody@door.test");
 
     err = "";
-    try { await boss.call("admin", {}); } catch (e) { err = String(e); }
+    try { await boss.call("admin", { secret }); } catch (e) { err = String(e); }
     expect(err).toContain("sql required");
+  });
+
+  test("a list without a secret opens NO door — it refuses to be half-configured", async () => {
+    const host = createHost({ requireAuth: true });
+    await pgAuth(host, sql);
+    const saved = process.env.EPSILON_ADMIN_SECRET;
+    delete process.env.EPSILON_ADMIN_SECRET;
+    try {
+      // Arbitrary SQL guarded only by a string anyone can register is not a
+      // door, so it does not open at all rather than opening weakly.
+      expect(pgAdmin(host, sql, { admins: ["half@door.test"] })).toBe(false);
+      const r = client(serve(host));
+      await r.call("register", { name: "Half", email: "half@door.test", password: "pw" });
+      let err = "";
+      try { await r.call("admin", { sql: "SELECT 1" }); } catch (e) { err = String(e); }
+      expect(err).toContain("unknown method");
+    } finally {
+      if (saved !== undefined) process.env.EPSILON_ADMIN_SECRET = saved;
+    }
   });
 
   test("the frame is bounded, and the truncation says so", async () => {
     const host = createHost({ requireAuth: true });
     await pgAuth(host, sql);
-    pgAdmin(host, sql, { admins: ["cap@door.test"], maxRows: 5 });
+    pgAdmin(host, sql, { admins: ["cap@door.test"], maxRows: 5, secret: "cap-secret" });
     const r = client(serve(host));
     await r.call("register", { name: "Cap", email: "cap@door.test", password: "pw" });
 
     const out = await r.call<{ rows: unknown[]; truncated?: boolean; total?: number }>("admin", {
       sql: "SELECT generate_series(1, 50) AS n",
+      secret: "cap-secret",
     });
     expect(out.rows).toHaveLength(5);
     expect(out.truncated).toBe(true);

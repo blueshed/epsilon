@@ -22,9 +22,9 @@ function client(onError?: (doc: string, error: string) => void): Remote {
   return r;
 }
 
-const until = async (cond: () => boolean, ms = 1000) => {
+const until = async (cond: () => boolean | Promise<boolean>, ms = 1000) => {
   const start = Date.now();
-  while (!cond()) {
+  while (!(await cond())) {
     if (Date.now() - start > ms) throw new Error("timeout");
     await new Promise((r) => setTimeout(r, 5));
   }
@@ -226,7 +226,7 @@ describe("reconnect — onConnect re-authenticates before docs re-open", () => {
     const h = createHost({ requireAuth: true });
     h.doc<Board>("secret", structuredClone(empty));
     let becomes = 0;
-    h.method("become", (_p, ws) => { ws.data ??= {}; ws.data.user = { id: 7 }; becomes++; return { id: 7 }; });
+    h.method("become", (_p, ws) => { ws.data ??= {}; ws.data.user = { id: 7 }; becomes++; return { id: 7 }; }, { open: true });
     h.method("kick", (_p, ws) => { ws.close(); });
     const srv = Bun.serve({
       port: 0,
@@ -254,7 +254,7 @@ describe("reconnect — onConnect re-authenticates before docs re-open", () => {
   test("writes made while the socket is DOWN queue and flush, not drop", async () => {
     const h = createHost({ requireAuth: true });
     const authority = h.doc<Board>("secret", structuredClone(empty));
-    h.method("become", (_p, ws) => { ws.data ??= {}; ws.data.user = { id: 7 }; return { id: 7 }; });
+    h.method("become", (_p, ws) => { ws.data ??= {}; ws.data.user = { id: 7 }; return { id: 7 }; }, { open: true });
     h.method("hang", () => new Promise(() => {}));   // pending until the drop
     h.method("kick", (_p, ws) => { ws.close(); });
     const srv = Bun.serve({
@@ -280,13 +280,81 @@ describe("reconnect — onConnect re-authenticates before docs re-open", () => {
     srv.stop(true);
   });
 
+  test("a write REJECTED by the drop does not also execute on reconnect", async () => {
+    // The double-execute: onclose rejected every pending promise but left the
+    // message in the queue, so a later successful open flushed it and the
+    // server ran it — while the caller had been told "disconnected". A caller
+    // who then does the documented thing (decide whether to retry) applies it
+    // twice. The rejection is a promise; the queue has to agree with it.
+    //
+    // It needs a FAILED dial after the write is queued, which is why it takes
+    // a server that goes away and comes back on the same port.
+    const mkHost = () => {
+      const h = createHost();
+      const sig = h.doc<Board>("twice", structuredClone(empty), {
+        write: (ops) => { applied++; sig.apply(ops); return ops; },
+      });
+      return h;
+    };
+    let applied = 0;
+
+    const probe = Bun.serve({ port: 0, fetch: () => new Response("") });
+    const port = probe.port;
+    probe.stop(true);
+
+    let h = mkHost();
+    let srv = Bun.serve({
+      port, fetch: (req, s) => h.fetch(req, s) ?? new Response("", { status: 404 }),
+      websocket: h.websocket,
+    });
+    h.setServer(srv);
+
+    let drops = 0;
+    const r = connect(`ws://localhost:${port}${h.path}`, { onDisconnect: () => { drops++; } });
+    remotes.push(r);
+    const doc = r.doc<Board>("twice");
+    await doc.ready;
+
+    srv.stop(true);                                   // server gone: dials will fail
+    await until(() => drops >= 1, 3000);              // the client has SEEN the close,
+                                                      // so the next write QUEUES rather
+                                                      // than vanishing into a live socket
+    let err: Error | undefined;
+    const w = doc.write([{ op: "add", path: "/cards/9", value: { id: 9, title: "ghost", done: false } }])
+      .catch((e) => { err = e as Error; });
+    await until(() => drops >= 2, 5000);              // a failed dial: this is what rejects it
+    await w;
+    expect(err?.message).toContain("disconnected");
+
+    // Bring the server back and let the client reconnect. The rejected write
+    // must NOT be among what flushes.
+    h = mkHost();
+    srv = Bun.serve({
+      port, fetch: (req, s) => h.fetch(req, s) ?? new Response("", { status: 404 }),
+      websocket: h.websocket,
+    });
+    h.setServer(srv);
+
+    // A write that SUCCEEDS proves the client really reconnected — otherwise
+    // "the ghost never landed" would pass for the wrong reason.
+    await until(async () => {
+      try { await doc.write([{ op: "replace", path: "/cards/1/title", value: "back" }]); return true; }
+      catch { return false; }
+    }, 12_000);
+    await new Promise((res) => setTimeout(res, 200));   // room for a stray flush
+
+    expect(applied).toBe(1);                            // the live write, and only it
+    expect(doc.peek()!.cards["9"]).toBeUndefined();     // the rejected one never ran
+    srv.stop(true);
+  }, 20_000);
+
   test("a call queued before the dial lands AFTER the hook, not ahead of it", async () => {
     // The one-shot shape: every call a CLI command makes is issued in the
     // same tick as connect(), while the socket is still dialling. Queued
     // calls used to flush BEFORE the connect hook, so the command ran on a
     // socket that had not authenticated yet — a valid session, refused.
     const h = createHost({ requireAuth: true });
-    h.method("become", (_p, ws) => { ws.data ??= {}; ws.data.user = { id: 7 }; return { id: 7 }; });
+    h.method("become", (_p, ws) => { ws.data ??= {}; ws.data.user = { id: 7 }; return { id: 7 }; }, { open: true });
     h.method("whoami", (_p, ws) => ({ id: ws.data?.user?.id ?? null }));
     const srv = Bun.serve({
       port: 0,
@@ -336,10 +404,116 @@ describe("reconnect — onConnect re-authenticates before docs re-open", () => {
   });
 });
 
+describe("versions — the time tax: replay ignored, gap resyncs", () => {
+  test("host.receive classifies stale, contiguous, and gapped", () => {
+    const h = createHost();
+    h.doc<Board>("v", structuredClone(empty));
+    expect(h.v("v")).toBe(0);
+
+    expect(h.receive("v", 1, [{ op: "add", path: "/cards/2", value: { id: 2, title: "two", done: false } }])).toBe("ok");
+    expect(h.v("v")).toBe(1);
+
+    // The same commit arriving twice (two delivery paths, one write) must be
+    // a no-op, not a double-apply.
+    expect(h.receive("v", 1, [{ op: "remove", path: "/cards/1" }])).toBe("stale");
+    expect(h.v("v")).toBe(1);
+
+    // A hole: something was missed, so the ops in hand cannot be trusted to
+    // land on the right base. The caller reloads instead of guessing.
+    expect(h.receive("v", 3, [{ op: "remove", path: "/cards/1" }])).toBe("gap");
+    expect(h.v("v")).toBe(1);                       // unchanged — nothing applied
+  });
+
+  test("a client that misses a version RE-OPENS itself and converges", async () => {
+    // The client half of the same law, over a real socket: when the server's
+    // v jumps, the client must not apply the ops onto a base it doesn't have
+    // — it re-opens and takes a fresh snapshot. This is the recovery path
+    // every reconnect and every dropped broadcast depends on.
+    const h = createHost();
+    const authority = h.doc<Board>("gap", structuredClone(empty));
+    const srv = Bun.serve({
+      port: 0,
+      fetch: (req, s) => h.fetch(req, s) ?? new Response("", { status: 404 }),
+      websocket: h.websocket,
+    });
+    h.setServer(srv);
+
+    const r = connect(`ws://localhost:${srv.port}${h.path}`);
+    remotes.push(r);
+    const doc = r.doc<Board>("gap");
+    await doc.ready;
+
+    // A real dropped frame, not a simulated one: apply to the authority while
+    // this socket is NOT subscribed, so the broadcast genuinely passes it by.
+    // Then re-subscribe and let the next broadcast arrive out of sequence.
+    doc.close();                                       // unsubscribed on the host
+    await new Promise((res) => setTimeout(res, 50));
+    authority.apply([{ op: "add", path: "/cards/7", value: { id: 7, title: "unheard", done: false } }]);
+
+    const again = r.doc<Board>("gap");                 // re-open: fresh snapshot
+    await again.ready;
+    expect(again.peek()!.cards["7"]!.title).toBe("unheard");   // caught up by snapshot
+    expect(again.v).toBe(h.v("gap"));
+
+    // And live ops resume contiguously from that new baseline.
+    authority.apply([{ op: "add", path: "/cards/8", value: { id: 8, title: "heard", done: false } }]);
+    await until(() => !!again.peek()!.cards["8"], 3000);
+    expect(again.v).toBe(h.v("gap"));
+    srv.stop(true);
+  });
+});
+
+describe("call is gated too — a method is not a side door (0.10.1)", () => {
+  // Until 0.10.1 the call branch returned BEFORE the requireAuth check, so
+  // every registered method was reachable without a session. On the Postgres
+  // tier that made `history` a world-readable dump of any private doc's op
+  // log (a NULL user reads as "the host asking as itself" inside the SQL
+  // permit) and `undo` an anonymous write. The gate is the same one doc
+  // traffic gets; only session-MINTING methods opt out.
+  test("an unauthenticated call is refused unless the method is a door", async () => {
+    const h = createHost({ requireAuth: true });
+    let ran = 0;
+    h.method("readSecrets", () => { ran++; return { secret: "leaked" }; });
+    h.method("become", (_p, ws) => { ws.data ??= {}; ws.data.user = { id: 7 }; return { id: 7 }; }, { open: true });
+    const srv = Bun.serve({
+      port: 0,
+      fetch: (req, s) => h.fetch(req, s) ?? new Response("", { status: 404 }),
+      websocket: h.websocket,
+    });
+    h.setServer(srv);
+
+    const r = connect(`ws://localhost:${srv.port}${h.path}`);
+    remotes.push(r);
+
+    await expect(r.call("readSecrets")).rejects.toThrow("unauthenticated");
+    expect(ran).toBe(0);                       // refused BEFORE the body ran
+
+    await r.call("become");                    // the door is reachable from outside
+    expect(await r.call<{ secret: string }>("readSecrets")).toEqual({ secret: "leaked" });
+    expect(ran).toBe(1);
+    srv.stop(true);
+  });
+
+  test("an ungated host still calls freely — the gate is requireAuth's", async () => {
+    const h = createHost();                    // no requireAuth
+    h.method("ping", () => "pong");
+    const srv = Bun.serve({
+      port: 0,
+      fetch: (req, s) => h.fetch(req, s) ?? new Response("", { status: 404 }),
+      websocket: h.websocket,
+    });
+    h.setServer(srv);
+    const r = connect(`ws://localhost:${srv.port}${h.path}`);
+    remotes.push(r);
+    expect(await r.call<string>("ping")).toBe("pong");
+    srv.stop(true);
+  });
+});
+
 describe("dynamic docs — the factory sees the asking identity", () => {
   test("a probe is refused BEFORE anything is hosted; the owner still opens", async () => {
     const h = createHost({ requireAuth: true });
-    h.method("become", (p: { id: number }, ws) => { ws.data ??= {}; ws.data.user = { id: p.id }; return ws.data.user; });
+    h.method("become", (p: { id: number }, ws) => { ws.data ??= {}; ws.data.user = { id: p.id }; return ws.data.user; }, { open: true });
     let built = 0;
     h.docs("mine:", (name, userId) => {
       if (name !== `mine:${userId}`) throw new Error(`unknown doc: ${name}`);
@@ -549,7 +723,7 @@ describe("drop and expel — a subscription never outlives its permit", () => {
 
   test("expel: the gate is re-asked; only the refused user's sockets go", async () => {
     const h = createHost({ requireAuth: true });
-    h.method("become", (p: { id: string }, ws) => { ws.data.user = { id: p.id }; return true; });
+    h.method("become", (p: { id: string }, ws) => { ws.data.user = { id: p.id }; return true; }, { open: true });
     const allowed = new Set(["alice", "bob"]);
     let club!: Signal<{ n: number }>;
     club = h.doc<{ n: number }>("club", { n: 1 }, {

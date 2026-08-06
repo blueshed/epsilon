@@ -17,8 +17,10 @@ this.
   volume); pgSync runs in POLL mode (0.6.0) — sync is the delivery path
   for every commit made outside a doc's own write hook (mirrors, undo,
   views), not just for sibling processes. Deploying with it?
-  `bun add @electric-sql/pglite`. Outgrowing it? pg_dump, set
-  `EPSILON_PG_URL` — a config change, same schema. `railway.json` at the
+  `bun add @electric-sql/pglite`. Outgrowing it? PGlite has no port, so
+  `pg_dump` cannot reach it: `bun run epsilon:export --dir ./data > dump.sql`,
+  boot once against `EPSILON_PG_URL` so migrations build the schema, then
+  `psql -f dump.sql`. Ids and sequences carry over. `railway.json` at the
   repo root is the worked deploy example (config-as-code: start command,
   healthcheck `/`, restart on failure) — volume at `/data`,
   `EPSILON_PG_DIR=/data`; `server.ts` honors `PORT`. Inert off Railway;
@@ -82,8 +84,12 @@ the moment the row changes — the bug that motivated 0.3.0).
 
 A type is ONE composition query + ONE dispatch function (~30 lines of app
 SQL). Copy `db/100-board.sql` (worked example) or rel.test.ts's `todo`
-type (minimal). Number app migrations from 100 up — 001–099 are epsilon
-core, frozen once released; `migrate()` warns if you squat below.
+type (minimal). 001–099 are epsilon core, frozen once released, and
+`migrate()` warns if you squat below; 100/101 are the scaffold's demo, so
+number your own from **102**. The TABLES need a number — the `_open` and
+`_apply` FUNCTIONS go in `db/fn/`, edited in place (100-board.sql defines
+its own inline only because it predates `db/fn/` and its hash is already
+recorded in deployed ledgers).
 
 - `<x>_open(doc, user)` — one composition query; NULL user = the host,
   full view; NULL result = refused.

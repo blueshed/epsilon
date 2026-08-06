@@ -120,7 +120,14 @@ export async function pgDoc<T>(
   // AS ITSELF: doc_open with no user is the full copy (001's rule), and the
   // open gate above decides who may receive it.
   const [row] = await sql`SELECT v, doc_open(name) AS data FROM docs WHERE name = ${name}`;
-  if (!row) throw new Error(`[epsilon/pg] doc ${name} not seeded — your SQL file should INSERT its docs row`);
+  if (!row) {
+    // host.doc() registered the entry above, so throwing here would leave the
+    // name HOSTED and serving `empty` at v=0 to everyone who opens it — a
+    // failure that looks like an empty document rather than an error. Un-host
+    // it so the next open meets the factory again (and fails honestly).
+    host.drop(name);
+    throw new Error(`[epsilon/pg] doc ${name} not seeded — your SQL file should INSERT its docs row`);
+  }
   host.hydrate(name, Number(row.v), row.data);
   return sig;
 }
@@ -224,10 +231,22 @@ export function pgHistory(host: Host, sql: Sql, opts?: { limit?: number }): void
  * Writes made here BYPASS the op log: right for users and sessions, and
  * reload-worthy for doc tables — hosted docs will not hear about them.
  */
+/** Constant-time string compare — a secret checked with === leaks its prefix
+ *  to anyone willing to time the answer. @internal */
+function timingSafeEqual(a: string, b: string): boolean {
+  const ab = Buffer.from(a), bb = Buffer.from(b);
+  // Compare a fixed-size digest so differing LENGTHS don't short-circuit.
+  const ah = Bun.SHA256.hash(ab) as Uint8Array;
+  const bh = Bun.SHA256.hash(bb) as Uint8Array;
+  let diff = ab.length ^ bb.length;
+  for (let i = 0; i < ah.length; i++) diff |= ah[i]! ^ bh[i]!;
+  return diff === 0;
+}
+
 export function pgAdmin(
   host: Host,
   sql: Sql,
-  opts?: { admins?: string[]; maxRows?: number },
+  opts?: { admins?: string[]; maxRows?: number; secret?: string },
 ): boolean {
   const admins = (opts?.admins ?? process.env.EPSILON_ADMIN?.split(",") ?? [])
     .map((s) => s.trim().toLowerCase())
@@ -235,13 +254,36 @@ export function pgAdmin(
   if (admins.length === 0) return false;
   const maxRows = opts?.maxRows ?? 500;
 
-  host.method("admin", async (params: { sql?: string }, ws) => {
+  // An email is not a secret: registration is open and unverified, so on a
+  // fresh deployment whoever registers the operator's address FIRST inherits
+  // arbitrary SQL — and an operator's address is usually public. The list
+  // says WHO may knock; this secret proves it is really them. It is required
+  // whenever the door is configured, because an optional one is off by
+  // default exactly where it matters.
+  const secret = opts?.secret ?? process.env.EPSILON_ADMIN_SECRET ?? "";
+  if (!secret) {
+    console.error(
+      "[epsilon] EPSILON_ADMIN is set but EPSILON_ADMIN_SECRET is not — the admin door stays CLOSED.\n" +
+      "  The door runs arbitrary SQL and its allowlist is an email anyone can register,\n" +
+      "  so it needs a second factor. Generate one:  openssl rand -hex 32",
+    );
+    return false;
+  }
+
+  host.method("admin", async (params: { sql?: string; secret?: string }, ws) => {
     const user = ws.data?.user as { id?: number | string; email?: string } | undefined;
     if (user?.id == null) throw new Error("admin: no session on this socket — log in first");
     if (!user.email || !admins.includes(user.email.toLowerCase())) {
       throw new Error(`admin: not permitted for ${user.email ?? user.id}`);
     }
+    if (!timingSafeEqual(String(params?.secret ?? ""), secret)) {
+      throw new Error("admin: bad or missing secret (EPSILON_ADMIN_SECRET)");
+    }
     if (!params?.sql) throw new Error("admin: sql required");
+    // The door bypasses the op log, so it also bypasses the audit trail every
+    // ordinary write leaves. Log it: an operator's own statements are the one
+    // thing worth finding in the journal after something goes wrong.
+    console.log(`[epsilon/admin] ${user.email} ran: ${params.sql.slice(0, 500)}`);
     const rows = (await sql.unsafe(params.sql)) as unknown[];
     // Bound the FRAME, not the query — the tail is still in the database, and
     // a truncated answer that says so beats a socket killed by a stray SELECT *.
@@ -608,10 +650,39 @@ function asUser(row: any): User {
   return { id: Number(row.id), name: row.name, email: row.email };
 }
 
+/**
+ * A fixed-window counter, in this process. `hit(key)` returns false once a
+ * key has been seen more than `max` times inside `windowMs`.
+ *
+ * In-process on purpose: it protects THIS process's CPU, so it needs no
+ * shared store and it cannot be reset by reconnecting. Memory is bounded by
+ * sweeping EXPIRED slots first — clearing the whole map under pressure would
+ * let a flood reset everyone's live window, which is the throttle paying for
+ * its own defeat. @internal
+ */
+export function rateLimiter(max: number, windowMs: number) {
+  const slots = new Map<string, { n: number; resetAt: number }>();
+  return {
+    hit(key: string): boolean {
+      const now = Date.now();
+      const slot = slots.get(key);
+      if (!slot || now >= slot.resetAt) {
+        if (slots.size > 10_000) {
+          for (const [k, s] of slots) if (now >= s.resetAt) slots.delete(k);
+          if (slots.size > 10_000) slots.clear();   // still full: stay bounded
+        }
+        slots.set(key, { n: 1, resetAt: now + windowMs });
+        return true;
+      }
+      return ++slot.n <= max;
+    },
+  };
+}
+
 export async function pgAuth(
   host: Host,
   sql: Sql,
-  opts?: { maxAttempts?: number; windowMs?: number },
+  opts?: { maxAttempts?: number; windowMs?: number; maxAttemptsPerIp?: number },
 ): Promise<void> {
   // bcrypt (cost 12) is deliberately expensive, which makes register/login a
   // CPU faucet for anyone hammering them — a fixed window caps that.
@@ -627,25 +698,25 @@ export async function pgAuth(
   // the thing actually under attack, so a real user's own retries are what
   // count against them. Not per-SOCKET: that is free to reset by
   // reconnecting, which is no throttle at all.
+  // The IP+email key alone does NOT bound CPU: rotating the email mints a
+  // fresh budget every time, so one host can hold the bcrypt faucet fully
+  // open. So there are two counters, and an attempt must pass both — a tight
+  // per-ACCOUNT budget (what stops guessing a password) and a loose
+  // per-ADDRESS one (what stops the faucet). The per-address cap is
+  // deliberately generous, because behind a PaaS edge it is shared by every
+  // user of the deployment; it exists to make a flood expensive, not to
+  // police a household.
   const maxAttempts = opts?.maxAttempts ?? 10;
   const windowMs = opts?.windowMs ?? 60_000;
-  const attempts = new Map<string, { n: number; resetAt: number }>();
+  const maxPerIp = opts?.maxAttemptsPerIp ?? 100;
+  const perAccount = rateLimiter(maxAttempts, windowMs);
+  const perAddress = rateLimiter(maxPerIp, windowMs);
   function throttle(ws: any, email?: string): void {
-    const key = `${ws?.remoteAddress ?? "?"}|${String(email ?? "").toLowerCase().trim()}`;
-    const now = Date.now();
-    const slot = attempts.get(key);
-    if (!slot || now >= slot.resetAt) {
-      // Bounded memory. Evicting only EXPIRED slots keeps a flood from
-      // wiping live counters — the old blanket clear() meant an attacker
-      // could reset everyone's window by making the map big.
-      if (attempts.size > 10_000) {
-        for (const [k, s] of attempts) if (now >= s.resetAt) attempts.delete(k);
-        if (attempts.size > 10_000) attempts.clear();   // still full: give up, stay bounded
-      }
-      attempts.set(key, { n: 1, resetAt: now + windowMs });
-      return;
+    const ip = String(ws?.remoteAddress ?? "?");
+    if (!perAddress.hit(ip)) throw new Error("too many attempts — try again later");
+    if (!perAccount.hit(`${ip}|${String(email ?? "").toLowerCase().trim()}`)) {
+      throw new Error("too many attempts — try again later");
     }
-    if (++slot.n > maxAttempts) throw new Error("too many attempts — try again later");
   }
 
   async function startSession(ws: any, user: User): Promise<{ token: string; user: User }> {
@@ -669,7 +740,7 @@ export async function pgAuth(
       throw err;
     }
     return startSession(ws, asUser(rows[0]!.u));
-  });
+  }, { open: true });
 
   host.method("login", async (params: { email?: string; password?: string }, ws) => {
     const { email, password } = params ?? {};
@@ -680,7 +751,7 @@ export async function pgAuth(
     const [row] = await sql`SELECT login(${email}, ${password}) AS u`;
     if (!row?.u) throw new Error("invalid credentials");
     return startSession(ws, asUser(row.u));
-  });
+  }, { open: true });
 
   host.method("authenticate", async (params: { token?: string }, ws) => {
     const { token } = params ?? {};
@@ -691,11 +762,19 @@ export async function pgAuth(
     ws.data ??= {};
     ws.data.user = user;
     return user;
-  });
+  }, { open: true });
 
-  host.method("logout", async (params: { token?: string }, ws) => {
-    if (params?.token) await sql`SELECT session_end(${params.token})`;
+  host.method("logout", async (params: { token?: string; everywhere?: boolean }, ws) => {
+    // `everywhere` needs a session on the socket, not just a token — it ends
+    // sessions this caller may not be holding.
+    if (params?.everywhere) {
+      const uid = (ws.data?.user as User | undefined)?.id;
+      if (uid == null) throw new Error("sign in first");
+      await sql`SELECT session_end_all(${uid})`;
+    } else if (params?.token) {
+      await sql`SELECT session_end(${params.token})`;
+    }
     if (ws.data) delete ws.data.user;
     return { ok: true };
-  });
+  }, { open: true });
 }

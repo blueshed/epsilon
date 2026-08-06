@@ -22,14 +22,14 @@ runtime; it's yours.
 - **Undo is in the schema.** `doc_ops` records each write's inverse; `remote.call("undo", { doc })` reverts *your* last one — refused, never clobbered, when someone wrote after you. The audit log and the undo log are the same table.
 - **Nothing renders dead.** Anything a screen shows is a doc — live, permitted, versioned. When no doc exposes it (a list across docs, counts, a dashboard), one SQL function plus one `pgView` line declares a read-only **view** that recomposes when its named dependencies commit. `call()` is for verbs; there are no fetches to go stale.
 - **The law is a harness you run.** `epsilon/law.ts` drives your doc type's ops over the real wire and proves the client copy equals recompute-from-tables after every echo — undo and mirrors included, failures naming the defect (`proveLaw`, one call per doc type, in your own tests).
-- **Or Postgres with no database process.** Set `EPSILON_PG_DIR=./data` and the SAME schema runs embedded, in-process ([PGlite](https://pglite.dev)) — one deployable service, state on a volume, every migration and stored function unchanged. Outgrow it? `pg_dump`, set `EPSILON_PG_URL`: scaling up is a config change. (Single app process only; add `@electric-sql/pglite` when deploying with it.)
+- **Or Postgres with no database process.** Set `EPSILON_PG_DIR=./data` and the SAME schema runs embedded, in-process ([PGlite](https://pglite.dev)) — one deployable service, state on a volume, every migration and stored function unchanged. Outgrow it? `bun run epsilon:export` into a wire server and set `EPSILON_PG_URL`: ids and sequences carry over. (Single app process only; add `@electric-sql/pglite` when deploying with it.)
 - **Bun, simple.** One runtime, TypeScript on both sides, no build step, zero dependencies (`pg` is optional, dev-time, and retires when Bun ships `sql.listen`).
 - **The UX is the same stream.** Signals carry ops; `list()` routes them; nothing diffs.
 
 ## Choosing an engine
 
 One schema, three ways to run it — the choice is one env var, and moving up
-later is a config change (`pg_dump` carries your data):
+later is a config change (`epsilon:export` carries your data — see Deploying):
 
 | You want | Set | You get |
 |---|---|---|
@@ -51,11 +51,84 @@ recipe for one durable service with no database process:
 1. mount a volume at `/data`
 2. set `EPSILON_PG_DIR=/data`
 3. `bun add @electric-sql/pglite`
+4. set `NODE_ENV=production` and `EPSILON_ORIGINS=https://your.app`
 
 `server.ts` honors `PORT`, so any PaaS router just works. Not on Railway?
 The file is inert (delete it if you like) — the pattern is the same on any
-host: start `bun server.ts`, healthcheck `/`, a volume behind
+host: start `bun server.ts`, healthcheck `/health`, a volume behind
 `EPSILON_PG_DIR`.
+
+**Four things production wants that development does not:**
+
+- **`NODE_ENV=production`.** Otherwise Bun serves in dev mode — HMR plumbing
+  public, verbose errors, client `console` piped into your logs. Epsilon
+  also refuses to boot with no database configured under this flag, so a
+  mistyped `EPSILON_PG_DIR` fails loudly instead of silently serving an
+  open, auth-free, in-memory app to the internet.
+- **`EPSILON_ORIGINS`.** A WebSocket is not bound by the same-origin policy,
+  so without an allowlist any page your users visit can open a socket to
+  your deployment and speak the protocol as them. It also pins the passkey
+  ceremony (changing your origin or hostname later strands existing
+  passkeys — pick the real one before people enrol).
+- **TLS, terminated in front of you.** Session tokens are bearer
+  credentials; over `ws://` they travel in clear. Every PaaS router does
+  this for you — the client upgrades to `wss` automatically behind https.
+  Set HSTS and any CSP there too: `Bun.serve` bundles the HTML natively and
+  wrapping that route to add headers defeats the bundler.
+- **`bun add pg`** *if you deploy on `EPSILON_PG_URL`.* It is the LISTEN
+  peer. Without it cross-process fan-out silently degrades to polling —
+  correct, just slower, and nothing warns you.
+
+### Outgrowing the embedded tier
+
+PGlite has no port, so `pg_dump` cannot reach it. `epsilon/export.ts` is the
+way out — data as SQL, schema from your own migrations:
+
+```sh
+bun run epsilon:export --dir ./data > dump.sql   # 1. export
+EPSILON_PG_URL=postgres://… bun server.ts        # 2. boot once: migrations build the schema, then stop it
+psql "$EPSILON_PG_URL" -f dump.sql               # 3. load (truncates as it goes — safe to re-run)
+```
+
+Then redeploy with `EPSILON_PG_URL` set and drop the volume. Rows keep their
+ids and sequences are reset past them, so the first write on the new server
+cannot collide with one the old one already minted.
+
+### Backups and retention
+
+On the embedded tier the database IS the volume: snapshot `/data`, or run
+`epsilon:export` on a schedule and keep the SQL. On a Postgres server, it is
+an ordinary Postgres — use your host's backups.
+
+Two tables are pruned; the rest are yours to watch. `epsilon_prune()` runs at
+boot and daily, deleting expired sessions and `doc_ops` **older than 30
+days** — which also bounds undo depth and truncates the audit trail at 30
+days, since they are the same log. Change the window by calling
+`epsilon_prune('90 days')` yourself, or archive `doc_ops` before it runs.
+Nothing bounds `users`, `boards`, or your own tables: open registration means
+open storage, so add quotas if you expose it publicly.
+
+## Environment
+
+Everything is optional; the defaults are a working development machine.
+
+| Variable | What it does |
+|---|---|
+| `EPSILON_PG_DIR` | Embedded Postgres in this directory (`bun dev` uses `./data`). |
+| `EPSILON_PG_URL` | Postgres server. Wins over `EPSILON_PG_DIR`. |
+| `PORT` | What to listen on (default 3000). |
+| `NODE_ENV` | `production` turns off dev mode and refuses to boot without a database. |
+| `EPSILON_ORIGINS` | Comma-separated web origins allowed to open a socket and run passkey ceremonies. Unset = any. |
+| `EPSILON_RP_NAME` | Name shown in the browser's passkey sheet. |
+| `EPSILON_ADMIN` | Comma-separated emails allowed at the operator's door. |
+| `EPSILON_ADMIN_SECRET` | Required alongside it — without this the door stays shut. `openssl rand -hex 32`. |
+| `EPSILON_MAX_PAYLOAD` | Largest WebSocket frame accepted, bytes (default 1 MiB). |
+| `EPSILON_ALLOW_OPEN` | Permits the auth-free in-memory preview under `NODE_ENV=production`. |
+| `EPSILON_TOKEN` | A session token for the CLI, instead of `.epsilon-token`. |
+| `EPSILON_URL` | Where the CLI connects (default `ws://localhost:3000/ws`). |
+| `EPSILON_TEST_PG_URL` | Postgres for the test suites, instead of `:5599`. |
+| `EPSILON_REQUIRE_DB` | Makes DB-needing suites FAIL rather than skip (CI). |
+| `EPSILON_UPSTREAM` | Where `epsilon:upgrade` fetches from. |
 
 ## The app (yours, and a demo to delete)
 

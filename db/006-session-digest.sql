@@ -1,0 +1,21 @@
+-- 006 — session tokens are stored as a DIGEST, never in the clear.
+--
+-- A session token is a bearer credential: whoever holds it is you, for seven
+-- days. Stored raw, every copy of the database — a backup, a dump handed to a
+-- contractor, one SELECT through the admin door — is a pile of live logins.
+-- Hashed, a leaked table gives an attacker nothing to present.
+--
+-- This file is the one-time DATA move; the function bodies live in db/fn/
+-- (session_start, session_get, session_end, session_end_all), because
+-- CREATE OR REPLACE is replayable and a function body is not a migration.
+--
+-- Existing sessions SURVIVE. The column already holds the raw token, so
+-- hashing it in place produces exactly what the new session_get will compute
+-- from the token the client still has. Nobody is signed out by this upgrade.
+--
+-- SHA-256 with no salt and no stretching is right HERE and wrong for
+-- passwords: a 256-bit random token has no guessable keyspace to protect, so
+-- the only job is "not reversible from the stored value", and a fast hash
+-- keeps session lookup a single indexed read. Passwords keep bcrypt (002).
+
+UPDATE sessions SET token = encode(sha256(token::bytea), 'hex');

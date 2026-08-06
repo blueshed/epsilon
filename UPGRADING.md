@@ -29,6 +29,68 @@ that a scaffold cannot update is wrong the day after it ships, so
 
 ---
 
+## → 0.10.1
+
+A patch by intent — 0.10.0 reviewed and repaired — but two of the repairs
+need a line from you, because a security hole cannot be closed without
+changing what the insecure code did.
+
+**The one API change is a security fix: methods registered with
+`host.method()` now require a session on a `requireAuth` host.**
+
+Until 0.10.1 the `call` branch returned before the auth gate, so every
+registered method was reachable by a socket that had never authenticated. On
+the Postgres tier that made `history` a world-readable dump of any private
+doc's op log — a NULL user reads as "the host asking as itself" inside the
+SQL permit — and `undo` an anonymous write against any doc a NULL user may
+touch (the seeded, ownerless `board:1` among them).
+
+**If you only use the built-in methods, the upgrade is automatic.** `login`,
+`register`, `authenticate`, `logout` and the passkey LOGIN pair are declared
+as doors upstream and keep working before sign-in.
+
+**If you registered your own methods**, decide for each one:
+
+```ts
+host.method("mine", fn);                  // needs a session (the new default)
+host.method("start_session", fn, { open: true });   // reachable before one exists
+```
+
+Only mark a method `open` if it MINTS a session or must run before one can
+exist. Anything that reads or writes app state must not be: a call-shaped
+read is not covered by the doc permit, which is the hole this closed.
+
+**Two things also need you, both one line:**
+
+- **The operator's door now requires `EPSILON_ADMIN_SECRET`.** `EPSILON_ADMIN`
+  is a list of emails, and registration is open and unverified — so on a
+  fresh deployment whoever registers that address first inherits arbitrary
+  SQL. With `EPSILON_ADMIN` set and no secret, the door does not open at all
+  and says so at boot. Generate one with `openssl rand -hex 32`, then pass it
+  alongside the sql (`bun epsilon/cli.ts call admin '{"sql":"…"}'` picks it up
+  from the environment).
+- **Set `EPSILON_ORIGINS` and `NODE_ENV=production` when you deploy.** Neither
+  is required, and both matter — see README "Deploying". Without the first,
+  any web page can open a socket to your deployment as your signed-in user;
+  without the second, Bun serves in development mode in production.
+
+**Automatic, but worth knowing:**
+
+- `db/006-session-digest.sql` hashes session tokens at rest. **Nobody is
+  signed out** — the migration hashes the existing column in place, so the
+  token a client already holds still resolves. Copy that one file into your
+  own `db/` (core migrations are frozen; you adopt a new one by copying it),
+  along with `db/fn/session.sql`, which holds the new function bodies.
+- The migration ledger moved from `Bun.hash` to SHA-256. Your existing rows
+  are recognised and rewritten on the next boot — no migration re-runs, and
+  an actually-edited file is still refused.
+- A rejected write no longer replays on reconnect. If your app worked around
+  the double-execute by not retrying, you can stop.
+- Writes are capped at 500 ops per batch (`maxOpsPerBatch`), and the socket
+  at a 1 MiB frame. Both are far above real use; raise them if you disagree.
+
+---
+
 ## → 0.10.0
 
 **One breaking change, and it is a compile error, not a surprise at
@@ -67,7 +129,17 @@ is worth copying in — the folder's three rules, where the next person looks.
 
 ---
 
-## → 0.9.0 (unreleased)
+## → 0.9.1 – 0.9.3
+
+**Runtime: automatic, nothing required of you.** Three fixes in a row, all
+found the same week `db/fn/` shipped: `batch()` had gone missing from the
+public exports (0.9.1); `db/fn/`'s own safety gate refused some of the files
+it exists to accept (0.9.2); and the scaffold's test broke on the new
+directory (0.9.3).
+
+---
+
+## → 0.9.0
 
 **Runtime: automatic. Nothing breaks, and nothing is required of you.**
 `db/fn/` is opt-in: an app with no such directory behaves exactly as it did.
