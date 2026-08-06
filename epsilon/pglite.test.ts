@@ -10,7 +10,7 @@ import { migrate, pgDoc, pgAuth, pgSync, pgUndo, pgView, type Sql } from "./pg";
 import { hasBoardFixture, NO_FIXTURE } from "./testdb";
 import { openPglite } from "./pglite";
 import { proveLaw } from "./law";
-import type { Card, Board } from "../types";
+import type { FixtureCard as Card, FixtureBoard as Board } from "./fixture";
 
 const DB_DIR = new URL("../db", import.meta.url).pathname;
 

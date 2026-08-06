@@ -8,7 +8,7 @@ import type { Signal } from "./signal";
 import { migrate, pgDoc, pgSync, pgAuth, pgUndo, pgAdmin } from "./pg";
 import { pgReachable, skipped, hasBoardFixture, NO_FIXTURE } from "./testdb";
 import { proveLaw } from "./law";
-import type { Card, Board } from "../types";
+import type { FixtureCard as Card, FixtureBoard as Board } from "./fixture";
 
 // Test db namespaced by app (package.json name) — see pg.test.ts's note.
 const APP = ((await Bun.file(new URL("../package.json", import.meta.url)).json()).name as string)

@@ -29,6 +29,23 @@ that a scaffold cannot update is wrong the day after it ships, so
 
 ---
 
+## → 0.10.4
+
+**Nothing to do.** No schema, no API, no `db/` files — the whole release is
+`epsilon/` plus the skill, which is exactly what `epsilon:upgrade` carries.
+
+Two things worth knowing afterwards:
+
+- **A lens minted inside an `effect` no longer hangs the tab.** If you wrote
+  `effect(() => { … row.at("/field").get() … })` — the shape the demo taught
+  until now — it works, and is now as cheap as hoisting. Hoist it anyway;
+  the skill says why.
+- **If your app imported `Board`/`Card` into its own `types.ts` only to keep
+  the vendored suites compiling, you can delete them.** Those suites declare
+  their fixture types in `epsilon/fixture.ts` now.
+
+---
+
 ## → 0.10.3
 
 **Take this instead of 0.10.2.** 0.10.2's own instructions below were wrong

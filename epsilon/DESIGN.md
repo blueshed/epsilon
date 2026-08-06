@@ -56,6 +56,20 @@ Any line not paying one of these taxes is deletable.
 - **A lens read in an `effect` is the precise scalar path** (0.9.0). `Lens.get()` tracks its own slice: sibling writes never reach it; ancestor replaces and snapshots fall through like `list()`'s reconcile. O(change) for field content, with no second primitive.
 - `text(sig)` is the state-channel binding — the always-correct fallback, one effect per node, and the only choice for computed/`map()` values (they carry no ops).
 - `mount(target, render)` (0.8.0) is the **app root**: it brackets a dispose scope, so the scope rules hold all the way down, and returns the disposer. A top-level `list()` or lens read warns because it has no owner; this is the answer.
+- **The slice tick is the ROOT's, shared per path and refcounted** (0.10.4).
+  A lens minted its own tick and its own root subscription on first read,
+  which is correct exactly once — and a lens minted INSIDE an effect is
+  minted on every run. Each new subscription re-ran the effect, and a JS Set
+  visits entries appended while it is being iterated, so ONE echo looped
+  until the tab died: no error, no warning, nothing in the console. It cost a
+  real app most of a session, and the demo taught the shape. Two changes, and
+  the pair is the point: `notify()` iterates a SNAPSHOT (a handler subscribed
+  during delivery hears the next op, not this one), and ticks are shared per
+  path so `at()` is idempotent for readers. An effect owns the slices its
+  body reads and releases the previous run's once the next has taken its own
+  — the lifetime tax, paid where the subscription is actually created. The
+  cheap path is now merely wasteful instead of fatal, which is the standard
+  this project holds itself to.
 - **Fixed in 0.9.0** (was "known v0 looseness"): lens `get()` used to track the ROOT, so effects over-fired on unrelated changes — correct, never minimal. `bind()` existed to buy that precision back, and the only production app answered with 116 effects and zero binds, because the imprecise path was the cheap one. The lens now tracks its own slice, so the cheap path IS the precise one and `bind()` was deleted. **Do not restate a rule the grain fights — change the grain.**
 
 ## Routing (route.ts, 0.8.0)
@@ -569,6 +583,18 @@ The general form, and the reason this section exists at all: **adding a
 mechanism where a sentence would do is the failure mode this project is
 supposed to be immune to.** It is what killed the stacks epsilon replaces.
 The four taxes are the test — a move protocol paid none of them.
+
+One rule survives the withdrawal, because writing shared order is a real
+thing apps do: **write the whole affected SEQUENCE, never swap two values.**
+A renumber assigns distinct values, so concurrent writers at worst lose an
+update and the next write heals the tie; a swap preserves the multiset, and
+a swap between tied rows writes each the value it already has. The field
+proved both halves in one app on the same day: its card drag-drop renumbers
+(no example existed, so it was thought through) and its column reorder
+swapped (an example existed — ours — so it was copied verbatim, wedge
+included). **Whatever the worked example does, an app will do.** That is the
+grain argument turned on its author, and it is why a bad example is more
+expensive than no example.
 
 ## Non-goals
 

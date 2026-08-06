@@ -285,6 +285,34 @@ describe("the app, end to end", () => {
     expect(await view.evaluate<boolean>("window.__shell === document.querySelector('#board-header')"))
       .toBe(true);
 
+    // The trap that cost a real app most of a session, driven in a real
+    // browser: whole-row echoes into an open detail panel. Every /done and
+    // /text write echoes the WHOLE card (the stamp moves with it), which is
+    // precisely what used to loop the tab to death through the lenses this
+    // panel reads. Ten of them, then prove the page is still alive and
+    // current — a hang fails this as a timeout, which is the point.
+    for (let i = 0; i < 10; i++) {
+      await view.evaluate(
+        `(() => { document.querySelector('#detail-text').value = 'edit ${i}';` +
+        `document.querySelector('#detail-text').dispatchEvent(new Event('blur')); return 1; })()`,
+      );
+      // Wait for the TABLE, not the input we just wrote ourselves — the
+      // round trip is what this is testing.
+      await waitFor(
+        async () => (await db`SELECT text FROM cards WHERE board_id = ${myBoard.id}`)[0]?.text as string,
+        (t) => t === `edit ${i}`,
+      );
+    }
+    expect(await view.evaluate<string>("document.querySelector('#detail-by').textContent"))
+      .toContain("added by you");
+    // Alive AND current: the last edit is in the table, and the panel is
+    // still rendering the doc rather than a frozen copy of it.
+    await waitFor(
+      async () => (await db`SELECT text FROM cards WHERE board_id = ${myBoard.id}`)[0]?.text as string,
+      (t) => t === "edit 9",
+    );
+    expect(await view.evaluate<string>("document.querySelector('#detail-text').value")).toBe("edit 9");
+
     await view.click("#detail-close");
     await waitFor(
       () => view.evaluate<string>("location.hash"),

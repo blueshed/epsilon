@@ -1,5 +1,12 @@
 -- Kit overrides — the vocabulary editions of two 001/003 bodies. Numbered
 -- files are frozen once released; behaviour evolves HERE, edited in place.
+--
+-- A NULL user READS as the host and WRITES as nobody. doc_open(doc, NULL)
+-- composes the full copy (001's rule), but <t>_may(id, NULL) is false, so
+-- calling a dispatch by hand as NULL raises 'not found: <doc>' out of
+-- doc_begin — which reads like a missing doc and means a missing permit.
+-- Deliberate (nothing writes anonymously); pass a real user id in debug
+-- scripts.
 
 -- The ONE read path (supersedes 001's body). NO default on p_user — that is
 -- the point (007 dropped the old signature). A NULL user is still the HOST

@@ -511,26 +511,35 @@ function boardView(params$: Signal<Record<string, string>>): Node {
 function cardDetail(doc: DocHandle<Board>, cid: string, boardId: string): Node[] {
   const card = doc.at<Card>(`/cards/${cid}`);
   const members = doc.at<Record<string, Member>>("/members");
+  // NARROW ONCE, OUTSIDE the effects that read them. `at()` inside an effect
+  // body mints a fresh lens on every run — the runtime shares the underlying
+  // subscription per path (signal.ts), so it is no longer the hang it was in
+  // 0.10.2, but it still allocates per run for nothing. Hoisting is the shape
+  // to copy.
+  const textL = card.at<string>("/text");
+  const createdByL = card.at<number | null>("/created_by");
+  const updatedByL = card.at<number | null>("/updated_by");
+  const updatedAtL = card.at<string | null>("/updated_at");
 
   const input = el("input", { id: "detail-text", "aria-label": "card text" }) as HTMLInputElement;
   effect(() => {
-    const v = card.at<string>("/text").get() ?? "";
+    const v = textL.get() ?? "";
     // The same rule the board title learned: never rewrite what someone is
     // typing in. A remote edit lands here too.
     if (document.activeElement !== input) input.value = v;
   });
   input.onblur = () => {
     const v = input.value.trim();
-    if (v && v !== card.peek()?.text) card.at<string>("/text").set(v);
+    if (v && v !== card.peek()?.text) textL.set(v);
   };
   input.onkeydown = (e) => { if (e.key === "Enter") input.blur(); };
 
   const provenance = el("p", { id: "detail-by", class: "byline" });
   effect(() => {
     const roster = members.get();
-    const author = stampName(card.at<number | null>("/created_by").get(), roster);
-    const editor = stampName(card.at<number | null>("/updated_by").get(), roster);
-    const at = card.at<string | null>("/updated_at").get();
+    const author = stampName(createdByL.get(), roster);
+    const editor = stampName(updatedByL.get(), roster);
+    const at = updatedAtL.get();
     provenance.textContent = [
       author ? `added by ${author}` : "",
       at ? (editor ? `last touched by ${editor}, ${ago(at)}` : `last touched ${ago(at)}`) : "",
@@ -541,8 +550,18 @@ function cardDetail(doc: DocHandle<Board>, cid: string, boardId: string): Node[]
   close.onclick = () => navigate(`/board/${boardId}`);
 
   // A card removed under us — by anyone — leaves nothing to detail.
+  //
+  // `null` means TWO things through a lens, and this guard has to tell them
+  // apart: "the doc has not opened yet" (every path reads null) and "this row
+  // is gone". Ask the DOC, not the lens — `doc.peek() != null` means a
+  // snapshot has landed, so a null row is a real absence. Without it a deep
+  // link to a card closes itself a beat before its own snapshot arrives, and
+  // the board-level version of this trick (`doc.v === 0`, in openBoard) reads
+  // as board-specific when the rule is general.
   effect(() => {
-    if (card.get() == null) queueMicrotask(() => navigate(`/board/${boardId}`));
+    if (card.get() == null && doc.peek() != null) {
+      queueMicrotask(() => navigate(`/board/${boardId}`));
+    }
   });
 
   return [el("div", { id: "detail-head" }, el("h3", {}, "card"), close), input, provenance];

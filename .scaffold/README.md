@@ -31,7 +31,7 @@ browser. When you're ready to make this app your own:
 
 | Delete | What it is |
 |---|---|
-| `index.ts` / `index.css` / `types.ts` | the board's pixels and types |
+| `index.ts` / `index.css` / `types.ts` | the board's pixels and types (all yours — the vendored suites keep their own fixture types in `epsilon/fixture.ts`) |
 | `app.test.ts` | the board's browser test |
 | the `board:` / `mine:` / `tally:` blocks in `server.ts` | the board's wiring |
 
@@ -56,6 +56,15 @@ Number your own migrations from **102** up. 001–099 are epsilon's, frozen
 once released; 100 and 101 are the demo's, and stay put while you keep it
 (see below). Once the demo is gone, its numbers are yours again — but there
 is no reason to reuse them.
+
+**Two things to do the day you delete the demo.** Its sign-in dialog appears
+because a cold load opens the seeded, ownerless `board:1` and is refused —
+your own app has no public doc, so nothing triggers that refusal and the
+screen simply stays blank. Show your sign-in UI when you hold no token
+instead of inheriting the accident. And copy the demo's *shape* for
+ordering, `null` guards and lens hoisting from
+`.claude/skills/epsilon/REFERENCE.md`, not from memory — each has a trap
+that fails silently.
 
 **Keep `db/100-board.sql` and `db/101-tally.sql` too, for now.** They are the
 demo's schema *and* the fixture the vendored relational suites drive:

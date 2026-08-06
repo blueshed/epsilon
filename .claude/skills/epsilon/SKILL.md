@@ -50,8 +50,11 @@ await remote.call("history", { doc: "board:2", before, after });   // the op log
 
 **A lens read inside an `effect` IS the precise path** — the effect re-runs
 only when an op touches that slice, never on a sibling's keystroke. Narrow
-with `at()` first, then read: `const t = row.at("/title"); effect(() => …
-t.get())`. Reading the whole doc in an effect (`doc.get()`) tracks the whole
+with `at()` first, then read — **and mint the lens OUTSIDE the effect**:
+`const t = row.at("/title"); effect(() => … t.get())`. `at()` inside the
+body makes a fresh lens per run; until 0.10.4 that hung the tab outright,
+and it is still pure waste (worst on types that stamp `updated_*`, whose
+echoes are whole-row replaces). Reading the whole doc in an effect (`doc.get()`) tracks the whole
 doc, which is correct but re-runs on every write — narrow, then read.
 (There is no `bind()`. Until 0.9.0 a lens tracked the root, so `bind` existed
 to buy back precision; the lens is precise now and `bind` was deleted.)
@@ -140,9 +143,18 @@ users/sessions, reload-worthy for doc tables.
   already gave you (`computed()`, or set each row's flex `order` from a
   lens). If everyone must see ONE arrangement, put a number on the row and
   write it with an ordinary `replace` op; it is model data like `done`.
-  Never invent a move protocol or a position-minting scheme: concurrent
-  reordering is LWW here, and convergent reordering is the CRDT this stack
-  declines (REFERENCE.md).
+  Writing it, **renumber the whole affected sequence — never swap two
+  values**: a swap can tie two rows at one position and then can never
+  separate them, a renumber heals. Concurrent reordering is LWW; convergent
+  reordering is the CRDT this stack declines. Drag-and-drop swallows the
+  click that selects — see REFERENCE.md.
+- **`null` means "not open yet" AND "gone".** A guard on a row's absence
+  must ask the doc too: `row.get() == null && doc.peek() != null`. Get this
+  wrong and deep links close themselves before their snapshot lands.
+- **No public doc? Then nothing raises your sign-in UI.** The demo's dialog
+  appears because a cold load is refused the seeded public board. Delete the
+  demo and that accident goes with it: show the sign-in UI when you hold no
+  token, and open docs after `authenticate` (REFERENCE.md).
 - **Bytes never ride ops; email is your vendor's.** An attachment goes over
   an HTTP route to your object store and the DOC carries the reference
   (url/key) — base64 in an op value works until the 1 MiB frame cap and
