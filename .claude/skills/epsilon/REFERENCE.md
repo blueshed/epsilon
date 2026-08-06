@@ -1,7 +1,8 @@
 # epsilon — the deep manual
 
 Read on demand from SKILL.md. Source of truth order: the runtime source
-(`epsilon/`), its tests (the contract), `DESIGN.md` (the why), then this.
+(`epsilon/`), its tests (the contract), `epsilon/DESIGN.md` (the why), then
+this.
 
 ## Engines — mechanics
 

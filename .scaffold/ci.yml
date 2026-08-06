@@ -1,0 +1,28 @@
+# The vendored runtime's contract, on every change: tsc strict, then the
+# suites that need no service — unit/wire/DOM, and the whole relational tier
+# (schema, migrations, durability) on embedded Postgres.
+#
+# Three suites are left out because they need more than a runner gives for
+# free: `test:pg` and `test:migrate` (a Postgres on :5599) and `test:app` (a
+# browser). All are worth adding once the app is real — epsilon's own
+# workflow shows how, service container and all:
+# https://github.com/blueshed/epsilon/blob/main/.github/workflows/ci.yml
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install
+      - run: bun run check
+      - run: bun run test
+      - run: bun run test:pglite

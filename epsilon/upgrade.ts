@@ -23,6 +23,12 @@
  * Scope is a WHITELIST: `epsilon/` and the skill. Never `db/` — released
  * core migrations are frozen; a new one (005-gone and up) is adopted by
  * copying that one file, keeping your ledger one history. Never app files.
+ * (`DESIGN.md` and the runtime's `LICENSE` sit INSIDE `epsilon/` for this
+ * reason: a doc outside the whitelist freezes at scaffold time.)
+ *
+ * What a release needs from you BY HAND is upstream's `UPGRADING.md` — a
+ * scaffold doesn't carry it, because a per-release trail it can never
+ * update is a doc that is wrong by construction. This prints the link.
  */
 
 export {};   // a module, for top-level await — this file is a script, not an API
@@ -117,3 +123,12 @@ if (tests.exitCode !== 0) {
   process.exit(1);
 }
 console.log(`[epsilon:upgrade] done — review the diff and commit (base is now ${target}).`);
+
+// The by-hand half. A web URL only makes sense for an http(s) remote; a
+// local path or ssh remote gets the plain instruction instead.
+const web = UPSTREAM.replace(/\.git$/, "");
+console.log(
+  /^https?:\/\//.test(web)
+    ? `[epsilon:upgrade] what ${target} needs from you by hand: ${web}/blob/${target}/UPGRADING.md`
+    : `[epsilon:upgrade] read UPGRADING.md at ${target} upstream for anything needed by hand.`,
+);

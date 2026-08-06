@@ -54,12 +54,16 @@ The file is inert (delete it if you like) — the pattern is the same on any
 host: start `bun server.ts`, healthcheck `/`, a volume behind
 `EPSILON_PG_DIR`.
 
-## The app (three files, yours)
+## The app (yours, and a demo to delete)
 
 - [`server.ts`](server.ts) — the authority. In-memory out of the box (a shape *preview*: uuid ids, no permits); Postgres — the real implementation, with auth + ownership — via one env var.
 - [`index.ts`](index.ts) — the pixels. A remote doc is a signal whose writes go over the wire; the echo renders them.
 - [`index.html`](index.html) / [`index.css`](index.css) — Bun serves and bundles them.
 - [`db/`](db/) — your schema: numbered migrations, applied at boot, forward-only — and [`db/fn/`](db/fn/), your stored functions, replayed every boot and **edited in place** (`CREATE OR REPLACE` is idempotent; hash-locking it only forces a copy per edit). `003-doc-kit.sql` is the reusable skeleton of a relational doc type (locking, the audit, undo, history); `100-board.sql` is the worked example — tables, composition, transactional writes, ownership. Number your own migrations from 100 up: 001–099 are epsilon core, frozen once released, so an upgrade never collides with your files.
+
+A scaffold arrives as a **working multi-user kanban board**, so nothing here
+is theoretical — and it is yours to delete the moment the app has its own
+doc type. The scaffold's README says exactly which files are the demo.
 
 ```sh
 bun run db:up            # compose Postgres (or use your own)
@@ -82,7 +86,7 @@ EPSILON_PG_URL=postgres://epsilon:epsilon@localhost:5599/epsilon bun dev
 | `cli.ts` | The wire from a terminal — auth-aware one-shot commands + `watch`, JSON out (humans, scripts, AIs) |
 | `upgrade.ts` | `bun run epsilon:upgrade` — take a newer runtime over your local patches (three-way merge) |
 
-`*.test.ts` beside each — the tests are the contract. [DESIGN.md](DESIGN.md) is the why.
+`*.test.ts` beside each — the tests are the contract. [`epsilon/DESIGN.md`](epsilon/DESIGN.md) is the why, and it lives inside the folder so an upgrade keeps it current.
 
 **Owning the source doesn't mean forking forever.** package.json records
 the release you scaffolded from (`"epsilon": { "base": ... }`);
@@ -100,4 +104,6 @@ Built in conversation with [Claude Code](https://claude.com/claude-code) — the
 
 ## License
 
-MIT © 2026 [blueshed.co.uk](https://blueshed.co.uk) — [LICENSE](LICENSE) ships with every scaffold, as MIT asks.
+MIT © 2026 [blueshed.co.uk](https://blueshed.co.uk) — [LICENSE](LICENSE).
+A scaffold picks its own license; the notice travels with the vendored
+source it covers, in [`epsilon/LICENSE`](epsilon/LICENSE), as MIT asks.

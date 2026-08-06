@@ -1,11 +1,11 @@
 {
   "name": "epsilon",
-  "version": "0.9.3",
+  "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "One op stream, Postgres to pixel — bun create blueshed/epsilon my-app. The runtime lives in your app: epsilon/, ~3.8k lines, tests included.",
+  "description": "An epsilon app — one op stream, Postgres to pixel.",
   "epsilon": {
-    "base": "v0.9.3"
+    "base": "v0.9.4"
   },
   "scripts": {
     "dev": "bun --hot server.ts",
@@ -31,7 +31,7 @@
     "typescript": "^5.9.3"
   },
   "bun-create": {
-    "postinstall": "rm -rf .github CHANGELOG.md",
+    "postinstall": "bun .scaffold/init.ts",
     "start": "bun run dev"
   },
   "license": "MIT"

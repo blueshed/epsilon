@@ -7,10 +7,11 @@ schema-native users. Merges the ideas of `../delta` and `../railroad`.
 
 ## Layout
 
-- `server.ts`, `index.html`, `src/` — the app (the part users make theirs).
-- `epsilon/` — the runtime + its tests. Tests are the contract; DESIGN.md is the why.
+- `server.ts`, `index.ts`, `index.html`, `index.css`, `types.ts`, `app.test.ts` — the app, at project root (bun-route convention). The board is the scaffold's DEMO: the worked example of a doc type, and what a new app deletes first.
+- `epsilon/` — the runtime + its tests. Tests are the contract; `epsilon/DESIGN.md` is the why. This folder and `.claude/skills/epsilon/` are the ONLY things `epsilon:upgrade` carries, so anything that must reach an existing app lives inside them — that is why DESIGN.md and the runtime's LICENSE are in here.
 - `db/fn/` — stored functions: unnumbered, NOT hash-recorded, replayed every boot in one transaction. Edit in place. A signature change needs `DROP FUNCTION` in a numbered file first.
-- `db/` — numbered migrations: 001–002 core (doc registry, auth), 003 the doc kit (locking, audit, undo, history), 004 housekeeping, 005 gone. 001–099 are CORE and FROZEN once released — new core behavior is the next number, never an edit. The app's doc types start at 100 (`100-board.sql`). See DESIGN.md "The doc kit" and "Upgrades".
+- `db/` — numbered migrations: 001–002 core (doc registry, auth), 003 the doc kit (locking, audit, undo, history), 004 housekeeping, 005 gone. 001–099 are CORE and FROZEN once released — new core behavior is the next number, never an edit. The app's doc types start at 100 (`100-board.sql`). See `epsilon/DESIGN.md` "The doc kit" and "Upgrades".
+- `.scaffold/` — **template only, deleted by `bun create`**: the app-facing `README.md`, `CLAUDE.md` and CI that replace this repo's own, plus `init.ts` (the `bun-create.postinstall` hook) and its test. Anything a scaffolded app should NOT inherit is removed there — see its `REMOVE` list.
 
 ## Rules
 
@@ -18,9 +19,10 @@ schema-native users. Merges the ideas of `../delta` and `../railroad`.
 - **Db-first**: schema is the source of truth; the database mints identity — every tier, server-side.
 - **Small language**: three verbs (`add`/`replace`/`remove`), JSON-Pointer paths. Never invent verbs.
 - The law: ops are the fast path; recompute-from-state must always be correct on its own.
-- Budget every line against the four taxes in DESIGN.md (identity, time, lifetime, medium). If it pays none, delete it.
+- Budget every line against the four taxes in `epsilon/DESIGN.md` (identity, time, lifetime, medium). If it pays none, delete it.
 - For realtime work in the app, follow `.claude/skills/epsilon/SKILL.md` — it ships with every scaffold; its `REFERENCE.md` is the deep manual, read on demand.
-- **Template repo only** (delete in a scaffolded app): a merge to main IS a release. Ship it in the branch: bump package.json and roll Unreleased into a dated CHANGELOG section BEFORE the PR — the PR Peter merges is already the release. Tags are Peter's to push (cloud sessions hold branch-scoped credentials).
+- **Every root file ships into every app.** Before adding one, decide which it is: an app's file, or epsilon's. Epsilon's goes on `.scaffold/init.ts`'s `REMOVE` list — or, if an existing app needs it too, inside `epsilon/`.
+- A release IS a merge to main. Ship it in the branch: roll Unreleased into a dated CHANGELOG section and bump `epsilon.base` BEFORE the PR — the PR Peter merges is already the release. **Not `version`**: that field is the scaffolded app's, pinned at `0.0.0`, because Bun rewrites package.json after `postinstall` and an app would otherwise inherit epsilon's version number. Tags are Peter's to push (cloud sessions hold branch-scoped credentials).
 - Keep docs and reports SHORT.
 
 ## Commands
@@ -34,7 +36,13 @@ bun run check      # tsc --noEmit, strict
 bun run ci         # db up → check + everything → db down
 bun dev            # the app, in-memory (writes .epsilon.pid)
 bun run stop       # kill the server the pid file points at
+
+bun test ./.scaffold/init.test.ts   # what `bun create` leaves behind (./ — bun test skips dot-dirs)
 ```
+
+The scaffold suite is template-only, so it is NOT in `bun run ci` (a script
+naming `.scaffold/` would break in every app). `.github/workflows/ci.yml`
+runs it; run it by hand after touching anything at the root.
 
 ## Testing in a Claude container (no Docker)
 

@@ -7,6 +7,55 @@ will ship.
 
 ## [Unreleased]
 
+## [0.9.4] — 2026-08-06
+
+### Changed
+
+- **`bun create` now leaves an app, not a copy of this repo.** The
+  postinstall hook was `rm -rf .github CHANGELOG.md` — five words against a
+  root directory that had grown a changelog, an internal audit, an upgrade
+  trail and a 37 KB design document. A scaffold inherited all of it. The
+  hook is now `.scaffold/init.ts`, with the boundary written down as two
+  lists: what an app must not keep, and what replaces it.
+  - Gone from a scaffold: `SHAKEDOWN.md` (an adversarial audit of epsilon
+    0.8.0 — it names file:line bugs and another app's schema throughout, and
+    it was shipping to every user), `UPGRADING.md`, `CHANGELOG.md`,
+    `.github/`, and root `LICENSE`.
+  - New in a scaffold: a `README.md` and `CLAUDE.md` written for the app
+    rather than for this repo — what the demo is and which files to delete,
+    which engine to pick, where things are — plus a CI workflow that runs
+    the suites needing no service.
+  - `.scaffold/init.test.ts` is the contract, run by this repo's CI. It also
+    pins the package.json invariants below, which no script can repair.
+- **`DESIGN.md` → `epsilon/DESIGN.md`, and the runtime's notice →
+  `epsilon/LICENSE`.** `epsilon:upgrade`'s whitelist is `epsilon/` and the
+  skill, so a doc outside it freezes at the release you scaffolded from and
+  silently describes a runtime that has moved on. The why now travels with
+  the code it explains. See UPGRADING.md for the two stale copies to delete.
+- **package.json stops leaking epsilon's identity into apps.** `version` was
+  `0.9.3` and the description was this repo's pitch; both landed verbatim in
+  every scaffold, so each new app claimed to be epsilon 0.9.3. Bun rewrites
+  package.json *after* postinstall runs, so a script cannot fix this —
+  the template's values ARE the app's values. `version` is therefore pinned
+  at `0.0.0` (the app's field, for the app to set) and **the release of
+  record is `epsilon.base`**, which is what `epsilon:upgrade` reads anyway.
+  One fact, one field.
+
+### Fixed
+
+- `db/fn/` shipped as an empty directory, which git does not track — so no
+  scaffold ever had one, and README's link to it was broken. It now carries
+  a `README.md` with the folder's three rules (no schema DDL, a signature
+  change needs a `DROP` in a numbered file first, order carries no meaning).
+- `CLAUDE.md`'s layout named `src/`, which has never existed in this repo.
+  The app is `index.ts` / `index.css` / `types.ts` / `app.test.ts` at the
+  root, as `SKILL.md` correctly said all along.
+- `epsilon:upgrade` now prints the link to the target release's
+  `UPGRADING.md` — the by-hand half of an upgrade, which an app no longer
+  carries a copy of.
+- README no longer promises "three files" above a list of four, and no
+  longer claims root `LICENSE` ships with every scaffold.
+
 ## [0.9.3] — 2026-08-02
 
 ### Fixed

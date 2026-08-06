@@ -23,6 +23,33 @@ whitelist is listed below, per version, by hand.
 
 Commit before you start. The tool assumes a clean tree.
 
+**This file lives upstream, not in your app** (0.9.4). A per-release trail
+that a scaffold cannot update is wrong the day after it ships, so
+`epsilon:upgrade` prints the link to the version you are taking instead.
+
+---
+
+## → 0.9.4
+
+**Runtime: automatic.** Two files move INTO the whitelist, so the upgrade
+brings them to you: `epsilon/DESIGN.md` (the why, previously root
+`DESIGN.md` and frozen at whatever release you scaffolded from) and
+`epsilon/LICENSE` (the notice that travels with the vendored source).
+
+**Then delete the stale copies at your root** — `DESIGN.md` is now a
+duplicate that will never update again, and root `LICENSE` is epsilon's
+copyright sitting where your app's license belongs:
+
+```sh
+rm DESIGN.md          # now epsilon/DESIGN.md, and current
+rm LICENSE            # epsilon/LICENSE covers the runtime; license your app as you like
+rm -f SHAKEDOWN.md    # an internal audit of epsilon 0.8.0; it was never yours
+```
+
+Nothing reads them, so this is housekeeping, not a break. If you have
+`db/fn/`, upstream's [`db/fn/README.md`](https://github.com/blueshed/epsilon/blob/main/db/fn/README.md)
+is worth copying in — the folder's three rules, where the next person looks.
+
 ---
 
 ## → 0.9.0 (unreleased)
