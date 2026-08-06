@@ -67,6 +67,24 @@ the last five open findings from the 0.8.0 shakedown.
 - The kit controls hide themselves in in-memory mode, where `server.ts` wires
   neither adapter: one capability probe per session, and any refusal OTHER
   than "unknown method" still counts as present.
+- **The demo has screens now, not a screen.** The route table was two
+  entries — one pattern with one param, and a placeholder string — driving
+  346 lines of router. Nothing showed the wildcard layout, `route()`
+  sub-navigation, declaration order, or the async handler's thunk. Now:
+  - `/board/:id/*` is a **layout**. `/board/:id/card/:cid` routes a card
+    detail underneath it via `route()`, and switching cards rebuilds only the
+    detail — `app.test.ts` pins that by element identity, which is the claim
+    `params$` and the wildcard exist to make.
+  - `/settings` is a second real screen, and an **async handler**: it awaits
+    a genuine browser probe (can this device hold a passkey?) before there is
+    anything to render, so it returns `Promise<() => Node>`. A dispose scope
+    cannot cross an `await`; the thunk is what the router brackets. The bare
+    `Promise<Node>` that railroad shipped and documented as leaking is
+    refused at the type level, and now the template shows why it exists.
+  - The tally view is read by **two screens at once** — the board list and
+    settings — which is what a view being an ordinary doc buys you.
+  - `add a passkey` moved from the always-visible board list onto
+    `/settings`, where account things belong.
 - **`onDisconnect` is wired, and presence finally honours it.** DESIGN.md has
   warned since 0.6.0 that "anything rendered as live must hear the drop from
   this hook or it goes on testifying to a state nobody is in" — and the demo

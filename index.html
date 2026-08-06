@@ -10,6 +10,7 @@
   <body>
     <header>
       <h1>epsilon</h1>
+      <button id="settings-link" hidden>settings</button>
       <button id="signout" hidden>sign out</button>
     </header>
 
@@ -17,13 +18,15 @@
       <form id="board-form"><input id="new-board" placeholder="new board name, press enter" /></form>
       <ul id="boards"></ul>
       <p id="tally"></p>
-      <button id="add-passkey" hidden>add a passkey — sign in without a password next time</button>
     </section>
 
-    <!-- The route target. `/` is the placeholder, `/board/:id` is a board —
-         routes() owns these children, so the markup lives in index.ts where
-         the handler can build it under its own dispose scope. The board list
-         above stays put: list beside detail, not list THEN detail. -->
+    <!-- The route target. Three patterns live here: `/` is the placeholder,
+         `/settings` is your account, and `/board/:id/*` is a board — a
+         WILDCARD, so the board layout stays mounted while a card detail
+         routes underneath it. routes() owns these children, so the markup
+         lives in index.ts where each handler can build it under its own
+         dispose scope. The board list above stays put: list beside detail,
+         not list THEN detail. -->
     <main id="view"></main>
 
     <dialog id="auth">

@@ -3,7 +3,7 @@
 // With auth on, you get YOUR boards (mine:<uid>): creating one is an op on
 // that doc; opening one is just another doc name.
 import {
-  connect, list, text, signal, computed, effect, batch, routes, navigate,
+  connect, list, text, signal, computed, effect, batch, routes, route, navigate,
   pushDisposeScope, popDisposeScope, trackDispose,
 } from "./epsilon";
 import type { OpSignal, Signal, Dispose, DocHandle } from "./epsilon";
@@ -293,6 +293,9 @@ function openBoard(name: string): void {
         label.style.textDecoration = d ? "line-through" : "";
       });
       effect(() => { label.textContent = textL.get() ?? ""; });
+      // Into the nested route. The board layout stays mounted; only the
+      // detail below is built, and switching cards swaps just that.
+      label.onclick = () => navigate(`/board/${name.split(":")[1]}/card/${id}`);
       // The row stamps, which card_json puts on EVERY echo (db/100-board.sql).
       // Nothing else in the app reads them, so without this the schema is
       // sending three fields into the void. Each is its own lens, so a card's
@@ -443,6 +446,30 @@ function boardView(params$: Signal<Record<string, string>>): Node {
   // reload or a bookmarked link where there is no "back" to have.
   boardBack.onclick = () => navigate("/board/1");
 
+  // The nested route. route() is the reactive half of the router: a signal of
+  // params, null when unmatched. It lives INSIDE this layout, so it is torn
+  // down with it — and because `/board/:id/*` is a wildcard, moving between
+  // cards (or boards) updates this signal without rebuilding anything above.
+  const cardRoute = route<{ id: string; cid: string }>("/board/:id/card/:cid");
+  const detail = el("section", { id: "card-detail", hidden: "" });
+  let disposeCard: Dispose | null = null;
+  effect(() => {
+    const p = cardRoute.get();
+    // Each detail owns a scope: the lens reads below are subscriptions, and
+    // switching cards must release the previous one, not stack another.
+    disposeCard?.();
+    disposeCard = null;
+    detail.replaceChildren();
+    detail.hidden = !p;
+    if (!p) return;
+    const doc = boardDoc;
+    if (!doc) return;
+    pushDisposeScope();
+    detail.append(...cardDetail(doc, p.cid, p.id));
+    disposeCard = popDisposeScope();
+  });
+  trackDispose(() => { disposeCard?.(); disposeCard = null; });
+
   const frag = document.createDocumentFragment();
   frag.append(
     el("div", { id: "board-header" }, boardBack, boardName, undoBtn, historyBtn),
@@ -450,6 +477,7 @@ function boardView(params$: Signal<Record<string, string>>): Node {
     boardMsg,
     cardForm,
     log,
+    detail,
     historyPanel,
     share,
   );
@@ -475,6 +503,103 @@ function boardView(params$: Signal<Record<string, string>>): Node {
   return frag;
 }
 
+/**
+ * One card, with room for what the row can only abbreviate: the text as an
+ * editable field, and the full provenance the stamps carry. Built fresh per
+ * card id by the nested route, under its own dispose scope.
+ */
+function cardDetail(doc: DocHandle<Board>, cid: string, boardId: string): Node[] {
+  const card = doc.at<Card>(`/cards/${cid}`);
+  const members = doc.at<Record<string, Member>>("/members");
+
+  const input = el("input", { id: "detail-text", "aria-label": "card text" }) as HTMLInputElement;
+  effect(() => {
+    const v = card.at<string>("/text").get() ?? "";
+    // The same rule the board title learned: never rewrite what someone is
+    // typing in. A remote edit lands here too.
+    if (document.activeElement !== input) input.value = v;
+  });
+  input.onblur = () => {
+    const v = input.value.trim();
+    if (v && v !== card.peek()?.text) card.at<string>("/text").set(v);
+  };
+  input.onkeydown = (e) => { if (e.key === "Enter") input.blur(); };
+
+  const provenance = el("p", { id: "detail-by", class: "byline" });
+  effect(() => {
+    const roster = members.get();
+    const author = stampName(card.at<number | null>("/created_by").get(), roster);
+    const editor = stampName(card.at<number | null>("/updated_by").get(), roster);
+    const at = card.at<string | null>("/updated_at").get();
+    provenance.textContent = [
+      author ? `added by ${author}` : "",
+      at ? (editor ? `last touched by ${editor}, ${ago(at)}` : `last touched ${ago(at)}`) : "",
+    ].filter(Boolean).join(" · ");
+  });
+
+  const close = el("button", { id: "detail-close" }, "✕");
+  close.onclick = () => navigate(`/board/${boardId}`);
+
+  // A card removed under us — by anyone — leaves nothing to detail.
+  effect(() => {
+    if (card.get() == null) queueMicrotask(() => navigate(`/board/${boardId}`));
+  });
+
+  return [el("div", { id: "detail-head" }, el("h3", {}, "card"), close), input, provenance];
+}
+
+/**
+ * `/settings` — your account. The demo's second real screen, and the one
+ * that shows why a route handler may return `Promise<() => Node>` and never
+ * a bare `Promise<Node>`.
+ *
+ * Asking the browser whether this device can MAKE a passkey is genuinely
+ * async, and it has to happen before there is anything to render. A dispose
+ * scope cannot survive an `await` — browser JS has no AsyncContext — so the
+ * router brackets the THUNK, not the work before it. Everything reactive
+ * goes inside the returned function; that is what gets an owner and is torn
+ * down on navigation.
+ */
+async function settingsView(): Promise<() => Node> {
+  const platform = supported
+    ? await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable?.()
+        .catch(() => false) ?? false
+    : false;
+
+  return () => {
+    addPasskeyBtn = el("button", { id: "add-passkey" },
+      "add a passkey — sign in without a password next time");
+    addPasskeyBtn.hidden = !supported;
+    addPasskeyBtn.onclick = addPasskey;
+
+    const frag = document.createDocumentFragment();
+    frag.append(
+      el("div", { id: "board-header" },
+        el("button", { id: "settings-back" }, "←"),
+        el("h2", {}, "settings")),
+      el("p", { class: "byline" },
+        !supported ? "this browser has no WebAuthn — password sign-in only."
+        : platform ? "this device can hold a passkey (fingerprint, face or PIN)."
+        : "no built-in authenticator here — a security key or phone still works."),
+      addPasskeyBtn,
+      el("p", { id: "settings-tally", class: "byline" }),
+    );
+    (frag.querySelector("#settings-back") as HTMLButtonElement).onclick = () => navigate("/board/1");
+
+    // The tally view again, on its own screen — the same live doc the board
+    // list renders, proving a view is just a doc: two readers, no fetch.
+    const tallyEl = frag.querySelector("#settings-tally") as HTMLElement;
+    const t = tallyDoc;
+    if (t) {
+      effect(() => {
+        const v = t.get();
+        tallyEl.textContent = v ? `${v.boards} boards · ${v.cards} cards · ${v.done} done` : "";
+      });
+    }
+    return frag;
+  };
+}
+
 // A cold load with no hash lands on the shared board — in-memory mode (no
 // auth gate) then just works; a requireAuth host raises the dialog via
 // onError instead. Set BEFORE routes() reads the hash: location.hash
@@ -486,19 +611,33 @@ if (!location.hash || location.hash === "#" || location.hash === "#/") {
   location.replace("#/board/1");
 }
 
+// Patterns are tested in DECLARATION ORDER, first match wins — so a literal
+// always precedes the parameterised pattern it would otherwise fall into.
+// `/settings` before `/board/:id/*` costs nothing here (they cannot collide),
+// but the day you add `/board/new` it has to sit above `/board/:id/*` or the
+// board layout will try to open a doc called `board:new`.
+//
+// `/board/:id/*` is a LAYOUT: the wildcard keeps boardView mounted while
+// `/board/:id/card/:cid` routes a detail panel underneath it, and switching
+// cards — or boards — never rebuilds the shell.
 routes(view, {
-  "/board/:id": (_p, params$) => boardView(params$),
+  "/settings": () => settingsView(),
+  "/board/:id/*": (_p, params$) => boardView(params$),
   "/": () => el("p", { id: "pick" }, "pick a board, or make one above."),
 });
 
 // --- your boards (authenticated mode) --------------------------------------
+
+/** The tally view, kept so /settings can render the SAME live doc the board
+ *  list does — two readers of one view, neither of them a fetch. */
+let tallyDoc: DocHandle<Tally> | null = null;
 
 function showMine(userId: number | string): void {
   const mine = remote.doc<Mine>(`mine:${userId}`);
   const boards = mine.at<Record<string, BoardRef>>("/boards") as OpSignal<Record<string, BoardRef> | null>;
   // tally:<uid> — a declared view (epsilon/pg.ts's pgView), not a doc you
   // write to: it renders like any doc, live, without a fetch.
-  const tally = remote.doc<Tally>(`tally:${userId}`);
+  const tally = (tallyDoc = remote.doc<Tally>(`tally:${userId}`));
   mineSection.hidden = false;
 
   pushDisposeScope();
@@ -551,12 +690,15 @@ function showMine(userId: number | string): void {
 
 function afterAuth(user: { id: number | string }): void {
   authDialog.close();
-  if (supported) addPasskeyBtn.hidden = false;
+  settingsLink.hidden = false;
   signoutBtn.hidden = false;
   if (mineFor === user.id) return;  // reconnect — the docs re-open themselves
   mineFor = user.id;
   showMine(user.id);
 }
+
+const settingsLink = document.getElementById("settings-link") as HTMLButtonElement;
+settingsLink.onclick = () => navigate("/settings");
 
 const signoutBtn = document.getElementById("signout") as HTMLButtonElement;
 signoutBtn.onclick = async () => {
@@ -593,7 +735,8 @@ const fromB64u = (s: string) =>
   Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0));
 
 const passkeyBtn = document.getElementById("auth-passkey") as HTMLButtonElement;
-const addPasskeyBtn = document.getElementById("add-passkey") as HTMLButtonElement;
+// Built by /settings now, not the shell — so it is null until you go there.
+let addPasskeyBtn: HTMLButtonElement | null = null;
 const supported = !!window.PublicKeyCredential;
 passkeyBtn.hidden = !supported;
 
@@ -656,7 +799,9 @@ passkeyBtn.onclick = async (e) => {
   }
 };
 
-addPasskeyBtn.onclick = async () => {
+async function addPasskey(): Promise<void> {
+  const btn = addPasskeyBtn;
+  if (!btn) return;
   try {
     const o = await remote.call<{
       challenge: string;
@@ -683,12 +828,12 @@ addPasskeyBtn.onclick = async () => {
       attestationObject: toB64u(r.attestationObject),
       transports: r.getTransports?.() ?? undefined,
     });
-    addPasskeyBtn.textContent = "passkey added ✓";
-    addPasskeyBtn.disabled = true;
+    btn.textContent = "passkey added ✓";
+    btn.disabled = true;
   } catch (err) {
-    addPasskeyBtn.textContent = String(err instanceof Error ? err.message : err);
+    btn.textContent = String(err instanceof Error ? err.message : err);
   }
-};
+}
 
 // --- boot ------------------------------------------------------------------
 

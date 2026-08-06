@@ -66,6 +66,67 @@ h1::before { content: "ε "; color: var(--accent); font-weight: 700; }
 }
 #signout:hover { color: var(--danger); }
 
+/* The header holds two verbs now, so it needs a gap and its own grouping —
+   h1 pushes them right. */
+header { gap: 1rem; }
+h1 { margin-right: auto; }
+#settings-link {
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 0.78rem;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0;
+}
+#settings-link:hover { color: var(--accent); }
+#settings-back {
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 1.1rem;
+  line-height: 1;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0;
+}
+#settings-back:hover { color: var(--accent); }
+
+/* One card, routed underneath the board it belongs to — a panel, not a page:
+   the list stays visible above so the detail reads as a zoom, not a jump. */
+#card-detail {
+  margin-top: 1.5rem;
+  padding: 1rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+#detail-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 0.6rem;
+}
+#detail-head h3 {
+  margin: 0;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+#detail-close {
+  border: 0;
+  background: none;
+  font: inherit;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0 0.25rem;
+}
+#detail-close:hover { color: var(--danger); }
+#detail-by { margin: 0.5rem 0 0; }
+#log li span { cursor: pointer; }
+#log li span:hover { color: var(--accent); }
+
 #board-header { display: flex; align-items: baseline; gap: 0.5rem; }
 #board-back {
   border: 0;

@@ -258,6 +258,64 @@ describe("the app, end to end", () => {
     await view.click("#history-toggle");
     expect(await view.evaluate<boolean>("document.querySelector('#history').hidden")).toBe(true);
 
+    // --- the router, for real: a nested route under a wildcard layout ------
+    // The board is mounted at "/board/:id/*", so routing a card detail
+    // underneath it must NOT rebuild the shell — that is what params$ and the
+    // wildcard are for, and element identity is the honest way to pin it.
+    await view.evaluate("window.__shell = document.querySelector('#board-header')");
+    await view.click("#log li span");
+    await waitFor(
+      () => view.evaluate<string>("location.hash"),
+      (h) => /#\/board\/\d+\/card\/\d+$/.test(h),
+    );
+    await waitFor(
+      () => view.evaluate<boolean>("!document.querySelector('#card-detail')?.hidden"),
+      (v) => v === true,
+    );
+    expect(await view.evaluate<string>("document.querySelector('#detail-text').value"))
+      .toBe("first step");
+    expect(await view.evaluate<string>("document.querySelector('#detail-by').textContent"))
+      .toContain("added by you");
+    expect(await view.evaluate<boolean>("window.__shell === document.querySelector('#board-header')"))
+      .toBe(true);
+
+    await view.click("#detail-close");
+    await waitFor(
+      () => view.evaluate<string>("location.hash"),
+      (h) => /#\/board\/\d+$/.test(h),
+    );
+    expect(await view.evaluate<boolean>("document.querySelector('#card-detail').hidden")).toBe(true);
+    expect(await view.evaluate<boolean>("window.__shell === document.querySelector('#board-header')"))
+      .toBe(true);
+
+    // --- /settings: an ASYNC handler that returns a THUNK ------------------
+    // It awaits a real browser probe (can this device hold a passkey?) before
+    // there is anything to render. A scope cannot cross an await, so what the
+    // router brackets is the thunk — including the tally effect below.
+    await view.click("#settings-link");
+    await waitFor(
+      () => view.evaluate<boolean>("!!document.querySelector('#add-passkey')"),
+      (v) => v === true,
+    );
+    // The SAME live view doc, read by a second screen. No fetch, no refetch.
+    await waitFor(
+      () => view.evaluate<string>("document.querySelector('#settings-tally').textContent"),
+      (t) => t.includes("boards"),
+    );
+    await view.click("#settings-back");
+    await waitFor(
+      () => view.evaluate<string>("document.querySelector('#board-name').textContent"),
+      (t) => t === "main",
+    );
+    // Leaving the pattern DOES tear down — the settings screen is gone.
+    expect(await view.evaluate<boolean>("!!document.querySelector('#add-passkey')")).toBe(false);
+
+    await view.click("#boards li span");   // back onto "my project"
+    await waitFor(
+      () => view.evaluate<string>("document.querySelector('#board-name').textContent"),
+      (t) => t === "my project",
+    );
+
     // ✕ → a confirm dialog (not window.confirm() — Bun's WebView can't
     // drive a browser-chrome dialog, only a DOM one). Cancel changes nothing.
     await view.click("#log li button");
