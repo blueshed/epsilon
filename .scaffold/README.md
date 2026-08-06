@@ -75,7 +75,7 @@ router just works; the file is inert if you deploy elsewhere.
 
 ```sh
 bun run epsilon:upgrade          # to upstream's latest release
-bun run epsilon:upgrade v0.9.4   # to a specific tag
+bun run epsilon:upgrade v0.10.0   # to a specific tag
 ```
 
 It three-way merges upstream's runtime changes over your local patches —

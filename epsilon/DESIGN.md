@@ -44,7 +44,7 @@ Any line not paying one of these taxes is deletable.
 - `call()` for RPC (queued until the socket opens); auth methods set the socket's user; `requireAuth` hosts refuse doc traffic until one has. **The connect hook goes first on every open** (2026-07-31): queued calls used to flush ahead of it, so a call issued in the same tick as `connect()` — which is every call a one-shot CLI makes — overtook its own `authenticate` and landed on a session-less socket. The hook's own calls don't queue; the socket is open by the time it runs.
 - `onDisconnect(willRetry)` is the symmetric half of `onConnect`, fired on every close (false only for a deliberate `remote.close()`). Doc signals KEEP their last value across a drop — the reconnect's snapshot is what resets them — so anything rendered as live (presence, a connection dot) must hear the drop from this hook or it goes on testifying to a state nobody is in.
 - Lifetime: `remote.doc()` handles are refcounted; the last `close()` unsubscribes and stops re-opens. The host counts watchers per socket and evicts an unwatched DYNAMIC doc — its factory re-hosts (and recomposes) on the next open. Static docs live for the process.
-- Postgres tier (pg.ts): TS applies ops, one guarded UPDATE persists, doc_ops is the log. Cross-process fan-out is real push — LISTEN/NOTIFY via the optional `pg` peer (a dedicated connection with reconnect + catch-up), because Bun's SQL client has no LISTEN callbacks yet (verified, 1.3.14). Decision (Peter, 2026-07-28): carry `pg` for this one job and RETIRE it the day `sql.listen` ships — the seam and tests don't change. Without `pg` installed, `pgSync` degrades to polling.
+- Postgres tier (pg.ts): a stored function applies ops in one transaction, doc_ops is the log. Cross-process fan-out is real push — LISTEN/NOTIFY via the optional `pg` peer (a dedicated connection with reconnect + catch-up), because Bun's SQL client has no LISTEN callbacks yet (verified, 1.3.14). Decision (Peter, 2026-07-28): carry `pg` for this one job and RETIRE it the day `sql.listen` ships — the seam and tests don't change. Without `pg` installed, `pgSync` degrades to polling.
 
 ## The pixels (v0 — ui.ts)
 
@@ -89,7 +89,7 @@ Not done here: epsilon's own `001`–`005` and `100`/`101` keep their function b
 
 ## Storage tiers — where stored functions live (Peter, 2026-07-28)
 
-Two tiers, one boundary rule:
+Two tiers were planned, one boundary rule:
 
 - **Doc-native (v0, pg.ts):** the doc IS a JSONB blob. Nothing to compose, no
   second table to touch — TS `applyOps` + one guarded UPDATE is the whole
@@ -100,6 +100,14 @@ Two tiers, one boundary rule:
   (`jsonb_object_agg` where the data lives, one round trip) and multi-table
   writes (transactional cascades, RLS in the same statement). This is
   delta's proven ground — borrow its patterns.
+
+**Resolved (0.10.0): there is one tier.** Relational shipped, and in six
+releases no app ever hosted a blob — every `pgDoc` call site passed `apply`.
+The doc-native branch was ~48 lines of unreachable second implementation, and
+it was the SOLE reason `DocOpts.persist` and the host's per-entry `muted` flag
+existed — the trickiest invariant in `doc.ts`, maintained for no caller.
+`pgDoc`'s `apply` is now required. The boundary rule below is unchanged; it
+just no longer has a tier on the other side of it.
 
 The boundary: **SQL owns composition and multi-table transactions; TS owns
 the op vocabulary, transport, and UI.** A tier uses stored functions exactly
@@ -126,7 +134,7 @@ bcrypt cost 12 ~350ms — on par with native.
 ## Delivered (Peter-driven, 2026-07-28 evening)
 
 1. **Server mints ids — every tier.** Clients send `add /coll/-`; the host
-   assigns a uuid (doc-native) or the Postgres sequence assigns (relational);
+   assigns a uuid (in-memory) or the Postgres sequence assigns (relational);
    the echo carries the resolved path. Arrays keep native `-` append.
 2. **Auth UI in the template.** `requireAuth` turns on with Postgres; the
    dialog drives register/login/authenticate; tokens restore sessions.

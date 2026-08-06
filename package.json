@@ -5,14 +5,14 @@
   "type": "module",
   "description": "An epsilon app — one op stream, Postgres to pixel.",
   "epsilon": {
-    "base": "v0.9.4"
+    "base": "v0.10.0"
   },
   "scripts": {
     "dev": "bun --hot server.ts",
     "stop": "kill $(cat .epsilon.pid)",
     "check": "bunx tsc --noEmit",
     "epsilon:upgrade": "bun epsilon/upgrade.ts",
-    "test": "bun test epsilon/signal.test.ts epsilon/doc.test.ts epsilon/ui.test.ts epsilon/route.test.ts epsilon/cli.test.ts epsilon/law.test.ts epsilon/upgrade.test.ts",
+    "test": "bun test epsilon/op.test.ts epsilon/signal.test.ts epsilon/doc.test.ts epsilon/ui.test.ts epsilon/route.test.ts epsilon/cli.test.ts epsilon/law.test.ts epsilon/upgrade.test.ts",
     "test:migrate": "bun test epsilon/migrate.test.ts",
     "test:pglite": "bun test --timeout 30000 epsilon/pglite.test.ts",
     "test:pg": "bun test epsilon/pg.test.ts epsilon/rel.test.ts epsilon/view.test.ts epsilon/passkey.test.ts",

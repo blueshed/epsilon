@@ -22,7 +22,6 @@ function fixture(): string {
   };
   write(".github/workflows/ci.yml", "epsilon's own CI");
   write("CHANGELOG.md", "epsilon's releases");
-  write("SHAKEDOWN.md", "the 0.8.0 audit");
   write("UPGRADING.md", "the upgrade trail");
   write("LICENSE", "MIT © blueshed.co.uk");
   write("README.md", "the template's pitch");
@@ -43,7 +42,7 @@ describe("scaffoldInit", () => {
 
       // epsilon's history: gone. (.github is not here — it is removed and
       // then rebuilt from the app's own CI, asserted by content below.)
-      for (const gone of ["CHANGELOG.md", "SHAKEDOWN.md", "UPGRADING.md", "LICENSE"]) {
+      for (const gone of ["CHANGELOG.md", "UPGRADING.md", "LICENSE"]) {
         expect(existsSync(join(d, gone))).toBe(false);
       }
       // The app's own versions: installed over the template's.
@@ -78,7 +77,7 @@ describe("the template it runs against", () => {
     for (const src of ["README.md", "CLAUDE.md", "ci.yml"]) {
       expect(existsSync(join(REPO, ".scaffold", src))).toBe(true);
     }
-    for (const gone of [".github", "CHANGELOG.md", "SHAKEDOWN.md", "UPGRADING.md", "LICENSE"]) {
+    for (const gone of [".github", "CHANGELOG.md", "UPGRADING.md", "LICENSE"]) {
       expect(existsSync(join(REPO, gone))).toBe(true);
     }
     expect(existsSync(join(REPO, "epsilon/LICENSE"))).toBe(true);

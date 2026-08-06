@@ -29,7 +29,9 @@
 import { applyOp, valueAt, splitPath, type Op } from "./op";
 
 type Listener = (() => void) & { level?: number };
-type OpsHandler = (ops: Op[] | undefined) => void;
+// Always ops, never undefined: notify() has ONE caller, apply(ops: Op[]),
+// and set() routes through it as a root replace. A snapshot IS an op.
+type OpsHandler = (ops: Op[]) => void;
 
 let currentListener: Listener | null = null;
 let currentDeps: Set<Signal<any>> | null = null;
@@ -211,7 +213,7 @@ export class Signal<T> implements OpSignal<T> {
   }
 
   /** Deliver ops (handlers first, error-isolated), then flush state. @internal */
-  private notify(ops: Op[] | undefined): void {
+  private notify(ops: Op[]): void {
     for (const h of this.opsHandlers) {
       try { h(ops); }
       catch (err) { console.error("[epsilon/signal] onOps handler threw:", err); }
@@ -297,7 +299,6 @@ class Lens<T> implements OpSignal<T> {
   onOps(handler: OpsHandler): () => void {
     const childPrefix = this.prefix + "/";
     return this.root.onOps((ops) => {
-      if (ops === undefined) return handler(undefined);
       const rebased: Op[] = [];
       let ancestorHit = false;
       for (const op of ops) {
@@ -340,7 +341,17 @@ export function popDisposeScope(): Dispose {
   if (!disposers) {
     throw new Error("popDisposeScope called with no active scope — push/pop imbalance");
   }
-  return () => disposers.forEach((d) => d());
+  // Error-isolated, like drain(): one thrower must not strand every disposer
+  // queued behind it — a stranded disposer is a leaked subscription.
+  return () => {
+    let firstError: unknown;
+    let hasError = false;
+    for (const d of disposers) {
+      try { d(); }
+      catch (err) { if (!hasError) { hasError = true; firstError = err; } }
+    }
+    if (hasError) throw firstError;
+  };
 }
 
 export function trackDispose(d: Dispose): void {

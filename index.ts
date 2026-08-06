@@ -112,7 +112,18 @@ function openBoard(name: string): void {
   const members = doc.at<Record<string, Member>>("/members") as OpSignal<Record<string, Member> | null>;
   membersUl.replaceChildren();
   pushDisposeScope();
-  effect(() => { boardName.textContent = doc.get()?.name ?? ""; });
+  // Narrow, THEN read (0.9.0): reading doc.get() here tracked the root, so
+  // anyone's card add re-ran this and rewrote the node — dropping your caret
+  // to the end mid-rename. The lens re-runs only when /name itself changes.
+  const boardTitle = doc.at<string | undefined>("/name");
+  effect(() => {
+    const name = boardTitle.get() ?? "";
+    // And not while YOU are typing in it: a remote rename still lands here,
+    // and rewriting a focused contentEditable moves the caret. onblur
+    // reconciles what you leave behind.
+    if (document.activeElement === boardName) return;
+    boardName.textContent = name;
+  });
   // Gone is a snapshot of nothing: a board deleted — or a share revoked —
   // pushes null (v stays > 0, unlike the pre-snapshot null). Fall back to
   // the shared board; the mine list already lost its row via the mirror.

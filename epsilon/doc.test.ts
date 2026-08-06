@@ -422,21 +422,11 @@ describe("presence — subscribe hooks drive an ephemeral doc (server.ts's patte
   });
 });
 
-describe("persistence muting is per-doc", () => {
-  test("a cascade writing doc B during doc A's receive still persists B", () => {
-    const h = createHost();
-    const persisted: string[] = [];
-    const a = h.doc<{ n: number }>("a", { n: 0 }, { persist: () => { persisted.push("a"); } });
-    h.doc<{ n: number }>("b", { n: 0 }, { persist: () => { persisted.push("b"); } });
-    const b = h.doc<{ n: number }>("b", { n: 0 });   // same entry back
-    // A server-side cascade: whenever A changes, derive into B.
-    a.onOps((ops) => { if (ops) b.apply([{ op: "replace", path: "/n", value: 1 }]); });
-
-    // A's ops came FROM storage — A must not re-persist; B's write is new.
-    expect(h.receive("a", 1, [{ op: "replace", path: "/n", value: 1 }])).toBe("ok");
-    expect(persisted).toEqual(["b"]);
-  });
-});
+// (The "persistence muting is per-doc" case lived here until 0.10.0. It
+// tested DocOpts.persist and the host's `muted` flag, which existed only for
+// the doc-native JSONB tier — both are gone with it. A cascade that writes a
+// different doc during a receive is still exercised for real by the rename
+// mirror in rel.test.ts.)
 
 describe("lifetime — close() releases docs; unwatched dynamic docs evict", () => {
   test("refcount: two handles, one socket — only the last close releases", async () => {

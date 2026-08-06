@@ -7,7 +7,39 @@ will ship.
 
 ## [Unreleased]
 
-## [0.9.4] — 2026-08-06
+## [0.10.0] — 2026-08-06
+
+A minor, not a patch: the doc-native storage tier is gone, so `pgDoc`'s
+`apply` is now required. Everything else is housekeeping — the scaffold, and
+the last five open findings from the 0.8.0 shakedown.
+
+### Removed
+
+- **`SHAKEDOWN.md`.** A 15 KB adversarial audit of 0.8.0 that shipped into
+  every scaffold, quoting `file:line` bugs and another private app's schema
+  throughout. Six of its findings had already been fixed; the last five are
+  fixed in this release, so it holds nothing both true and unrecorded. The
+  closed ones live in this changelog and in the code comments that explain
+  them — `route.ts:75-77` states the hash fix better than the audit did.
+- **The doc-native JSONB tier, and `DocOpts.persist` with it.** `pgDoc`
+  branched on `opts.apply`: with it, tables are the truth; without it, the
+  doc was a JSONB blob that TS applied ops to and one guarded UPDATE
+  persisted. DESIGN.md called that tier "v0" and relational "next".
+  Relational arrived at 0.7.0 and **no app ever hosted a blob** — every
+  call site in this repo and in the one deployed app passes `apply`. The
+  branch's real cost was not its ~48 lines: it was the SOLE reader of
+  `DocOpts.persist`, which was the sole reason the host carried a per-entry
+  `muted` flag through `hydrate` and `receive` — the trickiest invariant in
+  `doc.ts`, maintained for no caller. `apply` is now required and both are
+  gone. Found by two independent dimensions of the 0.8.0 shakedown, the
+  single strongest agreement in that review.
+- `pg.test.ts`'s durability and LISTEN fan-out cases went with the tier they
+  tested. Both claims are proven on the tier that ships, in `rel.test.ts`
+  ("restart: a fresh host hydrates by COMPOSING" and "two processes,
+  concurrent writes", which also asserts `mode === "listen"`). The **poll**
+  cases were unique — the fallback path, and the only place a doc's death is
+  noticed by a sweep — so they were re-homed onto a relational board rather
+  than deleted.
 
 ### Changed
 
@@ -17,10 +49,8 @@ will ship.
   trail and a 37 KB design document. A scaffold inherited all of it. The
   hook is now `.scaffold/init.ts`, with the boundary written down as two
   lists: what an app must not keep, and what replaces it.
-  - Gone from a scaffold: `SHAKEDOWN.md` (an adversarial audit of epsilon
-    0.8.0 — it names file:line bugs and another app's schema throughout, and
-    it was shipping to every user), `UPGRADING.md`, `CHANGELOG.md`,
-    `.github/`, and root `LICENSE`.
+  - Gone from a scaffold: `UPGRADING.md`, `CHANGELOG.md`, `.github/`, and
+    root `LICENSE`.
   - New in a scaffold: a `README.md` and `CLAUDE.md` written for the app
     rather than for this repo — what the demo is and which files to delete,
     which engine to pick, where things are — plus a CI workflow that runs
@@ -64,6 +94,32 @@ will ship.
   right and the deep manual contradicted it.
 - README's runtime table listed 11 of the 12 runtime files — `passkey.ts`
   (343 lines of WebAuthn) was missing, though the prose above sells it.
+- **`op.ts` finally has a test beside it.** It was the only source file
+  without one, against README's "the tests are the contract" — and it holds
+  the prototype-pollution guard. `op.test.ts` pins the escape round-trip and
+  the `~1`-before-`~0` order that makes `~01` literal, the three forbidden
+  tokens (including that `constructorName` stays legal), `add`-SETS-not-
+  shifts, and that every op's undo restores exactly what changed. It also
+  pins a deviation nothing had written down: `"/"` is the ROOT here, not
+  RFC 6901's empty-string key, so an empty-string key is unaddressable.
+- **`popDisposeScope`'s disposer stranded every disposer behind a thrower.**
+  It ran `disposers.forEach((d) => d())`, so one throwing disposer skipped
+  the rest — and a skipped disposer is a leaked subscription. It now isolates
+  errors and rethrows the first, the policy `drain()` already used two
+  hundred lines up. One policy, not two.
+- **`OpsHandler`'s `undefined` arm was unreachable.** `notify()` has one
+  caller — `apply(ops: Op[])` — and `set()` routes through it as a root
+  replace, so a handler never saw `undefined`. The type, the arm in
+  `Lens.onOps`, and the dead branch in `list()` are gone; a snapshot is an
+  op like everything else.
+- **The demo clobbered your caret mid-rename.** `index.ts` rewrote the board
+  title from the doc ROOT on every op, so anyone's card add re-ran it. Fixed
+  the 0.9.0 way — narrow to `/name` with `at()`, then read — plus an
+  `activeElement` guard, because a *remote* rename still lands while you type.
+- `pg.ts` cited `DEPLOY.md` for the deploy recommendation. No such file has
+  ever existed in this repo; the reference is now README's "Deploying".
+- `ui.ts`'s `mount()` docs still told readers about `bind()` and `when()`,
+  removed in 0.9.0.
 
 ## [0.9.3] — 2026-08-02
 

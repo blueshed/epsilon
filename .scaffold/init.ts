@@ -24,7 +24,6 @@ import { join } from "node:path";
 const REMOVE = [
   ".github",         // epsilon's CI — the app gets its own, from .scaffold/ci.yml
   "CHANGELOG.md",    // epsilon's releases, not the app's
-  "SHAKEDOWN.md",    // an internal audit of epsilon 0.8.0
   "UPGRADING.md",    // per-release upgrade trail; epsilon:upgrade links to it upstream
   "LICENSE",         // epsilon's copyright — the app picks its own; epsilon/LICENSE stays
 ];
