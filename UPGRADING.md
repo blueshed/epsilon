@@ -23,6 +23,48 @@ whitelist is listed below, per version, by hand.
 
 Commit before you start. The tool assumes a clean tree.
 
+**This file lives upstream, not in your app** (0.10.0). A per-release trail
+that a scaffold cannot update is wrong the day after it ships, so
+`epsilon:upgrade` prints the link to the version you are taking instead.
+
+---
+
+## → 0.10.0
+
+**One breaking change, and it is a compile error, not a surprise at
+runtime: `pgDoc`'s `apply` is now required.**
+
+The doc-native tier — `pgDoc` WITHOUT `apply`, where the doc was a JSONB
+blob in `docs.data` — is gone, along with `DocOpts.persist`. If `bun run
+check` is clean after the upgrade, you were never using it, which is
+overwhelmingly likely: every call site in this repo and in the one deployed
+app already passed `apply`.
+
+If it does complain, that doc was a blob and needs a relational home before
+you take 0.10.0: a table, a `<doc>_open` composition function and a
+`<doc>_apply` dispatch — `db/003-doc-kit.sql` is the skeleton and
+`db/100-board.sql` the worked example. There is no automatic migration,
+because only you know what the blob's shape should become in tables.
+
+**Otherwise the runtime is automatic.** Two files move INTO the whitelist,
+so the upgrade brings them to you: `epsilon/DESIGN.md` (the why, previously
+root `DESIGN.md` and frozen at whatever release you scaffolded from) and
+`epsilon/LICENSE` (the notice that travels with the vendored source).
+
+**Then delete the stale copies at your root** — `DESIGN.md` is now a
+duplicate that will never update again, and root `LICENSE` is epsilon's
+copyright sitting where your app's license belongs:
+
+```sh
+rm DESIGN.md          # now epsilon/DESIGN.md, and current
+rm LICENSE            # epsilon/LICENSE covers the runtime; license your app as you like
+rm -f SHAKEDOWN.md    # an internal audit of epsilon 0.8.0; it was never yours
+```
+
+Nothing reads them, so this is housekeeping, not a break. If you have
+`db/fn/`, upstream's [`db/fn/README.md`](https://github.com/blueshed/epsilon/blob/main/db/fn/README.md)
+is worth copying in — the folder's three rules, where the next person looks.
+
 ---
 
 ## → 0.9.0 (unreleased)

@@ -66,6 +66,67 @@ h1::before { content: "ε "; color: var(--accent); font-weight: 700; }
 }
 #signout:hover { color: var(--danger); }
 
+/* The header holds two verbs now, so it needs a gap and its own grouping —
+   h1 pushes them right. */
+header { gap: 1rem; }
+h1 { margin-right: auto; }
+#settings-link {
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 0.78rem;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0;
+}
+#settings-link:hover { color: var(--accent); }
+#settings-back {
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 1.1rem;
+  line-height: 1;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0;
+}
+#settings-back:hover { color: var(--accent); }
+
+/* One card, routed underneath the board it belongs to — a panel, not a page:
+   the list stays visible above so the detail reads as a zoom, not a jump. */
+#card-detail {
+  margin-top: 1.5rem;
+  padding: 1rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+#detail-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 0.6rem;
+}
+#detail-head h3 {
+  margin: 0;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+#detail-close {
+  border: 0;
+  background: none;
+  font: inherit;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0 0.25rem;
+}
+#detail-close:hover { color: var(--danger); }
+#detail-by { margin: 0.5rem 0 0; }
+#log li span { cursor: pointer; }
+#log li span:hover { color: var(--accent); }
+
 #board-header { display: flex; align-items: baseline; gap: 0.5rem; }
 #board-back {
   border: 0;
@@ -162,6 +223,52 @@ li {
 #log li span { flex: 1; }
 #log li:has(input:checked) span { color: var(--muted); }
 #members li { justify-content: space-between; }
+
+/* Row provenance: who made it, who touched it last, when. Quiet enough to
+   ignore, present enough to prove the stamps are real. */
+.byline {
+  font-size: 0.72rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.byline:empty { display: none; }
+@media (max-width: 30rem) {
+  .byline { display: none; }   /* the text matters more than its provenance */
+}
+
+/* undo / history: header verbs, not row actions — quiet until hovered. */
+#board-header :is(#undo, #history-toggle) {
+  margin-left: auto;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 0.78rem;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0 0.25rem;
+  border-radius: 4px;
+}
+#board-header #history-toggle { margin-left: 0; }
+#board-header :is(#undo, #history-toggle):hover:enabled { color: var(--accent); }
+#board-header #undo:disabled { color: var(--line); cursor: default; }
+
+#board-msg {
+  margin: 0.4rem 0 0;
+  font-size: 0.78rem;
+  color: var(--danger);
+}
+#board-msg:empty { display: none; }
+
+/* The audit read back — a panel, not a doc: it has no live claim to make. */
+#history { margin-top: 1.25rem; }
+#history li {
+  justify-content: space-between;
+  gap: 1rem;
+  font-size: 0.82rem;
+  color: var(--muted);
+  animation: none;   /* a read, not an echo — nothing landed */
+}
+#history li span { word-break: break-word; }
 
 input[type="checkbox"] {
   width: auto;

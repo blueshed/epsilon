@@ -4,6 +4,7 @@ import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { SQL } from "bun";
 import { createHost, connect, type Host, type Remote } from "./doc";
 import { migrate, pgDoc, pgSync, pgAuth } from "./pg";
+import { pgReachable, skipped, hasBoardFixture, NO_FIXTURE } from "./testdb";
 
 // Tests own a SEPARATE database (created on demand) — the suite wipes its
 // schema, and it must never share the app's DB. NAMESPACED BY APP (package.json
@@ -16,6 +17,10 @@ const APP = ((await Bun.file(new URL("../package.json", import.meta.url)).json()
 const DB = `${APP}_test_pg`;
 const ADMIN_URL = "postgres://epsilon:epsilon@localhost:5599/epsilon";
 const PG_URL = process.env.EPSILON_TEST_PG_URL ?? `postgres://epsilon:epsilon@localhost:5599/${DB}`;
+
+// Bare `bun test` runs this file too. Ask before assuming.
+const DB_UP = await pgReachable(ADMIN_URL);
+if (!DB_UP) skipped('pg.test.ts (durability, fan-out, users)');
 const DB_DIR = new URL("../db", import.meta.url).pathname;
 
 async function ensureTestDb(): Promise<void> {
@@ -26,8 +31,7 @@ async function ensureTestDb(): Promise<void> {
   await admin.end();
 }
 
-interface Board { cards: Record<string, { id: number; title: string }> }
-const empty: Board = { cards: {} };
+import type { Board, Card } from "../types";
 
 let sql: SQL;
 const servers: ReturnType<typeof Bun.serve>[] = [];
@@ -66,14 +70,8 @@ const until = async (cond: () => boolean | Promise<boolean>, ms = 2000) => {
   }
 };
 
-/** Poll until the docs row reaches version v — persistence is async by design. */
-const untilDbV = (name: string, v: number) =>
-  until(async () => {
-    const [row] = await sql`SELECT v FROM docs WHERE name = ${name}`;
-    return row != null && Number(row.v) >= v;
-  });
-
 beforeAll(async () => {
+  if (!DB_UP) return;   // nothing to set up; the describes are skipped
   await ensureTestDb();
   sql = freshSql();
   // Start from NOTHING: released core files are frozen and only guaranteed
@@ -86,114 +84,77 @@ beforeAll(async () => {
   // replays by design, so filter it out rather than asserting an empty
   // result: an app that adopts db/fn would otherwise fail this line.
   expect((await migrate(sql, { dir: DB_DIR })).filter((m) => !m.fn)).toEqual([]);
+  if (!(await hasBoardFixture(sql))) throw new Error(NO_FIXTURE);
 });
 
 afterAll(async () => {
+  if (!DB_UP) return;   // nothing was opened
   for (const stop of stops) stop();
   for (const r of remotes) r.close();
   for (const s of servers) s.stop(true);
   for (const s of sqls) await s.end?.();
 });
 
-describe("durability", () => {
-  test("a wire write lands in docs and doc_ops with contiguous versions", async () => {
-    const host = createHost();
-    const board = await pgDoc<Board>(host, sql, "blob:1", structuredClone(empty));
-    const url = serve(host);
-    const remote = client(url).doc<Board>("blob:1");
-    await remote.ready;
-
-    remote.apply([{ op: "add", path: "/cards/1", value: { id: 1, title: "persisted" } }]);
-    await until(() => board.peek().cards["1"] !== undefined);
-    await untilDbV("blob:1", 1);
-
-    const [doc] = await sql`SELECT v, data FROM docs WHERE name = ${"blob:1"}`;
-    expect(Number(doc.v)).toBe(1);
-    expect(doc.data.cards["1"].title).toBe("persisted");
-    const opsRows = await sql`SELECT v, ops FROM doc_ops WHERE name = ${"blob:1"} ORDER BY v`;
-    expect(opsRows.length).toBe(1);
-    expect(opsRows[0].ops[0].path).toBe("/cards/1");
-  });
-
-  test("restart: a new host hydrates state AND version, then keeps writing", async () => {
-    const host2 = createHost();
-    const board2 = await pgDoc<Board>(host2, sql, "blob:1", structuredClone(empty));
-    expect(board2.peek().cards["1"]!.title).toBe("persisted");   // hydrated
-    expect(host2.v("blob:1")).toBe(1);                          // version carried
-
-    board2.apply([{ op: "replace", path: "/cards/1/title", value: "after-restart" }]);
-    await untilDbV("blob:1", 2);
-    const [doc] = await sql`SELECT v, data FROM docs WHERE name = ${"blob:1"}`;
-    expect(Number(doc.v)).toBe(2);                               // optimistic guard passed
-    expect(doc.data.cards["1"].title).toBe("after-restart");
-  });
-});
-
-describe("cross-process fan-out (LISTEN/NOTIFY)", () => {
-  test("a write in process A reaches process B's doc and B's browser", async () => {
-    // Two hosts, two SQL connections — two processes in miniature.
-    const a = createHost();
-    const b = createHost();
-    const sqlA = freshSql();
-    const sqlB = freshSql();
-    const boardA = await pgDoc<Board>(a, sqlA, "blob:x", structuredClone(empty));
-    const boardB = await pgDoc<Board>(b, sqlB, "blob:x", structuredClone(empty));
-    const syncA = await pgSync(a, sqlA, { url: PG_URL });
-    const syncB = await pgSync(b, sqlB, { url: PG_URL });
-    stops.push(syncA.stop, syncB.stop);
-    // pg is installed in this repo, so fan-out must be real push, not polling.
-    expect(syncA.mode).toBe("listen");
-    expect(syncB.mode).toBe("listen");
-    const urlB = serve(b);
-    const browserB = client(urlB).doc<Board>("blob:x");
-    await browserB.ready;
-
-    boardA.apply([{ op: "add", path: "/cards/9", value: { id: 9, title: "cross" } }]);
-
-    await until(() => boardB.peek().cards["9"] !== undefined);          // B's authority
-    await until(() => browserB.peek()!.cards["9"] !== undefined);       // B's browser
-    expect(b.v("blob:x")).toBe(a.v("blob:x"));
-  });
-
+// Durability, restart-hydrate and LISTEN fan-out are proven on the tier that
+// ships, in rel.test.ts — "restart: a fresh host hydrates by COMPOSING" and
+// "two processes, concurrent writes: FOR UPDATE serializes, both land", which
+// also asserts mode === "listen". They lived here too until 0.10.0, against a
+// doc-native JSONB tier that no app ever hosted; the tier is gone and its
+// copies with it. What remains here is what rel.test.ts does NOT cover: the
+// POLL path, chosen when `pg` is absent, where a doc's death is noticed by a
+// sweep rather than a doorbell.
+describe.skipIf(!DB_UP)("cross-process fan-out — the poll fallback", () => {
   test("poll fallback sweeps every hosted doc in one query", async () => {
     const a = createHost();
     const c = createHost();
     const sqlA = freshSql();
     const sqlC = freshSql();
-    const boardA = await pgDoc<Board>(a, sqlA, "blob:p", structuredClone(empty));
-    const boardC = await pgDoc<Board>(c, sqlC, "blob:p", structuredClone(empty));
+    await pgDoc<Board>(a, sqlA, "board:1", null as unknown as Board, { apply: "board_apply" });
+    const boardC = await pgDoc<Board>(c, sqlC, "board:1", null as unknown as Board, { apply: "board_apply" });
     const sync = await pgSync(c, sqlC, { ms: 50, mode: "poll" });
     stops.push(sync.stop);
     expect(sync.mode).toBe("poll");
 
-    boardA.apply([{ op: "add", path: "/cards/7", value: { id: 7, title: "polled" } }]);
-    await until(() => boardC.peek().cards["7"] !== undefined);
+    const before = Object.keys(boardC.peek()!.cards).length;
+    const ca = client(serve(a)).doc<Board>("board:1");
+    await ca.ready;
+    ca.at<Record<string, Card>>("/cards").apply([{ op: "add", path: "/-", value: { text: "polled" } }]);
+
+    await until(() => Object.keys(boardC.peek()!.cards).length === before + 1);
   });
 
   test("poll notices a vanished row: the doc un-hosts, watchers get the snapshot of nothing", async () => {
+    // Its own board, because this test deletes it. owner_id NULL = public,
+    // so no user is needed to watch or write.
+    const [b] = await sql`INSERT INTO boards (name, owner_id) VALUES ('doomed', NULL) RETURNING id`;
+    const name = `board:${b.id}`;
+    await sql`INSERT INTO docs (name, v, data, open_fn) VALUES (${name}, 0, NULL, 'board_open')`;
+
     const a = createHost();
     const c = createHost();
     const sqlA = freshSql();
     const sqlC = freshSql();
-    const boardA = await pgDoc<Board>(a, sqlA, "blob:gone", structuredClone(empty));
-    const boardC = await pgDoc<Board>(c, sqlC, "blob:gone", structuredClone(empty));
+    await pgDoc<Board>(a, sqlA, name, null as unknown as Board, { apply: "board_apply" });
+    const boardC = await pgDoc<Board>(c, sqlC, name, null as unknown as Board, { apply: "board_apply" });
     const sync = await pgSync(c, sqlC, { ms: 50, mode: "poll" });
     stops.push(sync.stop);
-    const watcher = client(serve(c)).doc<Board>("blob:gone");
+    const watcher = client(serve(c)).doc<Board>(name);
     await watcher.ready;
 
     // A write round-trips first, so a sweep has seen the row (it is KNOWN —
     // docs that never had a row, like in-memory presence, are never dropped).
-    boardA.apply([{ op: "add", path: "/cards/2", value: { id: 2, title: "brief" } }]);
-    await until(() => boardC.peek().cards["2"] !== undefined);
+    const ca = client(serve(a)).doc<Board>(name);
+    await ca.ready;
+    ca.at<Record<string, Card>>("/cards").apply([{ op: "add", path: "/-", value: { text: "brief" } }]);
+    await until(() => Object.keys(boardC.peek()!.cards).length === 1);
 
-    await sqlA`SELECT doc_drop(${"blob:gone"})`;
-    await until(() => !c.names().includes("blob:gone"));
+    await sqlA`SELECT doc_drop(${name})`;
+    await until(() => !c.names().includes(name));
     await until(() => watcher.peek() === null);
   });
 });
 
-describe("schema-native users", () => {
+describe.skipIf(!DB_UP)("schema-native users", () => {
   test("register → session; wrong password rejects; token authenticates a NEW socket", async () => {
     const host = createHost();
     await pgAuth(host, sql);
@@ -260,25 +221,25 @@ describe("schema-native users", () => {
   test("requireAuth: docs are closed until an auth method vouches for the socket", async () => {
     const host = createHost({ requireAuth: true });
     await pgAuth(host, sql);
-    await pgDoc<Board>(host, sql, "private", structuredClone(empty));
+    await pgDoc<Board>(host, sql, "board:1", null as unknown as Board, { apply: "board_apply" });
     const url = serve(host);
 
     const errors: string[] = [];
     const r = client(url, (_d, e) => errors.push(e));
-    const before = r.doc<Board>("private");        // open fires unauthenticated
+    const before = r.doc<Board>("board:1");        // open fires unauthenticated
     await until(() => errors.length > 0);
     expect(errors[0]).toBe("unauthenticated");
     expect(before.peek()).toBeNull();
 
     await r.call("login", { email: "pete@blueshed.co.uk", password: "correct-horse" });
     // v0: no automatic re-open after auth — the doc handle re-opens on ask.
-    const after = r.doc<Board>("private");
+    const after = r.doc<Board>("board:1");
     await after.ready;
     expect(after.peek()).not.toBeNull();
   });
 });
 
-describe("housekeeping", () => {
+describe.skipIf(!DB_UP)("housekeeping", () => {
   test("epsilon_prune drops old ops and dead sessions, keeps the rest", async () => {
     await sql`INSERT INTO docs (name, v, data) VALUES ('prune:1', 2, '{}'::jsonb)
               ON CONFLICT (name) DO NOTHING`;

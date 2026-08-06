@@ -8,12 +8,17 @@ import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { SQL } from "bun";
 import { createHost, connect, type Host, type Remote } from "./doc";
 import { migrate, pgAuth, pgSync, pgView } from "./pg";
+import { pgReachable, skipped, hasBoardFixture, NO_FIXTURE } from "./testdb";
 
 const APP = ((await Bun.file(new URL("../package.json", import.meta.url)).json()).name as string)
   .toLowerCase().replace(/[^a-z0-9_]/g, "_").replace(/^(?![a-z_])/, "app_");
 const DB = `${APP}_test_view`;
 const ADMIN_URL = "postgres://epsilon:epsilon@localhost:5599/epsilon";
 const PG_URL = process.env.EPSILON_TEST_PG_URL ?? `postgres://epsilon:epsilon@localhost:5599/${DB}`;
+
+// Bare `bun test` runs this file too. Ask before assuming.
+const DB_UP = await pgReachable(ADMIN_URL);
+if (!DB_UP) skipped('view.test.ts (declared views)');
 const DB_DIR = new URL("../db", import.meta.url).pathname;
 
 // tally:<uid> — the worked example: counts over the user's boards. Per-
@@ -85,6 +90,7 @@ const addCard = (bid: number, uid: number, text: string) =>
     ["board:" + bid, [{ op: "add", path: "/cards/-", value: { text } }] as unknown, uid]);
 
 beforeAll(async () => {
+  if (!DB_UP) return;   // nothing to set up; the describes are skipped
   if (!process.env.EPSILON_TEST_PG_URL) {
     const admin = new SQL(ADMIN_URL);
     const [exists] = await admin`SELECT 1 FROM pg_database WHERE datname = ${DB}`;
@@ -94,17 +100,19 @@ beforeAll(async () => {
   sql = new SQL(PG_URL, { max: 3 });
   await sql.unsafe("DROP SCHEMA public CASCADE; CREATE SCHEMA public");
   await migrate(sql, { dir: DB_DIR });
+  if (!(await hasBoardFixture(sql))) throw new Error(NO_FIXTURE);
   await sql.unsafe(TALLY_SQL);
 });
 
 afterAll(async () => {
+  if (!DB_UP) return;   // nothing was opened
   for (const stop of stops) stop();
   for (const r of remotes) r.close();
   for (const s of servers) s.stop(true);
   await sql.end?.();
 });
 
-describe("views — nouns are docs (LISTEN delivery)", () => {
+describe.skipIf(!DB_UP)("views — nouns are docs (LISTEN delivery)", () => {
   test("opens with a snapshot, follows its dependencies live, refuses writes", async () => {
     const host = createHost({ requireAuth: true });
     await pgAuth(host, sql);
@@ -187,7 +195,7 @@ describe("views — nouns are docs (LISTEN delivery)", () => {
   });
 });
 
-describe("views — poll delivery (the embedded tier's mode)", () => {
+describe.skipIf(!DB_UP)("views — poll delivery (the embedded tier's mode)", () => {
   test("dependency bumps, and deaths, arrive by sweep — no doorbell anywhere", async () => {
     const host = createHost({ requireAuth: true });
     await pgAuth(host, sql);

@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHost, connect, type Host, type Remote } from "./doc";
 import { migrate, pgDoc, pgAuth, pgSync, pgView, type Sql } from "./pg";
+import { hasBoardFixture, NO_FIXTURE } from "./testdb";
 import { openPglite } from "./pglite";
 import type { Card, Board } from "../types";
 
@@ -36,6 +37,7 @@ beforeAll(async () => {
   dir = mkdtempSync(join(tmpdir(), "epsilon-pglite-"));
   sql = await openPglite(dir);
   await migrate(sql, { dir: DB_DIR });
+  if (!(await hasBoardFixture(sql))) throw new Error(NO_FIXTURE);
 });
 
 afterAll(async () => {

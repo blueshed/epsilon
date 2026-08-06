@@ -129,8 +129,8 @@ export function list<T>(
     rows.delete(id);
   }
 
-  /** Root change (snapshot, reconnect, undefined ops): diff KEY SETS only.
-   *  Surviving rows update themselves through their lenses — no rebuild. */
+  /** Root change (a snapshot, a reconnect): diff KEY SETS only. Surviving
+   *  rows update themselves through their lenses — no rebuild. */
   function reconcile(): void {
     const value = sig.peek() ?? {};
     for (const id of [...rows.keys()]) {
@@ -141,7 +141,6 @@ export function list<T>(
 
   const unsub = sig.onOps((ops) => {
     if (disposed) return;
-    if (ops === undefined) return reconcile();
     for (const op of ops) {
       const segs = splitPath(op.path);
       if (segs.length === 0) reconcile();                      // root replace/remove
@@ -174,13 +173,13 @@ export function list<T>(
 
 /**
  * The app root. Brackets a dispose scope around `render` so everything it
- * creates — effects, binds, lists, whens — tears down when the returned
+ * creates — effects, lists, lens reads — tears down when the returned
  * disposer runs, which also removes the rendered nodes.
  *
  *   const dispose = mount(document.getElementById("app")!, () => App());
  *
  * Use this (or routes(), which brackets its own per-handler scopes) for an
- * app root. Without one, a top-level bind()/list()/when() has no owner: that
+ * app root. Without one, a top-level list() or lens read has no owner: that
  * is the warning they print, and this is the answer to it. Nested mounts
  * compose — the inner disposer is tracked in the outer scope.
  */

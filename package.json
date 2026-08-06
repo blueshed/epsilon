@@ -1,18 +1,19 @@
 {
   "name": "epsilon",
-  "version": "0.9.3",
+  "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "One op stream, Postgres to pixel — bun create blueshed/epsilon my-app. The runtime lives in your app: epsilon/, ~3.8k lines, tests included.",
+  "description": "An epsilon app — one op stream, Postgres to pixel.",
   "epsilon": {
-    "base": "v0.9.3"
+    "base": "v0.10.0"
   },
   "scripts": {
-    "dev": "bun --hot server.ts",
+    "dev": "EPSILON_PG_DIR=./data bun --hot server.ts",
+    "dev:memory": "bun --hot server.ts",
     "stop": "kill $(cat .epsilon.pid)",
     "check": "bunx tsc --noEmit",
     "epsilon:upgrade": "bun epsilon/upgrade.ts",
-    "test": "bun test epsilon/signal.test.ts epsilon/doc.test.ts epsilon/ui.test.ts epsilon/route.test.ts epsilon/cli.test.ts epsilon/law.test.ts epsilon/upgrade.test.ts",
+    "test": "bun test epsilon/op.test.ts epsilon/signal.test.ts epsilon/doc.test.ts epsilon/ui.test.ts epsilon/route.test.ts epsilon/cli.test.ts epsilon/law.test.ts epsilon/upgrade.test.ts",
     "test:migrate": "bun test epsilon/migrate.test.ts",
     "test:pglite": "bun test --timeout 30000 epsilon/pglite.test.ts",
     "test:pg": "bun test epsilon/pg.test.ts epsilon/rel.test.ts epsilon/view.test.ts epsilon/passkey.test.ts",
@@ -31,7 +32,7 @@
     "typescript": "^5.9.3"
   },
   "bun-create": {
-    "postinstall": "rm -rf .github CHANGELOG.md",
+    "postinstall": "bun .scaffold/init.ts",
     "start": "bun run dev"
   },
   "license": "MIT"

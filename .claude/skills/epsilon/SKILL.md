@@ -6,10 +6,10 @@ description: "This app's realtime stack — op-carrying signals, doc sync over o
 # epsilon — how this app does realtime
 
 The runtime is **in this repo**: `epsilon/` — read the source, it's shorter
-than most docs. `epsilon/*.test.ts` are the contract; `DESIGN.md` is the
-why. **`REFERENCE.md` (next to this file) is the deep manual — read it
+than most docs. `epsilon/*.test.ts` are the contract; `epsilon/DESIGN.md`
+is the why. **`REFERENCE.md` (next to this file) is the deep manual — read it
 BEFORE authoring a doc type, wiring auth/sharing/undo, choosing an engine,
-or debugging the wire.** Routes follow the bun-route convention: root
+routing between screens, or debugging the wire.** Routes follow the bun-route convention: root
 route = `index.html` + `index.css` + `index.ts` at project root;
 `server.ts` exports `startServer(opts)` so tests bind port 0; `app.test.ts`
 drives the real app in `Bun.WebView`.

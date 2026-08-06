@@ -7,6 +7,253 @@ will ship.
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-08-06
+
+A minor, not a patch: the doc-native storage tier is gone, so `pgDoc`'s
+`apply` is now required. Everything else is housekeeping — the scaffold, and
+the last five open findings from the 0.8.0 shakedown.
+
+### Removed
+
+- **`SHAKEDOWN.md`.** A 15 KB adversarial audit of 0.8.0 that shipped into
+  every scaffold, quoting `file:line` bugs and another private app's schema
+  throughout. Six of its findings had already been fixed; the last five are
+  fixed in this release, so it holds nothing both true and unrecorded. The
+  closed ones live in this changelog and in the code comments that explain
+  them — `route.ts:75-77` states the hash fix better than the audit did.
+- **The doc-native JSONB tier, and `DocOpts.persist` with it.** `pgDoc`
+  branched on `opts.apply`: with it, tables are the truth; without it, the
+  doc was a JSONB blob that TS applied ops to and one guarded UPDATE
+  persisted. DESIGN.md called that tier "v0" and relational "next".
+  Relational arrived at 0.7.0 and **no app ever hosted a blob** — every
+  call site in this repo and in the one deployed app passes `apply`. The
+  branch's real cost was not its ~48 lines: it was the SOLE reader of
+  `DocOpts.persist`, which was the sole reason the host carried a per-entry
+  `muted` flag through `hydrate` and `receive` — the trickiest invariant in
+  `doc.ts`, maintained for no caller. `apply` is now required and both are
+  gone. Found by two independent dimensions of the 0.8.0 shakedown, the
+  single strongest agreement in that review.
+- `pg.test.ts`'s durability and LISTEN fan-out cases went with the tier they
+  tested. Both claims are proven on the tier that ships, in `rel.test.ts`
+  ("restart: a fresh host hydrates by COMPOSING" and "two processes,
+  concurrent writes", which also asserts `mode === "listen"`). The **poll**
+  cases were unique — the fallback path, and the only place a doc's death is
+  noticed by a sweep — so they were re-homed onto a relational board rather
+  than deleted.
+
+### Added
+
+- **The demo shows the doc kit at last.** `db/003-doc-kit.sql` is described
+  as "locking, audit, undo, history" and the README sells undo and the audit
+  as headline knowns — and none of it had a single pixel. Three gaps, all in
+  the same half of the database:
+  - **Row stamps.** `card_json` puts `created_by`, `updated_by` and
+    `updated_at` on **every echo**, and `types.ts` declared all three, but
+    nothing ever read them — `git log -S updated_by -- index.ts` is empty.
+    The column's own comment calls it *"the badge"*; the badge was never
+    built. Each card now carries a byline, resolved through the board's own
+    live `members` map (a lookup, not a fetch) and hidden rather than showing
+    a bare id for someone it cannot name.
+  - **Undo.** `pgUndo` was wired in `server.ts` and reachable over the wire;
+    nothing called it. There is now an undo button, and a refusal ("someone
+    wrote after you") is shown rather than swallowed — the refusal is the
+    interesting part.
+  - **History.** Same story for `pgHistory`. A toggle reads the audit back,
+    newest first, each writer named at read time.
+
+  All three are proven in a real browser by `app.test.ts`, not only at the
+  SQL and wire level where `rel.test.ts` already had them covered — which is
+  why the gap survived six releases with every suite green.
+- The kit controls hide themselves in in-memory mode, where `server.ts` wires
+  neither adapter: one capability probe per session, and any refusal OTHER
+  than "unknown method" still counts as present.
+- **The demo has screens now, not a screen.** The route table was two
+  entries — one pattern with one param, and a placeholder string — driving
+  346 lines of router. Nothing showed the wildcard layout, `route()`
+  sub-navigation, declaration order, or the async handler's thunk. Now:
+  - `/board/:id/*` is a **layout**. `/board/:id/card/:cid` routes a card
+    detail underneath it via `route()`, and switching cards rebuilds only the
+    detail — `app.test.ts` pins that by element identity, which is the claim
+    `params$` and the wildcard exist to make.
+  - `/settings` is a second real screen, and an **async handler**: it awaits
+    a genuine browser probe (can this device hold a passkey?) before there is
+    anything to render, so it returns `Promise<() => Node>`. A dispose scope
+    cannot cross an `await`; the thunk is what the router brackets. The bare
+    `Promise<Node>` that railroad shipped and documented as leaking is
+    refused at the type level, and now the template shows why it exists.
+  - The tally view is read by **two screens at once** — the board list and
+    settings — which is what a view being an ordinary doc buys you.
+  - `add a passkey` moved from the always-visible board list onto
+    `/settings`, where account things belong.
+- **`bun dev` now starts on embedded Postgres**, not in memory
+  (`EPSILON_PG_DIR=./data`); the preview moves to `bun run dev:memory`. The
+  old default was a trap: in-memory registers exactly one hardcoded doc, so
+  a first run showed a checklist with no auth, no board list, no sharing, no
+  undo, no history and no bylines — most of what the README sells, invisible,
+  with no hint that an env var was the difference. It cost this repo's own
+  author an hour before we worked out what he was looking at. `@electric-sql/pglite`
+  already ships as a devDependency and `data/` is already gitignored, so the
+  new default needs nothing extra.
+- **`onDisconnect` is wired, and presence finally honours it.** DESIGN.md has
+  warned since 0.6.0 that "anything rendered as live must hear the drop from
+  this hook or it goes on testifying to a state nobody is in" — and the demo
+  rendered presence without it, so a dropped socket left `here: Pete, Ada`
+  on screen indefinitely. The demo now carries the bug's own cure.
+- **`signal()`, `computed()` and `batch()` appear in the demo at last.** All
+  three were exported, none was used: the demo's state was entirely
+  doc-backed, so nothing showed what a purely local signal is for. The link
+  state is exactly that — a fact about one tab, nothing to share or persist —
+  and its two flags set together are the case `batch()` exists for. `batch()`
+  was deleted in 0.9.0 and restored in 0.9.1 because a real app needed it;
+  now the template says so itself.
+- **REFERENCE.md gained a Routing section and a Local state section.**
+  `route.ts` is a whole module and the deep manual mentioned `routes()` zero
+  times; `text()`, `batch()` and `computed()` were documented nowhere in the
+  skill pair. Three sharp edges moved in with them — set the boot hash before
+  `routes()` reads it, hold element refs rather than calling
+  `getElementById` in a handler, and don't rewrite a focused element from a
+  remote write. The first two were only in `CHANGELOG.md` and `UPGRADING.md`,
+  both of which 0.10.0 stops shipping to scaffolds.
+
+### Fixed (the test suite explains itself)
+
+- **Bare `bun test` failed out of the box.** It is what everyone types, and
+  it discovers every `*.test.ts` — including the five that need a Postgres on
+  :5599 and the one that drives a browser. On a machine without Docker that
+  was **nine failures** of `ERR_POSTGRES_CONNECTION_CLOSED` plus a cascading
+  `TypeError: undefined is not an object (evaluating 'sql.end')`, under a
+  README promising "`bun test` verifies your stack, in your repo, forever".
+  Those suites now ask first (`epsilon/testdb.ts`), skip cleanly, and print
+  one line saying what would have run and how to enable it. Bare `bun test`
+  with no database: **127 pass, 69 skip, 0 fail**. With one: 194 pass.
+- **A skip must never be a silent pass in CI.** `EPSILON_REQUIRE_DB=1` turns
+  an unreachable database into a loud failure instead of a skip, and
+  epsilon's own workflow sets it — a database that fails to come up now
+  fails the build rather than greening it.
+- **Deleting the demo's schema now stops with an explanation.** The
+  relational suites check for `board_apply` after migrating and, when it is
+  gone, raise one message naming `db/100-board.sql`, saying it is the demo's
+  file *and* their fixture, and giving the two ways forward. Previously an
+  app that took the README's advice got seven cryptic failures.
+
+### Fixed (documentation)
+
+- **The scaffold README told you to delete the demo's schema, which breaks
+  the vendored test suite.** `db/100-board.sql` and `db/101-tally.sql` are
+  the demo's tables *and* the fixture `rel.test.ts`, `pglite.test.ts`,
+  `view.test.ts` and `pg.test.ts` drive — some 360 references. Following the
+  instruction turned `bun run test:pglite` into 7 failures out of 10, against
+  a README promising "`bun test` verifies your stack, in your repo, forever".
+  The delete list is now the UI and the wiring; the SQL stays until you have
+  a doc type of your own to re-point those tests at. **The real fix is for
+  the vendored suites to own their fixture rather than the app's, and it is
+  not in this release** — `rel.test.ts` alone has 240 references.
+
+### Changed
+
+- **`bun create` now leaves an app, not a copy of this repo.** The
+  postinstall hook was `rm -rf .github CHANGELOG.md` — five words against a
+  root directory that had grown a changelog, an internal audit, an upgrade
+  trail and a 37 KB design document. A scaffold inherited all of it. The
+  hook is now `.scaffold/init.ts`, with the boundary written down as two
+  lists: what an app must not keep, and what replaces it.
+  - Gone from a scaffold: `UPGRADING.md`, `CHANGELOG.md`, `.github/`, and
+    root `LICENSE`.
+  - New in a scaffold: a `README.md` and `CLAUDE.md` written for the app
+    rather than for this repo — what the demo is and which files to delete,
+    which engine to pick, where things are — plus a CI workflow that runs
+    the suites needing no service.
+  - **The scaffold's `CLAUDE.md` is the app's file, not a trimmed copy of
+    this repo's.** The first attempt swapped the file but not whose it was:
+    it still carried the verbs, the law, db-first, `db/fn`'s rules and the
+    `epsilon/` layout — all of which `SKILL.md` and `REFERENCE.md` already
+    own, and which travel and stay current because the skill is inside the
+    upgrade whitelist. `CLAUDE.md` is not, so those copies would have frozen
+    at scaffold time — the identical trap that stranded root `DESIGN.md`.
+    It now points at the skill for anything about the runtime and otherwise
+    talks about the app, opening with a line the author is asked to replace.
+  - `.scaffold/init.test.ts` is the contract, run by this repo's CI. It also
+    pins the package.json invariants below, which no script can repair.
+- **`DESIGN.md` → `epsilon/DESIGN.md`, and the runtime's notice →
+  `epsilon/LICENSE`.** `epsilon:upgrade`'s whitelist is `epsilon/` and the
+  skill, so a doc outside it freezes at the release you scaffolded from and
+  silently describes a runtime that has moved on. The why now travels with
+  the code it explains. See UPGRADING.md for the two stale copies to delete.
+- **package.json stops leaking epsilon's identity into apps.** `version` was
+  `0.9.3` and the description was this repo's pitch; both landed verbatim in
+  every scaffold, so each new app claimed to be epsilon 0.9.3. Bun rewrites
+  package.json *after* postinstall runs, so a script cannot fix this —
+  the template's values ARE the app's values. `version` is therefore pinned
+  at `0.0.0` (the app's field, for the app to set) and **the release of
+  record is `epsilon.base`**, which is what `epsilon:upgrade` reads anyway.
+  One fact, one field.
+
+### Fixed
+
+- `db/fn/` shipped as an empty directory, which git does not track — so no
+  scaffold ever had one, and README's link to it was broken. It now carries
+  a `README.md` with the folder's three rules (no schema DDL, a signature
+  change needs a `DROP` in a numbered file first, order carries no meaning).
+- `CLAUDE.md`'s layout named `src/`, which has never existed in this repo.
+  The app is `index.ts` / `index.css` / `types.ts` / `app.test.ts` at the
+  root, as `SKILL.md` correctly said all along.
+- `epsilon:upgrade` now prints the link to the target release's
+  `UPGRADING.md` — the by-hand half of an upgrade, which an app no longer
+  carries a copy of.
+- README no longer promises "three files" above a list of four, and no
+  longer claims root `LICENSE` ships with every scaffold.
+- **Two docs still sold `bind()` and `when()`, deleted in 0.9.0.** README's
+  `ui.ts` row advertised both; it now names what `ui.ts` actually exports
+  (`list()`, `text()`, `mount()`). Worse, `REFERENCE.md`'s gotcha list said
+  "effects through a lens re-run on ANY root change — use `bind()` for
+  scalars", which is the *inverse* of 0.9.0: `Lens.get()` tracks its own
+  slice, so a lens read in an effect is the precise path. `SKILL.md` had it
+  right and the deep manual contradicted it.
+- README's runtime table listed 11 of the 12 runtime files — `passkey.ts`
+  (343 lines of WebAuthn) was missing, though the prose above sells it.
+- **`op.ts` finally has a test beside it.** It was the only source file
+  without one, against README's "the tests are the contract" — and it holds
+  the prototype-pollution guard. `op.test.ts` pins the escape round-trip and
+  the `~1`-before-`~0` order that makes `~01` literal, the three forbidden
+  tokens (including that `constructorName` stays legal), `add`-SETS-not-
+  shifts, and that every op's undo restores exactly what changed. It also
+  pins a deviation nothing had written down: `"/"` is the ROOT here, not
+  RFC 6901's empty-string key, so an empty-string key is unaddressable.
+- **`popDisposeScope`'s disposer stranded every disposer behind a thrower.**
+  It ran `disposers.forEach((d) => d())`, so one throwing disposer skipped
+  the rest — and a skipped disposer is a leaked subscription. It now isolates
+  errors and rethrows the first, the policy `drain()` already used two
+  hundred lines up. One policy, not two.
+- **`OpsHandler`'s `undefined` arm was unreachable.** `notify()` has one
+  caller — `apply(ops: Op[])` — and `set()` routes through it as a root
+  replace, so a handler never saw `undefined`. The type, the arm in
+  `Lens.onOps`, and the dead branch in `list()` are gone; a snapshot is an
+  op like everything else.
+- **The demo clobbered your caret mid-rename.** `index.ts` rewrote the board
+  title from the doc ROOT on every op, so anyone's card add re-ran it. Fixed
+  the 0.9.0 way — narrow to `/name` with `at()`, then read — plus an
+  `activeElement` guard, because a *remote* rename still lands while you type.
+- **"use a passkey" raced the autofill request it was cancelling.** Opening
+  the sign-in dialog starts a *conditional* `navigator.credentials.get()`
+  that stays pending for autofill. The button called `conditionalAbort.abort()`
+  and issued a modal `get()` on the next line — but `abort()` does not settle
+  synchronously, so the second request could land while the browser still
+  held the first, which it rejects outright. Intermittent by construction,
+  and it presented as "the passkey button doesn't work". The abort is now a
+  handshake before any modal ceremony, registration included (`create()`
+  collides with a pending `get()` the same way) — and a **bounded** one: it
+  waits up to 250 ms for the browser to release the request, then proceeds
+  regardless. That bound is load-bearing, not caution. The first attempt at
+  this awaited the in-flight run unconditionally, the autofill path awaited
+  the same promise it was itself producing, and it deadlocked: every click
+  hung on the handler's first line with no sheet and no error. A late release
+  costs one rejected request, which reports itself in the dialog; an
+  unbounded await costs the whole feature.
+- `pg.ts` cited `DEPLOY.md` for the deploy recommendation. No such file has
+  ever existed in this repo; the reference is now README's "Deploying".
+- `ui.ts`'s `mount()` docs still told readers about `bind()` and `when()`,
+  removed in 0.9.0.
+
 ## [0.9.3] — 2026-08-02
 
 ### Fixed

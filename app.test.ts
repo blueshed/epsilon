@@ -4,6 +4,7 @@
 import { describe, test, expect } from "bun:test";
 import { SQL } from "bun";
 import { startServer } from "./server";
+import { pgReachable, skipped } from "./epsilon/testdb";
 
 const DB_DIR = new URL("./db", import.meta.url).pathname;
 
@@ -11,6 +12,12 @@ const DB_DIR = new URL("./db", import.meta.url).pathname;
 const APP = ((await Bun.file(new URL("./package.json", import.meta.url)).json()).name as string)
   .toLowerCase().replace(/[^a-z0-9_]/g, "_").replace(/^(?![a-z_])/, "app_");
 const TEST_DB = `${APP}_test_app`;
+
+// Half of this file needs a Postgres, and bare `bun test` runs it regardless.
+// The in-memory half always runs — it needs nothing but a browser.
+const ADMIN_URL = "postgres://epsilon:epsilon@localhost:5599/epsilon";
+const DB_UP = await pgReachable(ADMIN_URL);
+if (!DB_UP) skipped("app.test.ts's postgres half (auth, tables, audit)");
 
 const waitFor = async <T>(fn: () => Promise<T>, pred: (v: T) => boolean, ms = 4000): Promise<T> => {
   const start = Date.now();
@@ -48,6 +55,14 @@ describe("the app, end to end", () => {
     );
     expect(who).toContain("here:");
 
+    // In-memory is a shape PREVIEW: server.ts wires pgUndo/pgHistory only
+    // behind an engine, so the doc-kit controls stay hidden rather than
+    // offering a button that can only answer "unknown method". The probe has
+    // had its round trip by now — the card above needed one. (The postgres
+    // test asserts the other side: there, #undo IS revealed.)
+    expect(await view.evaluate<boolean>("document.querySelector('#undo').hidden")).toBe(true);
+    expect(await view.evaluate<boolean>("document.querySelector('#history-toggle').hidden")).toBe(true);
+
     // The router, in a real browser. A cold load resolves to the shared
     // board before first paint — no placeholder flash, because the hash is
     // set before routes() reads it.
@@ -75,8 +90,7 @@ describe("the app, end to end", () => {
     server.stop(true);
   });
 
-  test("postgres: auth gate → register → card in the TABLE, write in the audit log", async () => {
-    const ADMIN_URL = "postgres://epsilon:epsilon@localhost:5599/epsilon";
+  test.skipIf(!DB_UP)("postgres: auth gate → register → card in the TABLE, write in the audit log", async () => {
     const PG_URL = process.env.EPSILON_TEST_PG_URL ?? `postgres://epsilon:epsilon@localhost:5599/${TEST_DB}`;
     if (!process.env.EPSILON_TEST_PG_URL) {
       const admin = new SQL(ADMIN_URL);
@@ -171,6 +185,23 @@ describe("the app, end to end", () => {
       (t) => t === "main",
     );
     expect(await view.evaluate<boolean>("document.querySelector('#board-back').hidden")).toBe(true);
+
+    // A board that isn't there — or isn't yours. Both answer "unknown doc"
+    // (no existence oracle), and a REFUSED open leaves the doc null at v 0,
+    // indistinguishable from one still opening — so nothing in the doc can
+    // recover this. Without onError's open branch you sit on a blank board.
+    await view.evaluate("location.hash = '#/board/99999'");
+    await waitFor(
+      () => view.evaluate<string>("location.hash"),
+      (h) => h === "#/board/1",
+    );
+    await waitFor(
+      () => view.evaluate<string>("document.querySelector('#board-msg').textContent"),
+      (t) => t.includes("isn't there"),
+    );
+    // And the bounce landed on a WORKING board, not a husk.
+    expect(await view.evaluate<string>("document.querySelector('#board-name').textContent")).toBe("main");
+
     await view.click("#boards li span");   // back onto "my project" for what follows
     await waitFor(
       () => view.evaluate<string>("document.querySelector('#board-name').textContent"),
@@ -199,6 +230,98 @@ describe("the app, end to end", () => {
       () => view.evaluate<string>("document.querySelector('#tally').textContent"),
       (t) => t.includes("1 done"),
     );
+
+    // --- the doc kit, on screen (003) --------------------------------------
+    // The stamps: card_json puts created_by/updated_by/updated_at on every
+    // echo, and the byline is the only thing that reads them. The checkbox
+    // above was an edit by us, so it resolves to "you" through the members
+    // map — no lookup, no fetch.
+    await waitFor(
+      () => view.evaluate<string>("document.querySelector('#log li .byline').textContent"),
+      (t) => t.startsWith("you, "),
+    );
+
+    // Undo: doc_ops holds each write's inverse, so the /done edit reverts
+    // through board_apply itself — there is no client-side stack to drift.
+    expect(await view.evaluate<boolean>("document.querySelector('#undo').hidden")).toBe(false);
+    await view.click("#undo");
+    await waitFor(
+      async () => (await db`SELECT done FROM cards WHERE board_id = ${myBoard.id}`)[0]?.done as boolean,
+      (d) => d === false,
+    );
+    await waitFor(
+      () => view.evaluate<string>("document.querySelector('#tally').textContent"),
+      (t) => t.includes("0 done"),
+    );
+
+    // History: the SAME table, read back through the doc's own permit —
+    // newest first, the writer named at read time, paths resolved.
+    await view.click("#history-toggle");
+    await waitFor(
+      () => view.evaluate<string>("document.querySelector('#history').textContent"),
+      (t) => t.includes("Pete") && t.includes("/cards/"),
+    );
+    await view.click("#history-toggle");
+    expect(await view.evaluate<boolean>("document.querySelector('#history').hidden")).toBe(true);
+
+    // --- the router, for real: a nested route under a wildcard layout ------
+    // The board is mounted at "/board/:id/*", so routing a card detail
+    // underneath it must NOT rebuild the shell — that is what params$ and the
+    // wildcard are for, and element identity is the honest way to pin it.
+    await view.evaluate("window.__shell = document.querySelector('#board-header')");
+    await view.click("#log li span");
+    await waitFor(
+      () => view.evaluate<string>("location.hash"),
+      (h) => /#\/board\/\d+\/card\/\d+$/.test(h),
+    );
+    await waitFor(
+      () => view.evaluate<boolean>("!document.querySelector('#card-detail')?.hidden"),
+      (v) => v === true,
+    );
+    expect(await view.evaluate<string>("document.querySelector('#detail-text').value"))
+      .toBe("first step");
+    expect(await view.evaluate<string>("document.querySelector('#detail-by').textContent"))
+      .toContain("added by you");
+    expect(await view.evaluate<boolean>("window.__shell === document.querySelector('#board-header')"))
+      .toBe(true);
+
+    await view.click("#detail-close");
+    await waitFor(
+      () => view.evaluate<string>("location.hash"),
+      (h) => /#\/board\/\d+$/.test(h),
+    );
+    expect(await view.evaluate<boolean>("document.querySelector('#card-detail').hidden")).toBe(true);
+    expect(await view.evaluate<boolean>("window.__shell === document.querySelector('#board-header')"))
+      .toBe(true);
+
+    // --- /settings: an ASYNC handler that returns a THUNK ------------------
+    // It awaits a real browser probe (can this device hold a passkey?) before
+    // there is anything to render. A scope cannot cross an await, so what the
+    // router brackets is the thunk — including the tally effect below.
+    await view.click("#settings-link");
+    await waitFor(
+      () => view.evaluate<boolean>("!!document.querySelector('#add-passkey')"),
+      (v) => v === true,
+    );
+    // The SAME live view doc, read by a second screen. No fetch, no refetch.
+    await waitFor(
+      () => view.evaluate<string>("document.querySelector('#settings-tally').textContent"),
+      (t) => t.includes("boards"),
+    );
+    await view.click("#settings-back");
+    await waitFor(
+      () => view.evaluate<string>("document.querySelector('#board-name').textContent"),
+      (t) => t === "main",
+    );
+    // Leaving the pattern DOES tear down — the settings screen is gone.
+    expect(await view.evaluate<boolean>("!!document.querySelector('#add-passkey')")).toBe(false);
+
+    await view.click("#boards li span");   // back onto "my project"
+    await waitFor(
+      () => view.evaluate<string>("document.querySelector('#board-name').textContent"),
+      (t) => t === "my project",
+    );
+
     // ✕ → a confirm dialog (not window.confirm() — Bun's WebView can't
     // drive a browser-chrome dialog, only a DOM one). Cancel changes nothing.
     await view.click("#log li button");

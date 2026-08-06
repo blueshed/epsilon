@@ -9,5 +9,5 @@
     "noEmit": true,
     "types": ["bun", "emscripten"]
   },
-  "include": ["*.ts", "epsilon/**/*.ts"]
+  "include": ["*.ts", "epsilon/**/*.ts", ".scaffold/**/*.ts"]
 }

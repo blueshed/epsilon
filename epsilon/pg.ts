@@ -1,13 +1,12 @@
 /**
- * Postgres — durability and fan-out for DOC-NATIVE docs (JSONB blobs), plus
+ * Postgres — durability and fan-out for docs as lenses over TABLES, plus
  * schema-native users.
  *
- * This tier needs no stored functions: the doc IS the stored value, so there
- * is no composition and no multi-table write — TS applies ops with the same
- * op.ts the browser runs, then persists the result (serialized per doc — a
- * promise chain, so writes can't interleave) and NOTIFYs other processes.
- * The RELATIONAL tier (docs as lenses over tables) is where stored functions
- * are optimal and expected — see DESIGN.md "Storage tiers".
+ * The tables are the truth. A write is one stored function in one
+ * transaction: it mints ids from sequences, touches every table the change
+ * implies, logs doc_ops (with the undo), bumps v and NOTIFYs. Composition is
+ * open-time (`doc_open`), never per write — which is why multi-table writes
+ * and composition live in SQL, where they are optimal.
  * Listeners fetch missed ops from doc_ops and inject them via
  * host.receive(); a gap falls back to reload + hydrate.
  *
@@ -15,7 +14,7 @@
  *
  *   const sql = new SQL(process.env.EPSILON_PG_URL!);
  *   await migrate(sql);           // db/*.sql, in order, hash-recorded
- *   const board = await pgDoc<Board>(host, sql, "board", empty);
+ *   const board = await pgDoc<Board>(host, sql, "board:1", null, { apply: "board_apply" });
  *   await pgAuth(host, sql);      // register/login/authenticate/logout
  *   await pgSync(host, sql);      // cross-process fan-out (LISTEN/NOTIFY)
  */
@@ -43,13 +42,16 @@ const CHANNEL = "epsilon_ops";
 export { migrate, migrationFiles } from "./migrate";
 
 /**
- * Host a doc backed by Postgres.
+ * Host a doc backed by Postgres. The TABLES are the truth.
  *
- * Doc-native (default): the doc is a JSONB blob — TS applies ops, one guarded
- * UPDATE persists, NOTIFY fans out.
+ * (There was a second, doc-native tier until 0.10.0: the doc as a JSONB blob,
+ * TS applying ops, one guarded UPDATE persisting. DESIGN.md called it v0 and
+ * relational "next"; relational arrived, no app ever hosted a blob, and the
+ * dead branch was the sole reason `DocOpts.persist` and the host's `muted`
+ * flag existed — the trickiest invariant in doc.ts, maintained for nobody.)
  *
- * Relational (`opts.apply` = a stored function name): the TABLES are the
- * truth. Client ops go to `<apply>(name, ops, user)` in ONE transaction — it
+ * `opts.apply` is a stored function name. Client ops go to
+ * `<apply>(name, ops, user)` in ONE transaction — it
  * mints ids from sequences, updates tables, logs doc_ops (with the undo),
  * bumps v, NOTIFYs — and returns `{v, ops}` with resolved paths/rows, which
  * re-enter through pgReceive. A dispatch that doc_drops other docs lists
@@ -57,16 +59,16 @@ export { migrate, migrationFiles } from "./migrate";
  * of nothing); siblings hear the same through doc_drop's doorbell. A write never recomposes the doc: composition
  * is open-time (`doc_open`), and the host composes AS ITSELF — doc_open with
  * no user is the full copy (001's rule). Multi-table writes and composition
- * live in SQL, where they're optimal; hydrate, catch-up, fan-out, wire, and
- * UI are IDENTICAL to the doc-native tier.
+ * live in SQL, where they're optimal.
  */
 export async function pgDoc<T>(
   host: Host,
   sql: Sql,
   name: string,
   empty: T,
-  opts?: {
-    apply?: string;
+  opts: {
+    /** The stored function that owns this doc's writes. */
+    apply: string;
     /** Create the docs row on first host (dynamic docs — mine:<uid>). */
     seed?: { open_fn: string };
     /** Who may receive the hosted snapshot over the wire. DEFAULT (relational
@@ -79,85 +81,47 @@ export async function pgDoc<T>(
     guard?: (userId?: number | string) => boolean | Promise<boolean>;
   },
 ): Promise<Signal<T>> {
-  if (opts?.apply) {
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(opts.apply)) {
-      throw new Error(`[epsilon/pg] apply must be a plain function name: ${opts.apply}`);
-    }
-    const applyFn = opts.apply;
-    const guard = opts.guard;
-    let sig!: Signal<T>;
-    sig = host.doc<T>(name, empty, {
-      async write(ops, userId) {
-        // ops bind RAW — Bun encodes arrays/objects as jsonb; stringify+cast
-        // double-encodes into a scalar (see the doc-native lesson above).
-        const rows = await sql.unsafe(
-          `SELECT ${applyFn}($1, $2, $3) AS r`,
-          [name, ops as unknown, userId ?? null],
-        );
-        const r = rows[0]!.r as { v: number | string; ops: Op[]; gone?: string[] };
-        await pgReceive(host, sql, name, r);
-        // Docs this write dropped (`gone` — a board deleted from a mine
-        // list) un-host HERE, watchers included: doc_drop's doorbell only
-        // reaches processes with a listener, and the writer may have none
-        // (PGlite; poll mode).
-        for (const g of r.gone ?? []) host.drop(g);
-        // The dispatch already resolved `-` against a sequence; hand those
-        // ops back so an awaited write() can report the id it minted.
-        return r.ops;
-      },
-      async open(userId) {
-        if (guard) return (await guard(userId)) ? sig.peek() : null;
-        const [r] = await sql`SELECT doc_open(${name}, ${userId == null ? null : Number(userId)}) IS NOT NULL AS ok`;
-        return r?.ok ? sig.peek() : null;
-      },
-    });
-    if (opts.seed) {
-      await sql`INSERT INTO docs (name, v, data, open_fn) VALUES (${name}, 0, NULL, ${opts.seed.open_fn})
-                ON CONFLICT (name) DO NOTHING`;
-    }
-    // Composition happens HERE, at open — never per write. The host composes
-    // AS ITSELF: doc_open with no user is the full copy (001's rule), and the
-    // open gate above decides who may receive it.
-    const [row] = await sql`SELECT v, doc_open(name) AS data FROM docs WHERE name = ${name}`;
-    if (!row) throw new Error(`[epsilon/pg] relational doc ${name} not seeded — your SQL file should INSERT its docs row`);
-    host.hydrate(name, Number(row.v), row.data);
-    return sig;
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(opts.apply)) {
+    throw new Error(`[epsilon/pg] apply must be a plain function name: ${opts.apply}`);
   }
-
-  // Persistence is serialized per doc (delta's A2 lesson): a chain, not a race.
-  let chain: Promise<void> = Promise.resolve();
-
-  const sig = host.doc<T>(name, empty, {
-    persist(v, ops, data) {
-      chain = chain.then(async () => {
-        // Optimistic guard: only advance from exactly v-1. A conflict means
-        // another process wrote — reload and hydrate to their truth.
-        // Bind objects raw — Bun encodes them as jsonb objects; a pre-
-        // stringified value + ::jsonb double-encodes into a string scalar.
-        const updated = await sql`
-          UPDATE docs SET v = ${v}, data = ${data as any}
-          WHERE name = ${name} AND v = ${v - 1}
-          RETURNING v`;
-        if (updated.length === 0) {
-          const [row] = await sql`SELECT v, data FROM docs WHERE name = ${name}`;
-          if (row) host.hydrate(name, Number(row.v), row.data);
-          return;
-        }
-        await sql`INSERT INTO doc_ops (name, v, ops) VALUES (${name}, ${v}, ${ops as any})`;
-        await sql`SELECT pg_notify(${CHANNEL}, ${JSON.stringify({ name, v })})`;
-      }).catch((err) => {
-        console.error(`[epsilon/pg] persist ${name} v${v} failed:`, err);
-      });
+  const applyFn = opts.apply;
+  const guard = opts.guard;
+  let sig!: Signal<T>;
+  sig = host.doc<T>(name, empty, {
+    async write(ops, userId) {
+      // ops bind RAW — Bun encodes arrays/objects as jsonb; a pre-stringified
+      // value + ::jsonb double-encodes into a string scalar.
+      const rows = await sql.unsafe(
+          `SELECT ${applyFn}($1, $2, $3) AS r`,
+        [name, ops as unknown, userId ?? null],
+      );
+      const r = rows[0]!.r as { v: number | string; ops: Op[]; gone?: string[] };
+      await pgReceive(host, sql, name, r);
+      // Docs this write dropped (`gone` — a board deleted from a mine
+      // list) un-host HERE, watchers included: doc_drop's doorbell only
+      // reaches processes with a listener, and the writer may have none
+      // (PGlite; poll mode).
+      for (const g of r.gone ?? []) host.drop(g);
+      // The dispatch already resolved `-` against a sequence; hand those
+      // ops back so an awaited write() can report the id it minted.
+      return r.ops;
+    },
+    async open(userId) {
+      if (guard) return (await guard(userId)) ? sig.peek() : null;
+      const [r] = await sql`SELECT doc_open(${name}, ${userId == null ? null : Number(userId)}) IS NOT NULL AS ok`;
+      return r?.ok ? sig.peek() : null;
     },
   });
-
-  const [row] = await sql`SELECT v, doc_open(name) AS data FROM docs WHERE name = ${name}`;
-  if (row) {
-    host.hydrate(name, Number(row.v), row.data);
-  } else {
-    await sql`INSERT INTO docs (name, v, data) VALUES (${name}, 0, ${empty as any})
+  if (opts.seed) {
+    await sql`INSERT INTO docs (name, v, data, open_fn) VALUES (${name}, 0, NULL, ${opts.seed.open_fn})
               ON CONFLICT (name) DO NOTHING`;
   }
+  // Composition happens HERE, at open — never per write. The host composes
+  // AS ITSELF: doc_open with no user is the full copy (001's rule), and the
+  // open gate above decides who may receive it.
+  const [row] = await sql`SELECT v, doc_open(name) AS data FROM docs WHERE name = ${name}`;
+  if (!row) throw new Error(`[epsilon/pg] doc ${name} not seeded — your SQL file should INSERT its docs row`);
+  host.hydrate(name, Number(row.v), row.data);
   return sig;
 }
 
@@ -656,7 +620,7 @@ export async function pgAuth(
   // and every reconnect re-auths through it (onConnect).
   //
   // Keyed on IP **and email**, not IP alone. Behind a PaaS edge — which
-  // DEPLOY.md recommends — `remoteAddress` is the load balancer, so an
+  // README's "Deploying" recommends — `remoteAddress` is the load balancer, so an
   // IP-only key hands every user of the deployment ONE shared budget: ten
   // logins a minute for everybody, and the first person to fat-finger a
   // password locks out the rest. Adding the email splits the namespace by

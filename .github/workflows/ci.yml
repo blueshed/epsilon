@@ -26,6 +26,9 @@ jobs:
           --health-interval 1s
           --health-timeout 3s
           --health-retries 30
+    env:
+      # A database that failed to come up must FAIL this build, not skip it.
+      EPSILON_REQUIRE_DB: "1"
     steps:
       - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2
@@ -33,6 +36,9 @@ jobs:
           bun-version: latest # Bun.WebView needs ≥ 1.3.14
       - run: bun install
       - run: bun run check
+      # Template-only, so it cannot live in `bun run ci`: a package.json
+      # script naming .scaffold/ would break in every app that strips it.
+      - run: bun test ./.scaffold/init.test.ts   # ./ — bun test skips dot-dirs
       - run: bun run test
       - run: bun run test:migrate
       - run: bun run test:pglite

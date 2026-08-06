@@ -6,6 +6,7 @@ import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { SQL } from "bun";
 import { createHost, connect, type Host, type Remote } from "./doc";
 import { migrate, pgAuth } from "./pg";
+import { pgReachable, skipped } from "./testdb";
 import { pgPasskey, cborDecode, derToRaw } from "./passkey";
 
 // Test db namespaced by app (package.json name) — see pg.test.ts's note.
@@ -14,6 +15,10 @@ const APP = ((await Bun.file(new URL("../package.json", import.meta.url)).json()
 const DB = `${APP}_test_passkey`;
 const ADMIN_URL = "postgres://epsilon:epsilon@localhost:5599/epsilon";
 const PG_URL = process.env.EPSILON_TEST_PG_URL ?? `postgres://epsilon:epsilon@localhost:5599/${DB}`;
+
+// Bare `bun test` runs this file too. Ask before assuming.
+const DB_UP = await pgReachable(ADMIN_URL);
+if (!DB_UP) skipped('passkey.test.ts (WebAuthn)');
 const DB_DIR = new URL("../db", import.meta.url).pathname;
 
 const ORIGIN = "http://localhost";
@@ -134,6 +139,7 @@ function client() {
 }
 
 beforeAll(async () => {
+  if (!DB_UP) return;   // nothing to set up; the describes are skipped
   if (!process.env.EPSILON_TEST_PG_URL) {
     const admin = new SQL(ADMIN_URL);
     const [exists] = await admin`SELECT 1 FROM pg_database WHERE datname = ${DB}`;
@@ -156,6 +162,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  if (!DB_UP) return;   // nothing was opened
   for (const r of remotes) r.close();
   for (const s of servers) s.stop(true);
   await sql.end();
@@ -163,7 +170,7 @@ afterAll(async () => {
 
 const key = await makeKey();
 
-describe("passkeys — passwordless over the same wire", () => {
+describe.skipIf(!DB_UP)("passkeys — passwordless over the same wire", () => {
   let uid: number;
 
   test("register while signed in; the credential is schema-native", async () => {

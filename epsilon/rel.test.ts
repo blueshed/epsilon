@@ -6,6 +6,7 @@ import { SQL } from "bun";
 import { createHost, connect, type Host, type Remote } from "./doc";
 import type { Signal } from "./signal";
 import { migrate, pgDoc, pgSync, pgAuth, pgUndo, pgAdmin } from "./pg";
+import { pgReachable, skipped, hasBoardFixture, NO_FIXTURE } from "./testdb";
 import { proveLaw } from "./law";
 import type { Card, Board } from "../types";
 
@@ -15,6 +16,10 @@ const APP = ((await Bun.file(new URL("../package.json", import.meta.url)).json()
 const DB = `${APP}_test_rel`;
 const ADMIN_URL = "postgres://epsilon:epsilon@localhost:5599/epsilon";
 const PG_URL = process.env.EPSILON_TEST_PG_URL ?? `postgres://epsilon:epsilon@localhost:5599/${DB}`;
+
+// Bare `bun test` runs this file too. Ask before assuming.
+const DB_UP = await pgReachable(ADMIN_URL);
+if (!DB_UP) skipped('rel.test.ts (the relational tier)');
 const DB_DIR = new URL("../db", import.meta.url).pathname;
 
 let sql: SQL;
@@ -55,6 +60,7 @@ const until = async (cond: () => boolean | Promise<boolean>, ms = 2000) => {
 };
 
 beforeAll(async () => {
+  if (!DB_UP) return;   // nothing to set up; the describes are skipped
   if (!process.env.EPSILON_TEST_PG_URL) {
     const admin = new SQL(ADMIN_URL);
     const [exists] = await admin`SELECT 1 FROM pg_database WHERE datname = ${DB}`;
@@ -66,16 +72,18 @@ beforeAll(async () => {
   // (see pg.test.ts). Migrating seeds board 1 + its docs row.
   await sql.unsafe("DROP SCHEMA public CASCADE; CREATE SCHEMA public");
   await migrate(sql, { dir: DB_DIR });
+  if (!(await hasBoardFixture(sql))) throw new Error(NO_FIXTURE);
 });
 
 afterAll(async () => {
+  if (!DB_UP) return;   // nothing was opened
   for (const stop of stops) stop();
   for (const r of remotes) r.close();
   for (const s of servers) s.stop(true);
   for (const s of sqls) await s.end?.();
 });
 
-describe("relational tier — the tables are the truth", () => {
+describe.skipIf(!DB_UP)("relational tier — the tables are the truth", () => {
   test("full stack: register → add /cards/- → sequence id, table row, audit row", async () => {
     const host = createHost({ requireAuth: true });
     await pgAuth(host, sql);
@@ -173,7 +181,7 @@ describe("relational tier — the tables are the truth", () => {
   });
 });
 
-describe("ownership — users mean something", () => {
+describe.skipIf(!DB_UP)("ownership — users mean something", () => {
   test("a private board: the owner writes, a stranger is refused by the FUNCTION", async () => {
     // Two real users via the SQL auth contract.
     const [o] = await sql`SELECT register('Owner', 'owner@own.test', 'pw') AS u`;
@@ -265,7 +273,7 @@ END;
 $$ LANGUAGE plpgsql;
 `;
 
-describe("the doc kit — a new doc type is dispatch + composition only", () => {
+describe.skipIf(!DB_UP)("the doc kit — a new doc type is dispatch + composition only", () => {
   test("todo: full wire round trip on kit-built SQL", async () => {
     await sql.unsafe(TODO_SQL);
     const host = createHost({ requireAuth: true });
@@ -324,7 +332,7 @@ describe("the doc kit — a new doc type is dispatch + composition only", () => 
   });
 });
 
-describe("sharing — members make multi-user real (009)", () => {
+describe.skipIf(!DB_UP)("sharing — members make multi-user real (009)", () => {
   interface MineDoc { boards: Record<string, { id: number; name: string; shared?: boolean }> }
 
   test("add by email → member's list updates live; member writes; leaving and deleting revoke", async () => {
@@ -462,7 +470,7 @@ describe("sharing — members make multi-user real (009)", () => {
   });
 });
 
-describe("undo — the log knows what was there", () => {
+describe.skipIf(!DB_UP)("undo — the log knows what was there", () => {
   let uid: number;
   let fid: number;
   let bid: number;
@@ -474,6 +482,7 @@ describe("undo — the log knows what was there", () => {
   const echoOf = (rows: any) => rows[0]!.r as { v: number | string; ops: { op: string; path: string; value?: any }[] };
 
   beforeAll(async () => {
+  if (!DB_UP) return;   // nothing to set up; the describes are skipped
     const [u] = await sql`SELECT register('Undoer', 'undoer@undo.test', 'pw') AS u`;
     const [f] = await sql`SELECT register('Fellow', 'fellow@undo.test', 'pw') AS u`;
     uid = Number((u.u as { id: number }).id);
@@ -604,7 +613,7 @@ describe("undo — the log knows what was there", () => {
   });
 });
 
-describe("undo over the wire — pgUndo re-enters the hosted doc, no pgSync needed", () => {
+describe.skipIf(!DB_UP)("undo over the wire — pgUndo re-enters the hosted doc, no pgSync needed", () => {
   test("call('undo') reverts the caller's last write; undo again = redo", async () => {
     const host = createHost({ requireAuth: true });
     await pgAuth(host, sql);
@@ -640,7 +649,7 @@ describe("undo over the wire — pgUndo re-enters the hosted doc, no pgSync need
   });
 });
 
-describe("presence — exactly as private as the board it watches", () => {
+describe.skipIf(!DB_UP)("presence — exactly as private as the board it watches", () => {
   test("refused while the doc is LIVE, not just at first host; never written in", async () => {
     // The trap this pins: a factory refusal guards only the FIRST open —
     // the doc outlives its opener, and an in-memory doc has no doc_open
@@ -705,7 +714,7 @@ describe("presence — exactly as private as the board it watches", () => {
   });
 });
 
-describe("the law, executable — proveLaw drives it (epsilon/law.ts)", () => {
+describe.skipIf(!DB_UP)("the law, executable — proveLaw drives it (epsilon/law.ts)", () => {
   test("board: every op shape, the undo and redo of each, and the rename mirror", async () => {
     // The assertion the whole design hangs on: what the ops built must equal
     // what the tables compose, after EVERY echo. The harness is the same
@@ -770,7 +779,7 @@ describe("the law, executable — proveLaw drives it (epsilon/law.ts)", () => {
   });
 });
 
-describe("lock order — a rename's mirror and a board delete cannot deadlock", () => {
+describe.skipIf(!DB_UP)("lock order — a rename's mirror and a board delete cannot deadlock", () => {
   test("concurrent board_apply(rename) vs mine_apply(remove) of the same board", async () => {
     // 004 locked board→mine on rename while mine_apply's delete locks
     // mine→board — AB-BA. 005 makes the rename take mine FIRST. The delete
@@ -805,7 +814,7 @@ describe("lock order — a rename's mirror and a board delete cannot deadlock", 
   });
 });
 
-describe("the vision: per-user docs, creation as an op, multi-doc writes", () => {
+describe.skipIf(!DB_UP)("the vision: per-user docs, creation as an op, multi-doc writes", () => {
   test("mine:<uid> is yours alone — the WIRE refuses strangers like a missing doc", async () => {
     const host = createHost({ requireAuth: true });
     await pgAuth(host, sql);
@@ -891,7 +900,7 @@ describe("the vision: per-user docs, creation as an op, multi-doc writes", () =>
   });
 });
 
-describe("gone is a snapshot of nothing — deletion and revocation bite live sockets", () => {
+describe.skipIf(!DB_UP)("gone is a snapshot of nothing — deletion and revocation bite live sockets", () => {
   interface MineDoc { boards: Record<string, { id: number; name: string; shared?: boolean }> }
 
   test("the apply result names what it dropped — and leaving drops nothing", async () => {
@@ -1065,7 +1074,7 @@ describe("gone is a snapshot of nothing — deletion and revocation bite live so
   });
 });
 
-describe("history — the audit read back, and the stamp on the row", () => {
+describe.skipIf(!DB_UP)("history — the audit read back, and the stamp on the row", () => {
   let owner: number;
   let mate: number;
   let stranger: number;
@@ -1074,6 +1083,7 @@ describe("history — the audit read back, and the stamp on the row", () => {
     sql.unsafe(`SELECT board_apply($1, $2, $3) AS r`, [doc, ops, user]);
 
   beforeAll(async () => {
+  if (!DB_UP) return;   // nothing to set up; the describes are skipped
     const [o] = await sql`SELECT register('Hist', 'hist@log.test', 'pw') AS u`;
     const [m] = await sql`SELECT register('Mate', 'mate@log.test', 'pw') AS u`;
     const [s] = await sql`SELECT register('Snoop', 'snoop@log.test', 'pw') AS u`;
@@ -1166,7 +1176,7 @@ describe("history — the audit read back, and the stamp on the row", () => {
   });
 });
 
-describe("the operator's door — no list, no door", () => {
+describe.skipIf(!DB_UP)("the operator's door — no list, no door", () => {
   test("unlisted callers are refused in words; the listed one gets rows", async () => {
     const host = createHost({ requireAuth: true });
     await pgAuth(host, sql);
@@ -1239,7 +1249,7 @@ describe("the operator's door — no list, no door", () => {
 // These run LAST and on their own board: the describes above are a SEQUENCE
 // ("board currently has 0 cards — removed above"), so a test that adds a row
 // mid-file breaks a later count.
-describe("write() — the answered write, through the relational tier (0.8.1)", () => {
+describe.skipIf(!DB_UP)("write() — the answered write, through the relational tier (0.8.1)", () => {
   test("write() hands back the SEQUENCE id the dispatch minted (0.8.1)", async () => {
     const host = createHost();
     await pgDoc<Board>(host, sql, "board:1", null as unknown as Board, { apply: "board_apply" });
@@ -1283,7 +1293,7 @@ describe("write() — the answered write, through the relational tier (0.8.1)", 
   });
 });
 
-describe("a doc that dies while the listener is down (0.8.1)", () => {
+describe.skipIf(!DB_UP)("a doc that dies while the listener is down (0.8.1)", () => {
   test("LISTEN mode notices on reconnect — doc_drop leaves no op to catch up on", async () => {
     // The bug: doc_drop DELETEs the op log, so catchUp() over a dropped doc
     // finds nothing and reports SUCCESS. The poll loop caught this with its

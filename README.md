@@ -9,7 +9,10 @@ cd my-app && bun dev     # two tabs, type in one, watch the other
 
 **There is no library to install.** The runtime is the [`epsilon/`](epsilon/)
 folder in your app — ~3.8k lines of TypeScript you own, with its own tests.
-`bun test` verifies your stack, in your repo, forever. Edit it; it's yours.
+`bun test` verifies your stack, in your repo, forever — bare, with no
+arguments: the suites that need a Postgres or a browser **skip themselves
+and say so** rather than failing on a machine that hasn't got one. Edit the
+runtime; it's yours.
 
 ## The knowns
 
@@ -30,13 +33,13 @@ later is a config change (`pg_dump` carries your data):
 
 | You want | Set | You get |
 |---|---|---|
-| To see the shape (first run, demos) | nothing | In-memory **preview**: instant, open access, uuid ids. No auth, no permits; state dies with the process. |
-| A real app, one service | `EPSILON_PG_DIR=./data` | **Embedded Postgres** (PGlite, in-process): the full schema — auth, ownership, sharing, undo — durable on a volume, no database service to run. One app process only. |
+| A real app, one service — **`bun dev`'s default** | `EPSILON_PG_DIR=./data` | **Embedded Postgres** (PGlite, in-process): the full schema — auth, ownership, sharing, undo, the audit — durable on a volume, no database service to run. One app process only. |
 | Several app processes, or Postgres you already run | `EPSILON_PG_URL=postgres://…` | The same schema on a **Postgres server**, plus LISTEN/NOTIFY fan-out between processes. |
+| Just the shape, nothing kept (`bun run dev:memory`) | nothing | In-memory **preview**: instant, open access, uuid ids. No auth, no permits, no undo or history; state dies with the process. |
 
-Start embedded unless you already run Postgres. In-memory is a preview, not
-a tier — switch on an engine early so auth and permissions are real while
-you build.
+`bun dev` starts embedded, on purpose (0.10.0): in-memory is a preview, not
+a tier, and a first run that hides auth, sharing and the audit log
+undersells the stack. Reach for `dev:memory` when you want a throwaway.
 
 ## Deploying
 
@@ -54,12 +57,18 @@ The file is inert (delete it if you like) — the pattern is the same on any
 host: start `bun server.ts`, healthcheck `/`, a volume behind
 `EPSILON_PG_DIR`.
 
-## The app (three files, yours)
+## The app (yours, and a demo to delete)
 
-- [`server.ts`](server.ts) — the authority. In-memory out of the box (a shape *preview*: uuid ids, no permits); Postgres — the real implementation, with auth + ownership — via one env var.
+- [`server.ts`](server.ts) — the authority. `bun dev` starts it on embedded Postgres with auth and ownership; `bun run dev:memory` is the shape preview (uuid ids, no permits).
 - [`index.ts`](index.ts) — the pixels. A remote doc is a signal whose writes go over the wire; the echo renders them.
 - [`index.html`](index.html) / [`index.css`](index.css) — Bun serves and bundles them.
 - [`db/`](db/) — your schema: numbered migrations, applied at boot, forward-only — and [`db/fn/`](db/fn/), your stored functions, replayed every boot and **edited in place** (`CREATE OR REPLACE` is idempotent; hash-locking it only forces a copy per edit). `003-doc-kit.sql` is the reusable skeleton of a relational doc type (locking, the audit, undo, history); `100-board.sql` is the worked example — tables, composition, transactional writes, ownership. Number your own migrations from 100 up: 001–099 are epsilon core, frozen once released, so an upgrade never collides with your files.
+
+A scaffold arrives as a **working multi-user kanban board**, so nothing here
+is theoretical: every known above is on screen — sharing, presence, the
+`tally:` view, and the doc kit's undo, audit trail and per-row "who touched
+this last". It is yours to delete the moment the app has its own doc type;
+the scaffold's README says exactly which files are the demo.
 
 ```sh
 bun run db:up            # compose Postgres (or use your own)
@@ -73,16 +82,17 @@ EPSILON_PG_URL=postgres://epsilon:epsilon@localhost:5599/epsilon bun dev
 | `op.ts` | Three verbs, JSON-Pointer paths, pollution-guarded |
 | `signal.ts` | Op-carrying signals; composing `at()` lenses |
 | `doc.ts` | The wire — one Signal class both sides; `apply()` hides the WebSocket |
-| `ui.ts` | `list()` routes membership ops; `bind()` rides a lens's op stream for scalars; `when()` and `mount()` |
+| `ui.ts` | `list()` routes membership ops; `text()` binds a signal to a text node; `mount()` owns a render scope |
 | `route.ts` | Screens — hash router (`routes`/`route`/`navigate`), params change without teardown |
 | `pg.ts` | Durability, LISTEN/NOTIFY fan-out, declared read views (`pgView`), wire adapters: auth, undo, history, the operator's door |
 | `pglite.ts` | The same `Sql` seam over in-process Postgres — the embedded engine |
+| `passkey.ts` | WebAuthn end to end, zero dependencies — CBOR, COSE→JWK, the register/sign-in ceremony |
 | `law.ts` | The law as a harness — `proveLaw` drives your doc type over the wire and fails with the defect named |
 | `migrate.ts` | Numbered migrations: ordered, hash-recorded, forward-only, transactional |
 | `cli.ts` | The wire from a terminal — auth-aware one-shot commands + `watch`, JSON out (humans, scripts, AIs) |
 | `upgrade.ts` | `bun run epsilon:upgrade` — take a newer runtime over your local patches (three-way merge) |
 
-`*.test.ts` beside each — the tests are the contract. [DESIGN.md](DESIGN.md) is the why.
+`*.test.ts` beside each — the tests are the contract. [`epsilon/DESIGN.md`](epsilon/DESIGN.md) is the why, and it lives inside the folder so an upgrade keeps it current.
 
 **Owning the source doesn't mean forking forever.** package.json records
 the release you scaffolded from (`"epsilon": { "base": ... }`);
@@ -100,4 +110,6 @@ Built in conversation with [Claude Code](https://claude.com/claude-code) — the
 
 ## License
 
-MIT © 2026 [blueshed.co.uk](https://blueshed.co.uk) — [LICENSE](LICENSE) ships with every scaffold, as MIT asks.
+MIT © 2026 [blueshed.co.uk](https://blueshed.co.uk) — [LICENSE](LICENSE).
+A scaffold picks its own license; the notice travels with the vendored
+source it covers, in [`epsilon/LICENSE`](epsilon/LICENSE), as MIT asks.

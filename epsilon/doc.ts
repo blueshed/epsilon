@@ -56,10 +56,6 @@ type ServerMsg =
 // ---------------------------------------------------------------------------
 
 export interface DocOpts {
-  /** Durability hook — called after each local write with the new version,
-   *  the ops, and the post-apply state. NOT called for hydrate/receive
-   *  (those ops came FROM storage). */
-  persist?: (v: number, ops: Op[], data: unknown) => void;
   /**
    * Authority-replacement hook: when set, client ops are handed here INSTEAD
    * of being applied to the signal — for docs whose truth lives elsewhere
@@ -97,9 +93,9 @@ export interface Host {
   /** Register (or fetch) a hosted doc. The returned Signal is the authority —
    *  server code applies ops to it directly and they broadcast. */
   doc<T>(name: string, empty: T, opts?: DocOpts): Signal<T>;
-  /** Load state from storage: broadcasts a snapshot at version v, skips persist. */
+  /** Load state from storage: broadcasts a snapshot at version v. */
   hydrate(name: string, v: number, data: unknown): void;
-  /** Inject ops another process persisted: broadcast + apply, skip persist.
+  /** Inject ops another process committed: broadcast + apply.
    *  Returns "gap" when v isn't contiguous — caller should reload + hydrate. */
   receive(name: string, v: number, ops: Op[]): "ok" | "stale" | "gap";
   /** Current version of a hosted doc. */
@@ -160,14 +156,11 @@ export function createHost(opts?: {
   onUnsubscribe?: (doc: string, ws: any) => void;
 }): Host {
   const path = opts?.path ?? "/ws";
-  // muted: this entry's ops came FROM storage (hydrate/receive), so its
-  // persist must not re-run. PER ENTRY — a synchronous cascade that writes a
-  // DIFFERENT doc during the apply still persists that doc normally.
   // subs: the sockets currently subscribed (lifetime tax — and the set
   // drop/expel evict from). dynamic: hosted by a prefix factory, so it can
   // be re-hosted — and is EVICTED when the last subscriber leaves;
   // statically registered docs live for the process.
-  type Entry = { sig: Signal<any>; v: number; muted: boolean; subs: Set<any>; dynamic: boolean; persist?: DocOpts["persist"]; write?: DocOpts["write"]; open?: DocOpts["open"] };
+  type Entry = { sig: Signal<any>; v: number; subs: Set<any>; dynamic: boolean; write?: DocOpts["write"]; open?: DocOpts["open"] };
   const docs = new Map<string, Entry>();
   const methods = new Map<string, (params: any, ws: any) => unknown | Promise<unknown>>();
   const prefixes = new Map<string, (name: string, userId?: number | string) => unknown | Promise<unknown>>();
@@ -236,16 +229,14 @@ export function createHost(opts?: {
       const existing = docs.get(name);
       if (existing) return existing.sig as Signal<T>;
       const sig = signal<T>(empty);
-      const entry: Entry = { sig, v: 0, muted: false, subs: new Set(), dynamic: false, persist: docOpts?.persist, write: docOpts?.write, open: docOpts?.open };
+      const entry: Entry = { sig, v: 0, subs: new Set(), dynamic: false, write: docOpts?.write, open: docOpts?.open };
       docs.set(name, entry);
       // Broadcast is just the doc's own ops channel piped to subscribers —
       // whether the write came from a client, server code, or storage
-      // (hydrate/receive pre-set the version and mute THIS doc's persist).
+      // (hydrate/receive pre-set the version so this bump lands on it).
       sig.onOps((ops) => {
-        if (!ops) return;
         entry.v++;
         server?.publish(name, JSON.stringify({ doc: name, v: entry.v, ops } satisfies ServerMsg));
-        if (!entry.muted) entry.persist?.(entry.v, ops, sig.peek());
       });
       return sig;
     },
@@ -253,9 +244,7 @@ export function createHost(opts?: {
     hydrate(name, v, data) {
       const entry = entryOf(name);
       entry.v = v - 1;              // the apply below bumps it back to v
-      entry.muted = true;
-      try { entry.sig.apply([{ op: "replace", path: "", value: data }]); }
-      finally { entry.muted = false; }
+      entry.sig.apply([{ op: "replace", path: "", value: data }]);
     },
 
     receive(name, v, ops) {
@@ -263,9 +252,7 @@ export function createHost(opts?: {
       if (v <= entry.v) return "stale";
       if (v > entry.v + 1) return "gap";
       entry.v = v - 1;
-      entry.muted = true;
-      try { entry.sig.apply(ops); }
-      finally { entry.muted = false; }
+      entry.sig.apply(ops);
       return "ok";
     },
 

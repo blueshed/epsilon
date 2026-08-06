@@ -1,0 +1,28 @@
+# The vendored runtime's contract, on every change: tsc strict, then the
+# suites that need no service — unit/wire/DOM, and the whole relational tier
+# (schema, migrations, durability) on embedded Postgres.
+#
+# The suites needing a Postgres on :5599 skip themselves here and say so —
+# there is no service container below. When the app is real, add one and set
+# EPSILON_REQUIRE_DB=1 so a database that fails to start FAILS the build
+# instead of quietly skipping. epsilon's own workflow shows the whole shape:
+# https://github.com/blueshed/epsilon/blob/main/.github/workflows/ci.yml
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install
+      - run: bun run check
+      - run: bun run test
+      - run: bun run test:pglite
