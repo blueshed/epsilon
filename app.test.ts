@@ -179,6 +179,23 @@ describe("the app, end to end", () => {
       (t) => t === "main",
     );
     expect(await view.evaluate<boolean>("document.querySelector('#board-back').hidden")).toBe(true);
+
+    // A board that isn't there — or isn't yours. Both answer "unknown doc"
+    // (no existence oracle), and a REFUSED open leaves the doc null at v 0,
+    // indistinguishable from one still opening — so nothing in the doc can
+    // recover this. Without onError's open branch you sit on a blank board.
+    await view.evaluate("location.hash = '#/board/99999'");
+    await waitFor(
+      () => view.evaluate<string>("location.hash"),
+      (h) => h === "#/board/1",
+    );
+    await waitFor(
+      () => view.evaluate<string>("document.querySelector('#board-msg').textContent"),
+      (t) => t.includes("isn't there"),
+    );
+    // And the bounce landed on a WORKING board, not a husk.
+    expect(await view.evaluate<string>("document.querySelector('#board-name').textContent")).toBe("main");
+
     await view.click("#boards li span");   // back onto "my project" for what follows
     await waitFor(
       () => view.evaluate<string>("document.querySelector('#board-name').textContent"),

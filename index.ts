@@ -71,11 +71,16 @@ function hasDocKit(doc: string): Promise<boolean> {
   return docKit;
 }
 
-/** One line of board status — an undo refusal, mostly. Cleared by the next
- *  thing that succeeds; never a dialog, because a refusal is information. */
+/** One line of board status — a refusal, mostly. Cleared by the next thing
+ *  that succeeds; never a dialog, because a refusal is information. */
 function say(msg: string): void {
   boardMsg.textContent = msg;
 }
+
+/** A message that has to survive the navigation that follows it: openBoard
+ *  clears the line, so a refusal handled by bouncing to the shared board
+ *  would clear itself. Set it, navigate, and openBoard shows it on arrival. */
+let pendingMsg = "";
 
 interface HistoryEntry {
   v: number;
@@ -174,14 +179,37 @@ const remote = connect(
     onDisconnect(willRetry) {
       batch(() => { live.set(false); retrying.set(willRetry); });
     },
-    onError(_doc, error) {
+    onError(doc, error, meta) {
       // A requireAuth host refuses docs until an auth method vouches for us.
       if (error === "unauthenticated") {
         if (!authDialog.open) {
           authDialog.showModal();
           void offerPasskeys();   // autofill offers a passkey IF the browser holds one
         }
-      } else console.error("[app]", error);
+        return;
+      }
+      // A refused WRITE (0.8.1's `meta.write`) — the doc is fine, one write
+      // wasn't. Say it where the other refusals are said.
+      if (meta?.write) { say(error); return; }
+      // A refused OPEN. "unknown doc" is the DESIGNED answer for a board that
+      // is gone AND for one that was never yours — no existence oracle, so
+      // they read alike on purpose. Neither is an error to shout into the
+      // console, and the doc cannot tell us itself: a refused open leaves
+      // peek() null and v 0, exactly like one that has not opened yet, which
+      // is why the "gone" effect in openBoard cannot catch this and this
+      // handler must. Without it you sit on a blank board with no way back.
+      if (doc.startsWith("board:") || doc.startsWith("presence:board:")) {
+        // A board doc we are no longer on: the refusal is STALE. Both docs of
+        // a board can be refused, and the bounce below happens on the first —
+        // so the second lands after currentBoard has already moved. Recovering
+        // twice would fight the navigation; logging it would cry wolf.
+        if (doc !== currentBoard && doc !== `presence:${currentBoard}`) return;
+        const msg = "that board isn't there — or isn't yours.";
+        if (currentBoard === "board:1") say(msg);
+        else { pendingMsg = msg; queueMicrotask(() => navigate("/board/1")); }
+        return;
+      }
+      console.error("[app]", doc, error);
     },
   },
 );
@@ -347,7 +375,8 @@ function openBoard(name: string): void {
   };
   historyPanel.hidden = true;
   historyBtn.textContent = "history";
-  say("");
+  say(pendingMsg);
+  pendingMsg = "";
   // Hidden until the server proves it has the kit — see hasDocKit(). The
   // shell outlives a board switch, so setting these late is safe.
   undoBtn.hidden = historyBtn.hidden = true;
