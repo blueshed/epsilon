@@ -77,10 +77,11 @@ EPSILON_PG_URL=postgres://epsilon:epsilon@localhost:5599/epsilon bun dev
 | `op.ts` | Three verbs, JSON-Pointer paths, pollution-guarded |
 | `signal.ts` | Op-carrying signals; composing `at()` lenses |
 | `doc.ts` | The wire — one Signal class both sides; `apply()` hides the WebSocket |
-| `ui.ts` | `list()` routes membership ops; `bind()` rides a lens's op stream for scalars; `when()` and `mount()` |
+| `ui.ts` | `list()` routes membership ops; `text()` binds a signal to a text node; `mount()` owns a render scope |
 | `route.ts` | Screens — hash router (`routes`/`route`/`navigate`), params change without teardown |
 | `pg.ts` | Durability, LISTEN/NOTIFY fan-out, declared read views (`pgView`), wire adapters: auth, undo, history, the operator's door |
 | `pglite.ts` | The same `Sql` seam over in-process Postgres — the embedded engine |
+| `passkey.ts` | WebAuthn end to end, zero dependencies — CBOR, COSE→JWK, the register/sign-in ceremony |
 | `law.ts` | The law as a harness — `proveLaw` drives your doc type over the wire and fails with the defect named |
 | `migrate.ts` | Numbered migrations: ordered, hash-recorded, forward-only, transactional |
 | `cli.ts` | The wire from a terminal — auth-aware one-shot commands + `watch`, JSON out (humans, scripts, AIs) |

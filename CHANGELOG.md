@@ -55,6 +55,15 @@ will ship.
   carries a copy of.
 - README no longer promises "three files" above a list of four, and no
   longer claims root `LICENSE` ships with every scaffold.
+- **Two docs still sold `bind()` and `when()`, deleted in 0.9.0.** README's
+  `ui.ts` row advertised both; it now names what `ui.ts` actually exports
+  (`list()`, `text()`, `mount()`). Worse, `REFERENCE.md`'s gotcha list said
+  "effects through a lens re-run on ANY root change — use `bind()` for
+  scalars", which is the *inverse* of 0.9.0: `Lens.get()` tracks its own
+  slice, so a lens read in an effect is the precise path. `SKILL.md` had it
+  right and the deep manual contradicted it.
+- README's runtime table listed 11 of the 12 runtime files — `passkey.ts`
+  (343 lines of WebAuthn) was missing, though the prose above sells it.
 
 ## [0.9.3] — 2026-08-02
 

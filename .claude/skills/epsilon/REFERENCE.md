@@ -284,8 +284,11 @@ in another, and you are watching the fan-out itself.
   doc versions under live clients.
 - Bun SQL binds objects/arrays RAW into jsonb — `JSON.stringify(...)::jsonb`
   double-encodes into a scalar and `jsonb_array_elements` explodes.
-- Effects through a lens re-run on ANY root change (correct, not minimal)
-  — use `bind()` for scalars; `list()` already rides the ops channel.
+- Effects through a lens are PRECISE since 0.9.0 — `Lens.get()` tracks its
+  own slice, so the effect re-runs only when an op touches it. What still
+  costs you is reading the whole doc (`doc.get()`) inside an effect: that
+  tracks the whole doc and re-runs on every write. Narrow with `at()`, then
+  read. (`bind()` is gone — the lens is what it bought.)
 - `expect(p).rejects.toThrow()` NEVER settles against a Bun SQL rejection —
   use try/catch and assert on the message (verified, Bun 1.3.14).
 - A multi-statement `unsafe()` inside `conn.begin()` leaks failures as
