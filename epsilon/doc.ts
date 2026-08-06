@@ -220,7 +220,24 @@ export function createHost(opts?: {
       }
       await pending;
       const made = docs.get(name);
-      if (made) made.dynamic = true;   // re-hostable — evict when unwatched
+      if (made) {
+        made.dynamic = true;   // re-hostable — evict when unwatched
+        // A factory refusal guards only the FIRST open — the doc outlives
+        // its opener. Relational docs stay safe because pgDoc's default
+        // gate asks doc_open(name, user) per open; an in-memory doc has no
+        // such default, so hosting one WITHOUT a gate on an auth-gated host
+        // would fail open for as long as anyone watches it. Refuse at
+        // hosting time — the one moment the mistake is cheap — and un-host,
+        // so the next open meets the factory (and this error) again.
+        if (opts?.requireAuth && !made.open) {
+          docs.delete(name);
+          throw new Error(
+            `[epsilon/doc] ${name}: a dynamic doc on a requireAuth host needs an open gate — ` +
+              `the factory refusal guards only the first open. Pass { open } to host.doc() ` +
+              `(an intentionally public doc states it: open: () => sig.peek()).`,
+          );
+        }
+      }
       return made;
     }
     return undefined;

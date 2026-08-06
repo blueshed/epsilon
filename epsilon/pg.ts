@@ -117,9 +117,10 @@ export async function pgDoc<T>(
               ON CONFLICT (name) DO NOTHING`;
   }
   // Composition happens HERE, at open — never per write. The host composes
-  // AS ITSELF: doc_open with no user is the full copy (001's rule), and the
-  // open gate above decides who may receive it.
-  const [row] = await sql`SELECT v, doc_open(name) AS data FROM docs WHERE name = ${name}`;
+  // AS ITSELF: doc_open(name, NULL) is the full copy (001's rule), written
+  // out — the NULL is the ceremony (007) — and the open gate above decides
+  // who may receive it.
+  const [row] = await sql`SELECT v, doc_open(name, NULL) AS data FROM docs WHERE name = ${name}`;
   if (!row) {
     // host.doc() registered the entry above, so throwing here would leave the
     // name HOSTED and serving `empty` at v=0 to everyone who opens it — a
@@ -148,7 +149,7 @@ export async function pgReceive(
 ): Promise<void> {
   try { host.v(name); } catch { return; }   // not hosted here
   if (host.receive(name, Number(r.v), r.ops) === "gap") {
-    const [doc] = await sql`SELECT v, doc_open(name) AS data FROM docs WHERE name = ${name}`;
+    const [doc] = await sql`SELECT v, doc_open(name, NULL) AS data FROM docs WHERE name = ${name}`;
     if (doc) host.hydrate(name, Number(doc.v), doc.data);
   }
 }
@@ -450,7 +451,7 @@ async function catchUp(host: Host, sql: Sql, name: string): Promise<void> {
     SELECT v, ops FROM doc_ops WHERE name = ${name} AND v > ${current} ORDER BY v`;
   for (const m of missed) {
     if (host.receive(name, Number(m.v), m.ops as Op[]) === "gap") {
-      const [doc] = await sql`SELECT v, doc_open(name) AS data FROM docs WHERE name = ${name}`;
+      const [doc] = await sql`SELECT v, doc_open(name, NULL) AS data FROM docs WHERE name = ${name}`;
       if (doc) host.hydrate(name, Number(doc.v), doc.data);
       return;
     }

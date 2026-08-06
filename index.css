@@ -126,6 +126,11 @@ h1 { margin-right: auto; }
 #detail-by { margin: 0.5rem 0 0; }
 #log li span { cursor: pointer; }
 #log li span:hover { color: var(--accent); }
+/* Ordering is model data (102): each row's flex `order` is its pos, so a
+   move op reorders without any DOM surgery — list() never re-inserts. */
+#log { display: flex; flex-direction: column; }
+.move { font-size: 0.72rem; }
+.move:hover { color: var(--accent); }
 
 #board-header { display: flex; align-items: baseline; gap: 0.5rem; }
 #board-back {

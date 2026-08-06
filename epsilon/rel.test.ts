@@ -114,7 +114,7 @@ describe.skipIf(!DB_UP)("relational tier — the tables are the truth", () => {
     const [doc] = await sql`SELECT data, open_fn, v FROM docs WHERE name = ${"board:1"}`;
     expect(doc.data).toBeNull();                        // never recomposed on write
     expect(doc.open_fn).toBe("board_open");
-    const [open] = await sql`SELECT doc_open(${"board:1"}) AS d`;
+    const [open] = await sql`SELECT doc_open(${"board:1"}, NULL) AS d`;
     expect(open.d.cards["1"].text).toBe("from the wire");
   });
 
@@ -765,6 +765,17 @@ describe.skipIf(!DB_UP)("the law, executable — proveLaw drives it (epsilon/law
         (d) => [{ op: "replace", path: `/cards/${cid(d)}/done`, value: true }],
         // Whole-row replace — the echo shape as INPUT (the kit's rule).
         (d) => [{ op: "replace", path: `/cards/${cid(d)}`, value: { text: "whole", done: false } }],
+        // Ordering is model data (102): a MOVE is a SWAP — two pos replaces
+        // in one batch, both stamped (echoes widen), both undone together.
+        () => [{ op: "add", path: "/cards/-", value: { text: "two" } }],
+        (d) => {
+          const [a, z] = Object.keys(d.cards)
+            .sort((x, y) => (d.cards[x]!.pos ?? 0) - (d.cards[y]!.pos ?? 0));
+          return [
+            { op: "replace", path: `/cards/${a}/pos`, value: d.cards[z!]!.pos },
+            { op: "replace", path: `/cards/${z!}/pos`, value: d.cards[a!]!.pos },
+          ];
+        },
         // A rename mirrors into the owner's own list — same transaction.
         () => [{ op: "replace", path: "/name", value: "law, renamed" }],
         (d) => {

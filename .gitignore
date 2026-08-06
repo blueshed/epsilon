@@ -5,3 +5,4 @@ node_modules/
 .epsilon-token
 .epsilon.pid
 data/
+.claude/settings.*

@@ -1,0 +1,13 @@
+-- 007 — the host's full copy is asked for OUT LOUD. doc_open's p_user
+-- carried DEFAULT NULL since 001, which made the permit-free read the
+-- ZERO-ARGUMENT call: a custom method that forgot to pass the socket's
+-- user compiled, ran, and silently served the host's full view — the one
+-- read NULL means "the host composing as itself" (001's rule). The rule
+-- stands; the default goes. Omission now fails loudly ("function
+-- doc_open(unknown) does not exist"); composing as the host is written
+-- out: doc_open(name, NULL).
+--
+-- CREATE OR REPLACE cannot remove a parameter default, so the DROP lives
+-- here (numbered, forward-only) and the recreate lives in db/fn/doc-kit.sql
+-- (vocabulary, replayed every boot — the same boot that runs this file).
+DROP FUNCTION IF EXISTS doc_open(text, bigint);

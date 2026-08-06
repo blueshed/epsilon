@@ -163,6 +163,35 @@ describe("the app, end to end", () => {
       (t) => t.includes("1 cards"),
     );
 
+    // Ordering is model data (102): a second card, then move it up. The
+    // MOVE is a swap batch on /pos; the echo re-renders each row's flex
+    // `order` from its own lens — visual order flips, no DOM re-insert.
+    await view.click("#input");
+    await view.type("second step");
+    await view.press("Enter");
+    const rowOrder = "[...document.querySelectorAll('#log li')]" +
+      ".sort((a, b) => Number(a.style.order) - Number(b.style.order))" +
+      ".map((li) => li.querySelector('span').textContent).join('|')";
+    await waitFor(() => view.evaluate<string>(rowOrder), (t) => t === "first step|second step");
+    await view.evaluate(
+      "(() => { const rows = [...document.querySelectorAll('#log li')];" +
+      "rows.find((li) => li.querySelector('span').textContent === 'second step')" +
+      ".querySelector('button.move').click(); return 1; })()",   // its ↑
+    );
+    await waitFor(() => view.evaluate<string>(rowOrder), (t) => t === "second step|first step");
+    // Cleanup: the rest of this test narrates a one-card board.
+    await view.evaluate(
+      "(() => { const rows = [...document.querySelectorAll('#log li')];" +
+      "rows.find((li) => li.querySelector('span').textContent === 'second step')" +
+      ".querySelector('button.del').click(); return 1; })()",
+    );
+    await waitFor(() => view.evaluate<boolean>("document.querySelector('#confirm').open"), (o) => o);
+    await view.click("#confirm-ok");
+    await waitFor(
+      () => view.evaluate<string>("document.querySelector('#log').textContent"),
+      (t) => !t.includes("second step"),
+    );
+
     // The hash is navigation truth: back returns to the shared board,
     // forward to mine — real history, no reload.
     await view.evaluate("history.back()");
@@ -324,14 +353,14 @@ describe("the app, end to end", () => {
 
     // ✕ → a confirm dialog (not window.confirm() — Bun's WebView can't
     // drive a browser-chrome dialog, only a DOM one). Cancel changes nothing.
-    await view.click("#log li button");
+    await view.click("#log li button.del");
     await waitFor(() => view.evaluate<boolean>("document.querySelector('#confirm').open"), (o) => o);
     await view.click("#confirm-cancel");
     await waitFor(() => view.evaluate<boolean>("document.querySelector('#confirm').open"), (o) => !o);
     expect(Number((await db`SELECT count(*) AS n FROM cards WHERE board_id = ${myBoard.id}`)[0]!.n)).toBe(1);
 
     // Confirmed: the row leaves the table AND the pixels.
-    await view.click("#log li button");
+    await view.click("#log li button.del");
     await waitFor(() => view.evaluate<boolean>("document.querySelector('#confirm').open"), (o) => o);
     await view.click("#confirm-ok");
     await waitFor(

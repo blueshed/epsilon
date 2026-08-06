@@ -38,8 +38,8 @@ import type { Sql } from "./pg";
 export interface LawDrive<T> {
   /** An OPEN client doc over the real wire — remote.doc(name). */
   handle: DocHandle<T>;
-  /** Its doc name: the recompute door is doc_open(name), composed as the
-   *  host (001's NULL-user rule) — the same full copy the host broadcasts. */
+  /** Its doc name: the recompute door is doc_open(name, NULL), composed as
+   *  the host (001's NULL-user rule) — the same full copy the host broadcasts. */
   name: string;
   sql: Sql;
   /** One entry per dispatch branch: the ops to send, or a function of the
@@ -168,7 +168,8 @@ export async function proveLaw<T>(drive: LawDrive<T>): Promise<void> {
   const off = handle.onOps((ops) => { echo = ops; });   // always Op[]; see signal.ts
 
   const recompute = async (doc: string): Promise<unknown> => {
-    const [row] = await sql`SELECT doc_open(${doc}) AS d`;
+    // As the host, said out loud (007): NULL user = the full copy.
+    const [row] = await sql`SELECT doc_open(${doc}, NULL) AS d`;
     return row?.d ?? null;
   };
 

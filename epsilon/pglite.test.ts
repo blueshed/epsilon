@@ -6,9 +6,10 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHost, connect, type Host, type Remote } from "./doc";
-import { migrate, pgDoc, pgAuth, pgSync, pgView, type Sql } from "./pg";
+import { migrate, pgDoc, pgAuth, pgSync, pgUndo, pgView, type Sql } from "./pg";
 import { hasBoardFixture, NO_FIXTURE } from "./testdb";
 import { openPglite } from "./pglite";
+import { proveLaw } from "./law";
 import type { Card, Board } from "../types";
 
 const DB_DIR = new URL("../db", import.meta.url).pathname;
@@ -51,7 +52,7 @@ describe("embedded Postgres — same schema, no server", () => {
   test("every migration applies; the demo board composes", async () => {
     const [m] = await sql`SELECT count(*)::int AS n FROM migrations`;
     expect(Number(m.n)).toBeGreaterThanOrEqual(5);
-    const [b] = await sql`SELECT doc_open(${"board:1"}) AS d`;
+    const [b] = await sql`SELECT doc_open(${"board:1"}, NULL) AS d`;
     expect(b.d.name).toBe("main");
     expect(b.d.cards).toEqual({});
   });
@@ -258,6 +259,246 @@ describe("embedded Postgres — same schema, no server", () => {
     expect(back.text).toBe("in-process");
     expect(back.done).toBe(true);
   });
+});
+
+describe("grain hardening — the kit refuses the cheap-but-wrong shapes", () => {
+  test("doc_open omitting the user is an ERROR, not the full copy (007)", async () => {
+    // Before 007 the permit-free read was the ZERO-ARGUMENT call: a custom
+    // method that forgot to pass the socket's user compiled, ran, and
+    // silently served the host's full view. Omission now fails at the call.
+    let refused = "";
+    try { await sql.unsafe(`SELECT doc_open('board:1') AS d`); }
+    catch (err) { refused = String(err); }
+    expect(refused).toMatch(/doc_open/);
+    expect(refused).toMatch(/does not exist/);
+    // Composing as the host is said OUT LOUD — and unchanged in meaning.
+    const [full] = await sql`SELECT doc_open(${"board:1"}, NULL) AS d`;
+    expect(full.d.name).toBe("main");
+  });
+
+  test("doc_commit refuses a root-path op — recompose erases who/what from the log", async () => {
+    // A dispatch that echoes "replace / {recomposition}" satisfies the law
+    // and destroys everything else the log is for: history reads 'someone
+    // replaced everything', and a root path conflicts every later undo.
+    const [before] = await sql`SELECT v FROM docs WHERE name = ${"board:1"}`;
+    let refused = "";
+    try {
+      await sql.unsafe(`SELECT doc_commit('board:1', $1) AS r`,
+        [[{ op: "replace", path: "", value: { name: "recomposed" } }] as unknown]);
+    } catch (err) { refused = String(err); }
+    expect(refused).toMatch(/root op in doc_commit/);
+    expect(refused).toMatch(/never recompose/);
+    const [after] = await sql`SELECT v FROM docs WHERE name = ${"board:1"}`;
+    expect(Number(after.v)).toBe(Number(before.v));       // nothing committed
+  });
+});
+
+describe("ordering — position is model data (102)", () => {
+  test("pos composes, a move is a SWAP batch, and the law holds — undo included", async () => {
+    const host = createHost();
+    const board = await pgDoc<Board>(host, sql, "board:1", null as unknown as Board, { apply: "board_apply" });
+    pgUndo(host, sql, (d) => (d.startsWith("board:") ? "board_apply" : undefined));
+    const url = serve(host);
+    const r = connect(url);
+    remotes.push(r);
+    const doc = r.doc<Board>("board:1");
+    await doc.ready;
+
+    // The card the earlier tests left behind was backfilled/minted a pos.
+    expect(Object.values(board.peek()!.cards).every((c) => c.pos != null)).toBe(true);
+
+    const byPos = (d: Board) =>
+      Object.keys(d.cards).sort((a, b) => (d.cards[a]!.pos ?? 0) - (d.cards[b]!.pos ?? 0));
+    await proveLaw<Board>({
+      handle: doc, name: "board:1", sql,
+      undo: (v?: number) => r.call("undo", { doc: "board:1", v }),
+      batches: [
+        // New cards land at the end — pos minted max+1.
+        () => [{ op: "add", path: "/cards/-", value: { text: "second" } }],
+        // A MOVE is a SWAP: two pos replaces in ONE batch — atomic, both
+        // stamped (echoes widen to the row), both undone together.
+        (d) => {
+          const [a, b] = byPos(d);
+          return [
+            { op: "replace", path: `/cards/${a}/pos`, value: d.cards[b!]!.pos },
+            { op: "replace", path: `/cards/${b!}/pos`, value: d.cards[a!]!.pos },
+          ];
+        },
+      ],
+    });
+    // proveLaw redid the swap, so the flip is the final state — visible in
+    // the same pos the client renders flex `order` from.
+    const order = byPos(doc.peek()!);
+    const texts = order.map((id) => doc.peek()!.cards[id]!.text);
+    expect(texts[0]).toBe("second");
+  });
+});
+
+// The gap the review's build fell into: db/100 and the todo recipe each show
+// cascade OR undo, never both — and the combination has a trap the harness
+// alone can't teach: doc_cascade_remove expands the ECHO but not the
+// INVERSE (it deletes and returns remove ops; the before-rows are already
+// gone). A type that records undo must read the children FIRST. This is the
+// worked example REFERENCE.md points at.
+const RECIPE_SQL = `
+CREATE TABLE IF NOT EXISTS recipes (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  owner_id bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name text NOT NULL
+);
+CREATE TABLE IF NOT EXISTS recipe_steps (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  recipe_id bigint NOT NULL REFERENCES recipes(id) ON DELETE CASCADE,
+  text text NOT NULL
+);
+
+CREATE OR REPLACE FUNCTION recipe_open(p_doc text, p_user bigint DEFAULT NULL) RETURNS jsonb AS $$
+  SELECT CASE WHEN p_user IS NOT NULL AND p_user <> doc_id(p_doc) THEN NULL ELSE
+    jsonb_build_object(
+      'recipes', COALESCE(
+        (SELECT jsonb_object_agg(x.id::text, jsonb_build_object('id', x.id, 'name', x.name))
+           FROM recipes x WHERE x.owner_id = doc_id(p_doc)), '{}'::jsonb),
+      'steps', COALESCE(
+        (SELECT jsonb_object_agg(s.id::text,
+           jsonb_build_object('id', s.id, 'recipe_id', s.recipe_id, 'text', s.text))
+           FROM recipe_steps s JOIN recipes x ON x.id = s.recipe_id
+           WHERE x.owner_id = doc_id(p_doc)), '{}'::jsonb))
+  END;
+$$ LANGUAGE sql STABLE;
+
+CREATE OR REPLACE FUNCTION recipe_apply(p_doc text, p_ops jsonb, p_user bigint DEFAULT NULL) RETURNS jsonb AS $$
+DECLARE
+  v_uid bigint := doc_id(p_doc);
+  v_op jsonb; v_p text[]; v_id bigint; v_row jsonb; v_before jsonb; v_kids jsonb;
+  v_out jsonb := '[]'::jsonb; v_undo jsonb := '[]'::jsonb;
+BEGIN
+  PERFORM doc_begin(p_doc, p_user = v_uid);
+  FOR v_op IN SELECT jsonb_array_elements(p_ops) LOOP
+    v_p := doc_path(v_op);
+
+    IF v_p = ARRAY['recipes', '-'] AND v_op->>'op' = 'add' THEN
+      INSERT INTO recipes (owner_id, name) VALUES (v_uid, v_op->'value'->>'name') RETURNING id INTO v_id;
+      v_out := v_out || op_add('/recipes/' || v_id,
+        jsonb_build_object('id', v_id, 'name', v_op->'value'->>'name'));
+      v_undo := op_remove('/recipes/' || v_id) || v_undo;
+
+    ELSIF array_length(v_p, 1) = 2 AND v_p[1] = 'recipes' AND v_op->>'op' = 'add'
+          AND v_p[2] ~ '^\\d+$' THEN
+      -- RESTORE (the undo of a recipe remove — the parent must come back
+      -- BEFORE its steps, which is the order the remove branch records).
+      INSERT INTO recipes (id, owner_id, name) OVERRIDING SYSTEM VALUE
+        VALUES (v_p[2]::bigint, v_uid, v_op->'value'->>'name')
+        RETURNING jsonb_build_object('id', id, 'name', name) INTO v_row;
+      PERFORM doc_restore_id('recipes');
+      v_out := v_out || op_add('/recipes/' || v_p[2], v_row);
+      v_undo := op_remove('/recipes/' || v_p[2]) || v_undo;
+
+    ELSIF v_p = ARRAY['steps', '-'] AND v_op->>'op' = 'add' THEN
+      INSERT INTO recipe_steps (recipe_id, text)
+        SELECT (v_op->'value'->>'recipe_id')::bigint, v_op->'value'->>'text'
+        FROM recipes WHERE id = (v_op->'value'->>'recipe_id')::bigint AND owner_id = v_uid
+        RETURNING id INTO v_id;
+      IF v_id IS NULL THEN RAISE EXCEPTION 'row not found: %', v_op->>'path'; END IF;
+      v_out := v_out || op_add('/steps/' || v_id,
+        jsonb_build_object('id', v_id, 'recipe_id', (v_op->'value'->>'recipe_id')::bigint,
+                           'text', v_op->'value'->>'text'));
+      v_undo := op_remove('/steps/' || v_id) || v_undo;
+
+    ELSIF array_length(v_p, 1) = 2 AND v_p[1] = 'steps' AND v_op->>'op' = 'add'
+          AND v_p[2] ~ '^\\d+$' THEN
+      -- RESTORE a step (the tail of a cascade's undo).
+      INSERT INTO recipe_steps (id, recipe_id, text) OVERRIDING SYSTEM VALUE
+        SELECT v_p[2]::bigint, x.id, v_op->'value'->>'text'
+        FROM recipes x WHERE x.id = (v_op->'value'->>'recipe_id')::bigint AND x.owner_id = v_uid
+        RETURNING jsonb_build_object('id', id, 'recipe_id', recipe_id, 'text', text) INTO v_row;
+      IF v_row IS NULL THEN RAISE EXCEPTION 'row not found: %', v_op->>'path'; END IF;
+      PERFORM doc_restore_id('recipe_steps');
+      v_out := v_out || op_add('/steps/' || v_p[2], v_row);
+      v_undo := op_remove('/steps/' || v_p[2]) || v_undo;
+
+    ELSIF array_length(v_p, 1) = 2 AND v_p[1] = 'steps' AND v_op->>'op' = 'remove' THEN
+      -- Also the undo of "add step": every inverse a dispatch RECORDS must
+      -- be an op it can DISPATCH — proveLaw's undo drive catches the gap.
+      SELECT jsonb_build_object('id', s.id, 'recipe_id', s.recipe_id, 'text', s.text) INTO v_before
+        FROM recipe_steps s JOIN recipes x ON x.id = s.recipe_id
+        WHERE s.id = v_p[2]::bigint AND x.owner_id = v_uid;
+      DELETE FROM recipe_steps s USING recipes x
+        WHERE s.id = v_p[2]::bigint AND x.id = s.recipe_id AND x.owner_id = v_uid;
+      IF FOUND THEN
+        v_out := v_out || op_remove(v_op->>'path');
+        v_undo := op_add('/steps/' || v_p[2], v_before) || v_undo;
+      END IF;
+
+    ELSIF array_length(v_p, 1) = 2 AND v_p[1] = 'recipes' AND v_op->>'op' = 'remove' THEN
+      SELECT jsonb_build_object('id', x.id, 'name', x.name) INTO v_before
+        FROM recipes x WHERE x.id = v_p[2]::bigint AND x.owner_id = v_uid;
+      IF v_before IS NOT NULL THEN
+        -- THE TRAP, disarmed in order:
+        --   1. read the children (doc_cascade_remove cannot — they die in it)
+        --   2. expand the cascade into the ECHO
+        --   3. delete the parent; echo its remove
+        --   4. record the inverse: parent add FIRST (FK), then its steps
+        SELECT COALESCE(jsonb_agg(jsonb_build_object(
+                 'op', 'add', 'path', '/steps/' || s.id,
+                 'value', jsonb_build_object('id', s.id, 'recipe_id', s.recipe_id, 'text', s.text))),
+               '[]'::jsonb)
+          INTO v_kids FROM recipe_steps s WHERE s.recipe_id = v_p[2]::bigint;
+        v_out := v_out || doc_cascade_remove('recipe_steps', 'recipe_id', v_p[2]::bigint, '/steps/');
+        DELETE FROM recipes WHERE id = v_p[2]::bigint AND owner_id = v_uid;
+        v_out := v_out || op_remove(v_op->>'path');
+        v_undo := (op_add('/recipes/' || v_p[2], v_before) || v_kids) || v_undo;
+      END IF;
+
+    ELSE
+      RAISE EXCEPTION 'unsupported op: % %', v_op->>'op', v_op->>'path';
+    END IF;
+  END LOOP;
+  RETURN doc_commit(p_doc, v_out, p_user, v_undo);
+END;
+$$ LANGUAGE plpgsql;
+`;
+
+describe("cascade + undo — the worked combination (REFERENCE.md points here)", () => {
+  test("a parent remove expresses its cascade AND records an inverse that restores it whole", async () => {
+    await sql.unsafe(RECIPE_SQL);
+    const host = createHost({ requireAuth: true });
+    await pgAuth(host, sql);
+    host.docs("recipe:", async (name, userId) => {
+      const uid = Number(name.split(":")[1]);
+      if (!Number.isFinite(uid) || Number(userId) !== uid) throw new Error(`unknown doc: ${name}`);
+      await pgDoc(host, sql, name, null, { apply: "recipe_apply", seed: { open_fn: "recipe_open" } });
+    });
+    pgUndo(host, sql, (d) => (d.startsWith("recipe:") ? "recipe_apply" : undefined));
+    const url = serve(host);
+
+    const r = connect(url);
+    remotes.push(r);
+    const me = await r.call<{ user: { id: number } }>("register", {
+      name: "Chef", email: "chef@pg.lite", password: "pw",
+    });
+    const uid = me.user.id;
+    type Recipes = {
+      recipes: Record<string, { id: number; name: string }>;
+      steps: Record<string, { id: number; recipe_id: number; text: string }>;
+    };
+    const doc = r.doc<Recipes>(`recipe:${uid}`);
+    await doc.ready;
+
+    const rid = (d: Recipes) => Object.keys(d.recipes)[0]!;
+    await proveLaw<Recipes>({
+      handle: doc, name: `recipe:${uid}`, sql,
+      undo: (v?: number) => r.call("undo", { doc: `recipe:${uid}`, v }),
+      batches: [
+        () => [{ op: "add", path: "/recipes/-", value: { name: "ramen" } }],
+        (d) => [{ op: "add", path: "/steps/-", value: { recipe_id: Number(rid(d)), text: "boil stock" } }],
+        (d) => [{ op: "add", path: "/steps/-", value: { recipe_id: Number(rid(d)), text: "cut noodles" } }],
+        // The combination under test: removing the parent cascades BOTH
+        // steps — expressed in the echo, restored whole by the undo (which
+        // proveLaw drives, then redoes).
+        (d) => [{ op: "remove", path: `/recipes/${rid(d)}` }],
+      ],
+    });
+  }, 30_000);
 });
 
 // The vocabulary pass uses SET LOCAL check_function_bodies, twice, inside

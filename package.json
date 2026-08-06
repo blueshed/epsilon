@@ -5,7 +5,7 @@
   "type": "module",
   "description": "An epsilon app — one op stream, Postgres to pixel.",
   "epsilon": {
-    "base": "v0.10.1"
+    "base": "v0.10.2"
   },
   "scripts": {
     "dev": "EPSILON_PG_DIR=./data bun --hot server.ts",

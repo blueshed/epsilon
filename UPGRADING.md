@@ -29,7 +29,31 @@ that a scaffold cannot update is wrong the day after it ships, so
 
 ---
 
-## → 0.10.1
+## → 0.10.2
+
+Two of the three structural fixes need a look from you; the third
+(`doc_commit` refusing root-path ops) is automatic unless a dispatch of
+yours echoes a recomposition — which was always a defect, and now says so.
+
+**`doc_open` takes both arguments.** Copy `db/007-doc-open-explicit.sql`
+and the `db/fn/` files into your app (`db/` is outside the upgrade
+whitelist, as ever). Then grep your own SQL and methods for single-argument
+calls:
+
+```sql
+SELECT doc_open('board:1');          -- before: silently the FULL copy
+SELECT doc_open('board:1', NULL);    -- after: the host's copy, said out loud
+SELECT doc_open('board:1', p_user);  -- a user's permitted view
+```
+
+A custom `host.method` must pass `ws.data.user.id` — forgetting it is now
+an undefined-function error instead of a permit bypass.
+
+**Gateless dynamic in-memory docs are refused on `requireAuth` hosts.** If
+a prefix factory of yours calls `host.doc(name, empty)` with no `{ open }`,
+its opens now fail loudly instead of failing open. Fit the factory's own
+permit as the gate (see server.ts's presence factory); an intentionally
+public doc states it: `open: () => sig.peek()`.
 
 A patch by intent — 0.10.0 reviewed and repaired — but two of the repairs
 need a line from you, because a security hole cannot be closed without

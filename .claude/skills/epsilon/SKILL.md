@@ -135,6 +135,16 @@ users/sessions, reload-worthy for doc tables.
 - **`list()` for collections; a NARROWED lens read in an effect for scalars.**
   `at()` down to the field, then `get()` — an effect over the whole doc is
   correct but re-runs on every write.
+- **Ordering is model data.** Rows get a `pos` column (minted max+1); a
+  MOVE is a SWAP — two pos replaces in one batch. Render each row's flex
+  `order` from its own pos lens; never re-insert DOM. db/102 +
+  db/fn/board.sql + index.ts are the worked pattern (REFERENCE.md).
+- **Bytes never ride ops; email is your vendor's.** An attachment goes over
+  an HTTP route to your object store and the DOC carries the reference
+  (url/key) — base64 in an op value works until the 1 MiB frame cap and
+  never after. Verification/reset mail is the mail vendor's side of a seam:
+  wire it as a `host.method` that calls their API; epsilon deliberately
+  ships neither.
 - **Close what you leave.** `remote.doc()` handles are refcounted — call
   `.close()` when a view is done with a doc. Writes through a closed
   handle throw.
@@ -150,7 +160,10 @@ users/sessions, reload-worthy for doc tables.
   one can exist (passkey login). Marking a read `open` hands it out to
   anyone: the SQL permits read a NULL user as "the host asking as itself",
   which is the full copy. This gate arrived in 0.10.1 because `history` and
-  `undo` did not have it.
+  `undo` did not have it. Inside a method, PASS the user: `doc_open` takes
+  both arguments (007) — `doc_open(name)` is an error, `doc_open(name,
+  NULL)` is the host's full copy said out loud, and the socket's user is
+  `ws.data.user.id`.
 - **Two kinds of SQL, two rules.** `db/NNN-*.sql` is SCHEMA: never edit one
   once applied, add the next number (comment-only edits count — the ledger
   records the hash). `db/fn/*.sql` is VOCABULARY — stored functions,
