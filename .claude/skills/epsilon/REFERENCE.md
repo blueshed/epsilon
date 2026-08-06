@@ -257,6 +257,72 @@ port; `EPSILON_TOKEN` overrides the token file; `--timeout` bounds every
 command (a bare `watch` runs until Ctrl-C). Write in one terminal, `watch`
 in another, and you are watching the fan-out itself.
 
+## Routing — screens (route.ts)
+
+A hash router, not the History API: epsilon serves its own HTML from
+`Bun.serve`, so History mode would need a catch-all route on every deployment
+and a rewrite rule on every static host in front of one. `#/board/5` still
+resolves cold and is still a shareable URL.
+
+```ts
+routes(target, table)   // declarative — owns target's children, one scope per handler
+route<T>(pattern)       // reactive — Signal<params | null>, null when unmatched
+navigate(path)          // set location.hash programmatically
+matchRoute(pattern, path)  // the pure matcher; params or null
+```
+
+Patterns are `"/users/:id"` (named params, exact segments), `"/sites/*"`
+(wildcard, any depth, rest in `params["*"]`), or both. **Tested in declaration
+order, first match wins** — put `/users/new` before `/users/:id`. Matching is
+purely segment-based: there is no query-string handling (`#/users/42?tab=1`
+gives `id === "42?tab=1"`), and a trailing slash is a real empty segment, so
+`/users/42/` does NOT match `/users/:id`.
+
+**A handler returns `Node`, or `Promise<() => Node>` — never `Promise<Node>`.**
+Browser JS has no AsyncContext, so a dispose scope cannot survive an `await`.
+The thunk is what the router brackets, and it is how bindings created after an
+await get an owner. The bare async form is refused at the type level.
+
+**Params change without teardown.** `/board/1 → /board/2` updates `params$`
+and re-runs nothing else. That is the point: a route that opens a doc should
+open it ONCE and let an effect follow `params$` — closing and re-opening a
+subscription on every id change is the bug this shape prevents.
+
+```ts
+function boardView(params$: Signal<Record<string, string>>): Node {
+  const title = el("h2");                 // built once, per ENTRY to the pattern
+  effect(() => openBoard(`board:${params$.get().id}`));   // re-runs per id
+  return title;
+}
+```
+
+Nest by keeping a layout mounted under a wildcard, then using `route()` inside
+it. Both `routes()` and `route()` auto-track in the parent scope. `route()` at
+module level is supported and needs no ceremony — the hash signal is
+app-lifetime by construction, so a computed over it is too.
+
+## Local state — signals that aren't docs
+
+Not everything on screen is shared. `signal()`, `computed()` and `batch()` are
+the same primitives the doc layer is built from, for state that never leaves
+the tab (a filter, a dialog's mode, a draft):
+
+```ts
+const filter = signal("all");
+const visible = computed(() => rows.get().filter(r => keep(r, filter.get())));
+batch(() => { me.set(user); refused.set(""); });   // one flush, not two
+```
+
+**`batch()` is for two writes to DIFFERENT signals.** `apply(ops[])` already
+batches a doc — one op array is one notify — so batching around a single doc
+write buys nothing. Two `.set()` calls on two local signals are what nothing
+else coalesces. (This is not hypothetical: 0.9.0 deleted `batch()` after a
+scan found "one call site", and the real consumer was in a working tree; it
+came back in 0.9.1.)
+
+`text(sig)` returns a Text node bound to a signal — the smallest binding there
+is, for when you want a value in the DOM without an element to hang it on.
+
 ## Testing
 
 - `bun test` (unit/wire/DOM), `bun run test:pglite` (embedded, no server),
@@ -289,6 +355,18 @@ in another, and you are watching the fan-out itself.
   costs you is reading the whole doc (`doc.get()`) inside an effect: that
   tracks the whole doc and re-runs on every write. Narrow with `at()`, then
   read. (`bind()` is gone — the lens is what it bought.)
+- **Set the boot hash BEFORE `routes()` reads it.** `location.hash` updates
+  synchronously but `hashchange` does not fire until a later task, so routing
+  through the event renders your placeholder first and flashes. A cold load
+  with no hash wants `location.replace("#/your/default")` above the `routes()`
+  call — `replace`, so a bare `#` stays out of the history.
+- **A route handler must hold element REFS, not call `getElementById`.**
+  `routes()` appends the handler's fragment AFTER the handler returns, so a
+  lookup inside it finds nothing. Build the nodes, keep the references.
+- **A focused element is not yours to rewrite.** An effect that writes
+  `textContent` from a doc will move the caret out from under someone typing
+  in a `contentEditable` when a REMOTE write lands. Narrow the lens so
+  unrelated writes don't re-run it, and guard on `document.activeElement`.
 - `expect(p).rejects.toThrow()` NEVER settles against a Bun SQL rejection —
   use try/catch and assert on the message (verified, Bun 1.3.14).
 - A multi-statement `unsafe()` inside `conn.begin()` leaks failures as

@@ -3,7 +3,7 @@
 // With auth on, you get YOUR boards (mine:<uid>): creating one is an op on
 // that doc; opening one is just another doc name.
 import {
-  connect, list, text, effect, routes, navigate,
+  connect, list, text, signal, computed, effect, batch, routes, navigate,
   pushDisposeScope, popDisposeScope, trackDispose,
 } from "./epsilon";
 import type { OpSignal, Signal, Dispose, DocHandle } from "./epsilon";
@@ -139,6 +139,16 @@ function confirmAction(message: string, actionLabel = "delete"): Promise<boolean
   });
 }
 
+// Local state — not every signal is a doc. The socket's health is a fact
+// about THIS tab: nothing to share, nothing to persist, so it is an ordinary
+// signal. `live` is false until the first connect, `retrying` distinguishes a
+// drop we expect to heal from a close we asked for.
+const live = signal(false);
+const retrying = signal(false);
+/** One derived line, not two flags read in three places. */
+const linkState = computed(() =>
+  live.get() ? "" : retrying.get() ? "reconnecting…" : "offline");
+
 const remote = connect(
   // wss on https — a hardcoded ws:// is blocked as mixed content behind TLS.
   `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`,
@@ -146,6 +156,9 @@ const remote = connect(
     // Runs on EVERY (re)connect before docs re-open: a dropped socket
     // re-authenticates itself instead of stranding us at the auth dialog.
     async onConnect(r) {
+      // Two locals, one flush: batch() is for writes to DIFFERENT signals —
+      // an op array already batches a doc, so this is the case that needs it.
+      batch(() => { live.set(true); retrying.set(false); });
       const token = localStorage.getItem("epsilon-token");
       if (!token) return;
       try {
@@ -153,6 +166,13 @@ const remote = connect(
       } catch {
         localStorage.removeItem("epsilon-token");
       }
+    },
+    // The symmetric half, and not optional: doc signals KEEP their last value
+    // across a drop — the reconnect's snapshot is what resets them. Presence
+    // below is rendered as live, so without this it goes on naming people who
+    // are on a socket we no longer hold.
+    onDisconnect(willRetry) {
+      batch(() => { live.set(false); retrying.set(willRetry); });
     },
     onError(_doc, error) {
       // A requireAuth host refuses docs until an auth method vouches for us.
@@ -219,6 +239,11 @@ function openBoard(name: string): void {
     queueMicrotask(() => { if (currentBoard === name) navigate("/board/1"); });
   });
   effect(() => {
+    // The link first: a presence doc holds its last value across a drop, so
+    // rendering it unconditionally would keep naming people on a socket we
+    // no longer have (epsilon/DESIGN.md, onDisconnect).
+    const link = linkState.get();
+    if (link) { who.textContent = link; return; }
     const here = pres.get();
     const names = here ? Object.values(here).map((p) => p?.name ?? "?") : [];
     who.textContent = names.length ? `here: ${names.join(", ")}` : "";

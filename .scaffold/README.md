@@ -22,13 +22,21 @@ browser. When you're ready to make this app your own:
 |---|---|
 | `index.ts` / `index.css` / `types.ts` | the board's pixels and types |
 | `app.test.ts` | the board's browser test |
-| `db/100-board.sql` / `db/101-tally.sql` | the board's schema, composition and writes |
 | the `board:` / `mine:` / `tally:` blocks in `server.ts` | the board's wiring |
 
 Keep everything else: `epsilon/`, `db/001`–`005` (epsilon core), the rest of
-`server.ts`, `index.html`. Number your own migrations from **100** up —
+`server.ts`, `index.html`. Number your own migrations from **101** up —
 001–099 are epsilon's, frozen once released, so an upgrade never collides
 with your files.
+
+**Keep `db/100-board.sql` and `db/101-tally.sql` too, for now.** They are the
+demo's schema *and* the fixture the vendored relational suites drive:
+`test:pg` and `test:pglite` call `board_apply` and compose `tally_open` in
+some 360 places. Delete the SQL and `bun test`'s promise — your stack,
+verified in your repo — turns into a red suite. Two small tables are a cheap
+price until you have a doc type of your own and have re-pointed those tests
+at it; `proveLaw` (`epsilon/law.ts`) is how you pin yours, the way
+`epsilon/rel.test.ts` pins the board.
 
 ## Choosing an engine
 

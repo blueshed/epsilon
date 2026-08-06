@@ -67,6 +67,39 @@ the last five open findings from the 0.8.0 shakedown.
 - The kit controls hide themselves in in-memory mode, where `server.ts` wires
   neither adapter: one capability probe per session, and any refusal OTHER
   than "unknown method" still counts as present.
+- **`onDisconnect` is wired, and presence finally honours it.** DESIGN.md has
+  warned since 0.6.0 that "anything rendered as live must hear the drop from
+  this hook or it goes on testifying to a state nobody is in" — and the demo
+  rendered presence without it, so a dropped socket left `here: Pete, Ada`
+  on screen indefinitely. The demo now carries the bug's own cure.
+- **`signal()`, `computed()` and `batch()` appear in the demo at last.** All
+  three were exported, none was used: the demo's state was entirely
+  doc-backed, so nothing showed what a purely local signal is for. The link
+  state is exactly that — a fact about one tab, nothing to share or persist —
+  and its two flags set together are the case `batch()` exists for. `batch()`
+  was deleted in 0.9.0 and restored in 0.9.1 because a real app needed it;
+  now the template says so itself.
+- **REFERENCE.md gained a Routing section and a Local state section.**
+  `route.ts` is a whole module and the deep manual mentioned `routes()` zero
+  times; `text()`, `batch()` and `computed()` were documented nowhere in the
+  skill pair. Three sharp edges moved in with them — set the boot hash before
+  `routes()` reads it, hold element refs rather than calling
+  `getElementById` in a handler, and don't rewrite a focused element from a
+  remote write. The first two were only in `CHANGELOG.md` and `UPGRADING.md`,
+  both of which 0.10.0 stops shipping to scaffolds.
+
+### Fixed (documentation)
+
+- **The scaffold README told you to delete the demo's schema, which breaks
+  the vendored test suite.** `db/100-board.sql` and `db/101-tally.sql` are
+  the demo's tables *and* the fixture `rel.test.ts`, `pglite.test.ts`,
+  `view.test.ts` and `pg.test.ts` drive — some 360 references. Following the
+  instruction turned `bun run test:pglite` into 7 failures out of 10, against
+  a README promising "`bun test` verifies your stack, in your repo, forever".
+  The delete list is now the UI and the wiring; the SQL stays until you have
+  a doc type of your own to re-point those tests at. **The real fix is for
+  the vendored suites to own their fixture rather than the app's, and it is
+  not in this release** — `rel.test.ts` alone has 240 references.
 
 ### Changed
 
