@@ -84,6 +84,7 @@ const CORE = new Set([
   "004-housekeeping.sql",
   "005-gone.sql",
   "006-session-digest.sql",
+  "007-doc-open-explicit.sql",
 ]);
 
 /** List migration files in order — `NNN-name.sql`, numerically sorted. The

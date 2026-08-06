@@ -518,7 +518,13 @@ describe("dynamic docs — the factory sees the asking identity", () => {
     h.docs("mine:", (name, userId) => {
       if (name !== `mine:${userId}`) throw new Error(`unknown doc: ${name}`);
       built++;
-      h.doc(name, { cards: {} } satisfies Board);
+      // The permit the factory checks is ALSO the open gate — an in-memory
+      // doc has no doc_open to default to, and a requireAuth host refuses a
+      // gateless dynamic doc outright (the rule, enforced below).
+      let sig!: Signal<Board>;
+      sig = h.doc(name, { cards: {} } satisfies Board, {
+        open: (u) => (name === `mine:${u}` ? sig.peek() : null),
+      });
     });
     const srv = Bun.serve({
       port: 0,
@@ -546,6 +552,38 @@ describe("dynamic docs — the factory sees the asking identity", () => {
     const mine = owner.doc<Board>("mine:7");
     await mine.ready;
     expect(built).toBe(1);
+    srv.stop(true);
+  });
+
+  test("a gateless dynamic doc on a requireAuth host is refused AT HOSTING TIME", async () => {
+    // The factory's refusal guards only the first open — the doc outlives
+    // its opener. Relational docs recover through pgDoc's default gate; an
+    // in-memory doc has no default, so before 0.10.2 this shape failed OPEN
+    // for as long as anyone watched it. Now it fails loudly, un-hosted.
+    const h = createHost({ requireAuth: true });
+    h.method("become", (p: { id: number }, ws) => { ws.data ??= {}; ws.data.user = { id: p.id }; return ws.data.user; }, { open: true });
+    h.docs("naive:", (name, userId) => {
+      if (name !== `naive:${userId}`) throw new Error(`unknown doc: ${name}`);
+      h.doc(name, { cards: {} } satisfies Board);   // forgot the gate
+    });
+    const srv = Bun.serve({
+      port: 0,
+      fetch: (req, s) => h.fetch(req, s) ?? new Response("", { status: 404 }),
+      websocket: h.websocket,
+    });
+    h.setServer(srv);
+
+    const errors: string[] = [];
+    const r = connect(`ws://localhost:${srv.port}${h.path}`, {
+      onConnect: async (remote) => { await remote.call("become", { id: 7 }); },
+      onError: (_d, e) => errors.push(e),
+    });
+    remotes.push(r);
+    r.doc("naive:7");                          // the OWNER — the gate is still required
+    await until(() => errors.length > 0, 3000);
+    expect(errors[0]).toContain("needs an open gate");
+    expect(h.names()).not.toContain("naive:7");   // un-hosted — nothing serving `empty`
+
     srv.stop(true);
   });
 });

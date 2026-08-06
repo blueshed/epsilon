@@ -80,16 +80,23 @@ the SQL round trip, and NEVER capture mutable row state at hosting time
 (`owner == null ? undefined : …` at factory time fails open, silently,
 the moment the row changes — the bug that motivated 0.3.0).
 
+**`doc_open` takes BOTH arguments (007).** The user parameter has no
+default: `doc_open(name)` is an undefined-function error, not the full
+copy. Composing as the host is written out — `doc_open(name, NULL)` — so a
+custom method that forgets to pass `ws.data.user.id` fails at the call
+site instead of silently serving the permit-free view.
+
 ## Authoring a doc type (the kit — db/003)
 
 A type is ONE composition query + ONE dispatch function (~30 lines of app
-SQL). Copy `db/100-board.sql` (worked example) or rel.test.ts's `todo`
-type (minimal). 001–099 are epsilon core, frozen once released, and
-`migrate()` warns if you squat below; 100/101 are the scaffold's demo, so
-number your own from **102**. The TABLES need a number — the `_open` and
-`_apply` FUNCTIONS go in `db/fn/`, edited in place (100-board.sql defines
-its own inline only because it predates `db/fn/` and its hash is already
-recorded in deployed ledgers).
+SQL). Copy `db/100-board.sql` + `db/fn/board.sql` (worked example) or
+rel.test.ts's `todo` type (minimal). 001–099 are epsilon core, frozen once
+released, and `migrate()` warns if you squat below; 100–102 are the
+scaffold's demo, so number your own from **103**. The TABLES need a number
+— the `_open` and `_apply` FUNCTIONS go in `db/fn/`, edited in place
+(100-board.sql defines early bodies inline only because it predates
+`db/fn/` and its hash is already recorded in deployed ledgers; the live
+board vocabulary is `db/fn/board.sql`).
 
 - `<x>_open(doc, user)` — one composition query; NULL user = the host,
   full view; NULL result = refused.
@@ -107,7 +114,22 @@ recorded in deployed ledgers).
 - **FK cascades are invisible to the op log**: expand them with
   `doc_cascade_remove(table, fk, id, prefix)` BEFORE deleting the parent,
   or clients render orphans until reload — and undo can never restore
-  what the log never saw.
+  what the log never saw. The helper expands the ECHO only — the
+  before-rows die inside it — so a type that records undo must read the
+  children FIRST and prepend parent-then-children adds to the inverse.
+  And every inverse you record must be an op your own dispatch can
+  dispatch (recording `remove /steps/<id>` needs a `remove /steps/<id>`
+  branch). pglite.test.ts's `recipe` type is the worked cascade+undo
+  combination, pinned by proveLaw.
+- **Ordering is model data** (db/102 + db/fn/board.sql, the worked
+  pattern): rows get a `pos` column — minted `max+1` on insert, restored
+  from the value, composed like any field. A MOVE is a SWAP: two pos
+  replaces in ONE batch, atomic in one transaction, both stamped (echoes
+  widen to the row, like `/done`), both undone together. The client
+  renders each row's flex `order` from its own pos lens (index.ts) — no
+  DOM surgery, `list()` stays untouched. Positions are integers as
+  written (CSS `order` takes nothing else); the column is double
+  precision so drag-drop can graduate to fractional midpoints later.
 - The kit owns locks, refusals (no existence oracle), versioning, audit,
   NOTIFY, undo (`doc_undo`), conflict detection (`doc_touched_since`);
   `doc_drop` deletes a doc whole — and tells the world: it rings the
@@ -221,7 +243,10 @@ hosted docs won't hear them — reload after touching doc tables.
   opener. Relational docs stay safe because the default gate asks
   `doc_open(name, user)` per open; an IN-MEMORY doc has no such default,
   so any permit the factory checks must ALSO be fitted as its `open` gate
-  (`host.doc(name, {}, { open })`) or it fails open while hosted.
+  (`host.doc(name, {}, { open })`). ENFORCED: a `requireAuth` host refuses
+  to host a gateless dynamic doc at all — the open errors, naming the fix
+  — so the mistake is loud instead of open. An intentionally public doc
+  states it: `open: () => sig.peek()`.
 - Presence: `presence:board:<id>` is an in-memory doc the host's
   `onSubscribe`/`onUnsubscribe` hooks maintain (see server.ts) — being
   present IS watching the doc; it evicts with its last watcher. Ephemeral,

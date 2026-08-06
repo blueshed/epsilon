@@ -7,6 +7,79 @@ will ship.
 
 ## [Unreleased]
 
+Grain hardening: the 2026-08 architecture review found three places where
+the cheap path and the correct path still diverged and only prose stood
+guard. All three are now structural, and the two worked patterns the review
+reached for and couldn't find — ordering, cascade+undo — ship as code.
+
+**Action required for apps with their own SQL or methods** (existing apps
+adopt `db/007-doc-open-explicit.sql` and the `db/fn/` files by copying —
+`db/` is outside the upgrade whitelist, as ever):
+
+```sql
+-- before: the permit-free read was the zero-argument call
+SELECT doc_open('board:1');
+-- after: omission errors; composing as the host is said out loud
+SELECT doc_open('board:1', NULL);          -- the host's full copy
+SELECT doc_open('board:1', p_user);        -- a user's permitted view
+```
+
+### Security
+
+- **`doc_open` requires both arguments** (`db/007`, `db/fn/doc-kit.sql`).
+  The user parameter carried `DEFAULT NULL` since 001, which made the
+  permit-free full-copy read the ZERO-ARGUMENT call: a custom method that
+  forgot to pass the socket's user compiled, ran, and silently served the
+  host's own view of any doc. Omission is now an undefined-function error
+  at the call site; NULL-means-host is unchanged, it just has to be
+  written. pglite.test.ts pins both halves.
+- **A gateless dynamic doc on a `requireAuth` host is refused at hosting
+  time** (`epsilon/doc.ts`). A factory's refusal guards only the FIRST
+  open — the doc outlives its opener — and an in-memory doc has no
+  `doc_open` default to fall back to, so `host.doc(name, {})` behind a
+  prefix factory failed OPEN for as long as anyone watched it. The host
+  now un-hosts and errors, naming the fix (`{ open }`); an intentionally
+  public doc states it: `open: () => sig.peek()`. doc.test.ts pins it.
+
+### Changed
+
+- **`doc_commit` refuses root-path ops** (`db/fn/doc-kit.sql`). A dispatch
+  that echoes a recomposition — `replace "" {whole doc}` — satisfies the
+  law trivially and destroys everything else the log is for: history reads
+  "someone replaced everything", a root path conflicts every later undo,
+  and who/what/why dissolve. "Express the change, never recompose" was a
+  design rule; now it is a shape the kit refuses. Nothing legitimate
+  commits at root (snapshots ride hydrate; views never commit).
+- **The board's vocabulary moved to `db/fn/board.sql`** (`card_json`,
+  `board_apply`). 100-board.sql predates `db/fn/` and its hash is frozen
+  in deployed ledgers; behaviour now evolves in place, per the vocabulary
+  rule. `board_open`/`mine_apply` are unchanged and stay in 100.
+- App migrations now start at **103** — 100–102 are the scaffold's demo.
+
+### Added
+
+- **Ordering is model data — the worked pattern the demo's own genre was
+  missing** (`db/102-card-pos.sql`, `db/fn/board.sql`, index.ts, types.ts).
+  Cards get `pos`: minted max+1 on insert, restored from the value,
+  composed by `card_json`, moved by ordinary replace ops on
+  `/cards/<id>/pos` — a MOVE is a SWAP, two pos replaces in ONE batch,
+  atomic, both stamped (echoes widen to the row, like `/done`), both
+  undone together. The client renders each row's flex `order` from its own
+  pos lens — no DOM surgery; `list()` is untouched. Move buttons hide on
+  the in-memory preview, which mints no pos. Pinned by proveLaw on both
+  engines (pglite.test.ts; rel.test.ts's law drive gained the swap batch).
+- **Cascade + undo, combined** (pglite.test.ts's `recipe` type,
+  REFERENCE.md). The review's build fell into the gap between the two
+  worked examples: `doc_cascade_remove` expands the ECHO only — the
+  before-rows die inside it — so a type that records undo must read the
+  children FIRST and prepend parent-then-children adds to the inverse; and
+  every inverse recorded must be an op the dispatch can dispatch. The
+  recipe type is that combination end to end, pinned by proveLaw.
+- **Two seams, named in the skill** (SKILL.md): bytes never ride ops — an
+  attachment goes over an HTTP route to your object store, the doc carries
+  the reference; verification/reset email is the mail vendor's side of a
+  `host.method` seam. Both deliberately unvendored.
+
 ## [0.10.1] — 2026-08-06
 
 A review of 0.10.0 as released, and the fixes it found. Almost all of this
