@@ -36,7 +36,8 @@ exactly which files it is.
 ## Commands
 
 ```sh
-bun dev              # the app (writes .epsilon.pid)
+bun dev              # the app on EMBEDDED Postgres (./data); writes .epsilon.pid
+bun run dev:memory   # the in-memory shape preview — no auth, no permits, no doc kit
 bun run stop         # stop it
 bun run check        # tsc --noEmit, strict
 bun test             # the vendored suites — no database needed

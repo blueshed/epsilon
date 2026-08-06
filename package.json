@@ -8,7 +8,8 @@
     "base": "v0.10.0"
   },
   "scripts": {
-    "dev": "bun --hot server.ts",
+    "dev": "EPSILON_PG_DIR=./data bun --hot server.ts",
+    "dev:memory": "bun --hot server.ts",
     "stop": "kill $(cat .epsilon.pid)",
     "check": "bunx tsc --noEmit",
     "epsilon:upgrade": "bun epsilon/upgrade.ts",

@@ -35,7 +35,8 @@ bun run db:up      # compose Postgres on :5599
 bun run test:pg    # durability, fan-out, users (needs db:up)
 bun run check      # tsc --noEmit, strict
 bun run ci         # db up → check + everything → db down
-bun dev            # the app, in-memory (writes .epsilon.pid)
+bun dev            # the app on EMBEDDED Postgres (./data); writes .epsilon.pid
+bun run dev:memory # the in-memory shape preview: no auth, no permits, no doc kit
 bun run stop       # kill the server the pid file points at
 
 bun test ./.scaffold/init.test.ts   # what `bun create` leaves behind (./ — bun test skips dot-dirs)

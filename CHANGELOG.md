@@ -85,6 +85,15 @@ the last five open findings from the 0.8.0 shakedown.
     settings — which is what a view being an ordinary doc buys you.
   - `add a passkey` moved from the always-visible board list onto
     `/settings`, where account things belong.
+- **`bun dev` now starts on embedded Postgres**, not in memory
+  (`EPSILON_PG_DIR=./data`); the preview moves to `bun run dev:memory`. The
+  old default was a trap: in-memory registers exactly one hardcoded doc, so
+  a first run showed a checklist with no auth, no board list, no sharing, no
+  undo, no history and no bylines — most of what the README sells, invisible,
+  with no hint that an env var was the difference. It cost this repo's own
+  author an hour before we worked out what he was looking at. `@electric-sql/pglite`
+  already ships as a devDependency and `data/` is already gitignored, so the
+  new default needs nothing extra.
 - **`onDisconnect` is wired, and presence finally honours it.** DESIGN.md has
   warned since 0.6.0 that "anything rendered as live must hear the drop from
   this hook or it goes on testifying to a state nobody is in" — and the demo
@@ -203,6 +212,16 @@ the last five open findings from the 0.8.0 shakedown.
   title from the doc ROOT on every op, so anyone's card add re-ran it. Fixed
   the 0.9.0 way — narrow to `/name` with `at()`, then read — plus an
   `activeElement` guard, because a *remote* rename still lands while you type.
+- **"use a passkey" raced the autofill request it was cancelling.** Opening
+  the sign-in dialog starts a *conditional* `navigator.credentials.get()`
+  that stays pending for autofill. The button called `conditionalAbort.abort()`
+  and issued a modal `get()` on the next line — but `abort()` does not settle
+  synchronously, so the second request could land while the browser still
+  held the first, which it rejects outright. Intermittent by construction,
+  and it presented as "the passkey button doesn't work". The abort is now a
+  handshake: the in-flight run is tracked and awaited before any modal
+  ceremony, registration included (`create()` collides with a pending `get()`
+  the same way).
 - `pg.ts` cited `DEPLOY.md` for the deploy recommendation. No such file has
   ever existed in this repo; the reference is now README's "Deploying".
 - `ui.ts`'s `mount()` docs still told readers about `bind()` and `when()`,

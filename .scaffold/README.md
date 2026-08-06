@@ -6,7 +6,7 @@ Postgres to pixel. The runtime is **not a dependency**: it's the
 own, with its own tests. Edit it; it's yours.
 
 ```sh
-bun dev            # in-memory preview — two tabs, type in one, watch the other
+bun dev            # embedded Postgres in ./data — two tabs, type in one, watch the other
 bun test           # the runtime's contract (no database needed)
 bun run check      # tsc --noEmit, strict
 ```
@@ -45,13 +45,13 @@ later is a config change (`pg_dump` carries your data):
 
 | You want | Set | You get |
 |---|---|---|
-| To see the shape (first run, demos) | nothing | In-memory **preview**: instant, open access, uuid ids. No auth, no permits; state dies with the process. |
-| A real app, one service | `EPSILON_PG_DIR=./data` | **Embedded Postgres** (PGlite, in-process): the full schema — auth, ownership, sharing, undo — durable on a volume, no database service to run. One app process only. |
+| A real app, one service — **this is what `bun dev` does** | `EPSILON_PG_DIR=./data` | **Embedded Postgres** (PGlite, in-process): the full schema — auth, ownership, sharing, undo, the audit — durable on a volume, no database service to run. One app process only. |
 | Several app processes, or Postgres you already run | `EPSILON_PG_URL=postgres://…` | The same schema on a **Postgres server**, plus LISTEN/NOTIFY fan-out between processes. |
+| Just the shape, nothing kept (`bun run dev:memory`) | nothing | In-memory **preview**: instant, open access, uuid ids. No auth, no permits, no undo or history; state dies with the process. |
 
-Start embedded unless you already run Postgres. In-memory is a preview, not
-a tier — switch on an engine early so auth and permissions are real while
-you build.
+`bun dev` starts embedded, on purpose: in-memory is a preview, not a tier,
+and a first run that hides auth, sharing and the audit log undersells the
+stack you just installed. Reach for `dev:memory` when you want a throwaway.
 
 ```sh
 bun run db:up            # compose Postgres on :5599 (or use your own)

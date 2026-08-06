@@ -184,7 +184,7 @@ const remote = connect(
       if (error === "unauthenticated") {
         if (!authDialog.open) {
           authDialog.showModal();
-          void offerPasskeys();   // autofill offers a passkey IF the browser holds one
+          startPasskeyAutofill();   // autofill offers a passkey IF the browser holds one
         }
         return;
       }
@@ -758,12 +758,33 @@ async function finishAssertion(cred: PublicKeyCredential): Promise<void> {
 // site, so a first run never meets an empty passkey sheet. Aborted when
 // the dialog closes or the explicit button takes over.
 let conditionalAbort: AbortController | null = null;
+/** The in-flight conditional request, so a modal one can WAIT for its abort.
+ *  `abort()` does not settle synchronously: the browser still has a pending
+ *  credentials request for a turn or two, and a second one issued inside that
+ *  window is rejected outright ("a request is already pending"). Awaiting the
+ *  run itself — it resolves when the abort lands — is the honest handshake. */
+let conditionalRun: Promise<void> = Promise.resolve();
+
+/** Abort the autofill request and wait for the browser to actually release
+ *  it, before any modal ceremony. Safe to call when nothing is pending. */
+async function stopPasskeyAutofill(): Promise<void> {
+  conditionalAbort?.abort();
+  conditionalAbort = null;
+  await conditionalRun;
+}
+
+/** Start it, and REMEMBER the run — the tracker is what makes the abort
+ *  awaitable. Never call offerPasskeys() directly. */
+function startPasskeyAutofill(): void {
+  conditionalRun = offerPasskeys();
+}
+
 async function offerPasskeys(): Promise<void> {
   if (!supported) return;
   try {
     if (!(await PublicKeyCredential.isConditionalMediationAvailable?.())) return;
   } catch { return; }
-  conditionalAbort?.abort();
+  await stopPasskeyAutofill();
   const ac = (conditionalAbort = new AbortController());
   try {
     const o = await remote.call<{ challenge: string }>("passkey_login_begin", {});
@@ -775,11 +796,11 @@ async function offerPasskeys(): Promise<void> {
     if (cred) await finishAssertion(cred);
   } catch { /* aborted, dismissed, or superseded — the other doors still work */ }
 }
-authDialog.addEventListener("close", () => conditionalAbort?.abort());
+authDialog.addEventListener("close", () => { void stopPasskeyAutofill(); });
 
 passkeyBtn.onclick = async (e) => {
   e.preventDefault();
-  conditionalAbort?.abort();
+  await stopPasskeyAutofill();
   try {
     // An email in the form narrows to that account; empty = the browser
     // offers whatever resident passkeys it holds for this site.
@@ -802,6 +823,10 @@ passkeyBtn.onclick = async (e) => {
 async function addPasskey(): Promise<void> {
   const btn = addPasskeyBtn;
   if (!btn) return;
+  // Same handshake as the modal sign-in: create() collides with a pending
+  // get() just as get() does. The dialog is normally closed by now, so this
+  // is usually a no-op — but "usually" is what races are made of.
+  await stopPasskeyAutofill();
   try {
     const o = await remote.call<{
       challenge: string;
