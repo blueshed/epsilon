@@ -29,7 +29,53 @@ that a scaffold cannot update is wrong the day after it ships, so
 
 ---
 
+## → 0.10.3
+
+**Take this instead of 0.10.2.** 0.10.2's own instructions below were wrong
+in a way that fails a boot — read this section and skip theirs.
+
+Copy **two** files into your app's `db/` (outside the whitelist, as ever),
+and copy them **together**:
+
+- `db/007-doc-open-explicit.sql` (numbered — drops `doc_open`'s default)
+- `db/fn/doc-kit.sql` (vocabulary — recreates `doc_open`, and adds
+  `doc_commit`'s root-op refusal)
+
+They are ONE change: 007 commits in its own transaction, so taking it alone
+leaves your database with no `doc_open` at all. `migrate()` now refuses to
+finish in that state and says so, rather than booting green and failing at
+the first doc open.
+
+Then grep your own SQL and methods for single-argument `doc_open`:
+
+```sql
+SELECT doc_open('board:1');          -- before: silently the FULL copy
+SELECT doc_open('board:1', NULL);    -- after: the host's copy, said out loud
+SELECT doc_open('board:1', p_user);  -- a user's permitted view
+```
+
+**If you took 0.10.2 already:** delete `db/fn/board.sql` from your app (its
+`pos` support is withdrawn — see the CHANGELOG for why), and either drop the
+`cards.pos` column or leave it, harmless and unread. Nothing else to undo.
+
+**Gateless dynamic in-memory docs are refused on `requireAuth` hosts.** If a
+prefix factory of yours calls `host.doc(name, empty)` with no `{ open }`,
+its opens now fail loudly instead of failing open — including any SIBLING
+doc the same factory hosts. Fit the factory's own permit as the gate (see
+server.ts's presence factory); an intentionally public doc states it:
+`open: () => sig.peek()`.
+
+---
+
 ## → 0.10.2
+
+**Superseded — do not follow this section.** It says to copy "007 and the
+`db/fn/` files", which omits `db/102-card-pos.sql` that `db/fn/board.sql`
+depends on; the boot then fails in the vocabulary pass with `missing
+FROM-clause entry for table "c"` *after* 007 has already dropped
+`doc_open`. Apps that had deleted the demo board failed even earlier, with
+`type cards does not exist`. Use the 0.10.3 section above, which withdraws
+`db/fn/board.sql` entirely.
 
 Two of the three structural fixes need a look from you; the third
 (`doc_commit` refusing root-path ops) is automatic unless a dispatch of

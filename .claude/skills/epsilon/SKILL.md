@@ -135,10 +135,14 @@ users/sessions, reload-worthy for doc tables.
 - **`list()` for collections; a NARROWED lens read in an effect for scalars.**
   `at()` down to the field, then `get()` — an effect over the whole doc is
   correct but re-runs on every write.
-- **Ordering is model data.** Rows get a `pos` column (minted max+1); a
-  MOVE is a SWAP — two pos replaces in one batch. Render each row's flex
-  `order` from its own pos lens; never re-insert DOM. db/102 +
-  db/fn/board.sql + index.ts are the worked pattern (REFERENCE.md).
+- **Ordering: display order is YOURS, shared order is a FIELD.** How rows
+  are arranged on your screen is not shared state — sort what the doc
+  already gave you (`computed()`, or set each row's flex `order` from a
+  lens). If everyone must see ONE arrangement, put a number on the row and
+  write it with an ordinary `replace` op; it is model data like `done`.
+  Never invent a move protocol or a position-minting scheme: concurrent
+  reordering is LWW here, and convergent reordering is the CRDT this stack
+  declines (REFERENCE.md).
 - **Bytes never ride ops; email is your vendor's.** An attachment goes over
   an HTTP route to your object store and the DOC carries the reference
   (url/key) — base64 in an op value works until the 1 MiB frame cap and

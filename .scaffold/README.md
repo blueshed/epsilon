@@ -35,7 +35,9 @@ browser. When you're ready to make this app your own:
 | `app.test.ts` | the board's browser test |
 | the `board:` / `mine:` / `tally:` blocks in `server.ts` | the board's wiring |
 
-Keep `epsilon/`, `db/001`–`006` (epsilon core), and the rest of `server.ts`.
+Keep `epsilon/`, `db/001`–`007` (epsilon core) with `db/fn/doc-kit.sql` and
+`db/fn/session.sql` (core vocabulary — the numbered files and these two are
+one unit), and the rest of `server.ts`.
 
 **`index.html` needs rewriting — it is neither "keep" nor "delete".** Its
 body is board markup, so replace that with your own; but keep the

@@ -586,6 +586,39 @@ describe("dynamic docs — the factory sees the asking identity", () => {
 
     srv.stop(true);
   });
+
+  test("a SIBLING doc the factory also hosts is gate-checked too", async () => {
+    // The hole 0.10.3 closed: the check looked only at the name that was
+    // asked for, so a factory hosting a second doc left it gateless AND
+    // permanent — later opens of the sibling hit the registered-entry fast
+    // path, which never runs a factory and so never reached the check.
+    const h = createHost({ requireAuth: true });
+    h.method("become", (p: { id: number }, ws) => { ws.data ??= {}; ws.data.user = { id: p.id }; return ws.data.user; }, { open: true });
+    h.docs("room:", (name) => {
+      let sig!: Signal<Board>;
+      sig = h.doc(name, { cards: {} } satisfies Board, { open: () => sig.peek() });   // gated
+      h.doc(`${name}:meta`, { cards: {} } satisfies Board);                            // sibling: forgot
+    });
+    const srv = Bun.serve({
+      port: 0,
+      fetch: (req, s) => h.fetch(req, s) ?? new Response("", { status: 404 }),
+      websocket: h.websocket,
+    });
+    h.setServer(srv);
+
+    const errors: string[] = [];
+    const r = connect(`ws://localhost:${srv.port}${h.path}`, {
+      onConnect: async (remote) => { await remote.call("become", { id: 1 }); },
+      onError: (_d, e) => errors.push(e),
+    });
+    remotes.push(r);
+    r.doc("room:a");
+    await until(() => errors.length > 0, 3000);
+    expect(errors[0]).toContain("room:a:meta");        // the SIBLING is named
+    expect(h.names()).not.toContain("room:a:meta");    // and un-hosted, not leaked
+
+    srv.stop(true);
+  });
 });
 
 describe("presence — subscribe hooks drive an ephemeral doc (server.ts's pattern)", () => {

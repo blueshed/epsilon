@@ -5,11 +5,6 @@ export interface Card {
   id?: number | string;
   text: string;
   done?: boolean;
-  /** Ordering is model data (102): minted max+1, moved by replace ops on
-   *  /cards/<id>/pos (a move is a SWAP — two replaces, one batch). Rendered
-   *  as flex `order`; integers as written, double in the schema so an app
-   *  can graduate to fractional midpoints. */
-  pos?: number | null;
   /** Relational tier only: the author, from the echo. */
   created_by?: number | null;
   /** Relational tier only: who last edited this row, and when — the STATE

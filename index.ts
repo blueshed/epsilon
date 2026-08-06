@@ -71,30 +71,6 @@ function hasDocKit(doc: string): Promise<boolean> {
   return docKit;
 }
 
-/**
- * A MOVE is a SWAP: two pos replaces in ONE batch — atomic on the wire, one
- * transaction relationally, echoed and undone together. Position is model
- * data (db/102); the row's flex `order` renders it, so nothing re-inserts
- * DOM. Rows without pos (in-memory mode before any move) fall back to their
- * id, matching the relational backfill.
- */
-function moveCard(
-  cards: OpSignal<Record<string, Card> | null>,
-  id: string,
-  dir: 1 | -1,
-): void {
-  const all = cards.peek() ?? {};
-  const posOf = ([k, c]: [string, Card]) => (c.pos ?? Number(k)) || 0;
-  const sorted = Object.entries(all).sort((a, b) => posOf(a) - posOf(b) || Number(a[0]) - Number(b[0]));
-  const i = sorted.findIndex(([k]) => k === id);
-  const j = i + dir;
-  if (i < 0 || j < 0 || j >= sorted.length) return;
-  cards.apply([
-    { op: "replace", path: `/${sorted[i]![0]}/pos`, value: posOf(sorted[j]!) },
-    { op: "replace", path: `/${sorted[j]![0]}/pos`, value: posOf(sorted[i]!) },
-  ]);
-}
-
 /** One line of board status — a refusal, mostly. Cleared by the next thing
  *  that succeeds; never a dialog, because a refusal is information. */
 function say(msg: string): void {
@@ -345,37 +321,14 @@ function openBoard(name: string): void {
           : `${editor}, ${ago(at)}`;
       });
       done.onchange = () => card.at("/done").set(done.checked);
-      // The row renders WHERE it sits from its own pos lens — a remote move
-      // lands as a pos op and the flexbox reorders; list() touches nothing.
-      const posL = card.at<number | null>("/pos");
-      const up = document.createElement("button");
-      up.textContent = "↑";
-      up.className = "move";
-      up.title = "move up";
-      up.onclick = () => moveCard(cards, id, -1);
-      const down = document.createElement("button");
-      down.textContent = "↓";
-      down.className = "move";
-      down.title = "move down";
-      down.onclick = () => moveCard(cards, id, 1);
-      effect(() => {
-        // In-memory mode is a shape preview: it never mints pos, rows keep
-        // arrival order (order 0), and the move buttons hide — like the rest
-        // of the tier-dependent UI.
-        const p = posL.get();
-        const n = p ?? Number(id);
-        li.style.order = String(Number.isFinite(n) ? Math.round(n) : 0);
-        up.hidden = down.hidden = p == null;
-      });
       const del = document.createElement("button");
       del.textContent = "✕";
-      del.className = "del";   // the move buttons share the row now — name the verb
       del.onclick = async () => {
         if (await confirmAction(`delete "${card.peek().text}"?`)) {
           cards.apply([{ op: "remove", path: `/${id}` }]);
         }
       };
-      li.append(done, " ", label, " ", byline, " ", up, down, " ", del);
+      li.append(done, " ", label, " ", byline, " ", del);
       return li;
     }),
   );

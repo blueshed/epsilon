@@ -89,14 +89,20 @@ site instead of silently serving the permit-free view.
 ## Authoring a doc type (the kit — db/003)
 
 A type is ONE composition query + ONE dispatch function (~30 lines of app
-SQL). Copy `db/100-board.sql` + `db/fn/board.sql` (worked example) or
-rel.test.ts's `todo` type (minimal). 001–099 are epsilon core, frozen once
-released, and `migrate()` warns if you squat below; 100–102 are the
-scaffold's demo, so number your own from **103**. The TABLES need a number
-— the `_open` and `_apply` FUNCTIONS go in `db/fn/`, edited in place
-(100-board.sql defines early bodies inline only because it predates
-`db/fn/` and its hash is already recorded in deployed ledgers; the live
-board vocabulary is `db/fn/board.sql`).
+SQL). Copy `db/100-board.sql` (worked example) or rel.test.ts's `todo`
+type (minimal). 001–099 are epsilon core, frozen once released, and
+`migrate()` warns if you squat below; 100/101 are the scaffold's demo, so
+number your own from **102**. The TABLES need a number — the `_open` and
+`_apply` FUNCTIONS go in `db/fn/`, edited in place (100-board.sql defines
+its own inline only because it predates `db/fn/` and its hash is already
+recorded in deployed ledgers).
+
+**Anything in `db/fn/` must only reference tables that will still exist.**
+The vocabulary is replayed and re-validated on every boot, so a function
+there that reads a table whose migration was deleted fails the boot, not
+the call. That is why the kit's own `db/fn/doc-kit.sql` touches core
+tables only, and why a doc type's vocabulary file lives and dies with its
+numbered tables — delete them together.
 
 - `<x>_open(doc, user)` — one composition query; NULL user = the host,
   full view; NULL result = refused.
@@ -121,15 +127,23 @@ board vocabulary is `db/fn/board.sql`).
   dispatch (recording `remove /steps/<id>` needs a `remove /steps/<id>`
   branch). pglite.test.ts's `recipe` type is the worked cascade+undo
   combination, pinned by proveLaw.
-- **Ordering is model data** (db/102 + db/fn/board.sql, the worked
-  pattern): rows get a `pos` column — minted `max+1` on insert, restored
-  from the value, composed like any field. A MOVE is a SWAP: two pos
-  replaces in ONE batch, atomic in one transaction, both stamped (echoes
-  widen to the row, like `/done`), both undone together. The client
-  renders each row's flex `order` from its own pos lens (index.ts) — no
-  DOM surgery, `list()` stays untouched. Positions are integers as
-  written (CSS `order` takes nothing else); the column is double
-  precision so drag-drop can graduate to fractional midpoints later.
+- **Ordering — two different things, and only one of them is the doc's.**
+  DISPLAY order (newest first, alphabetical, done at the bottom) is a
+  CLIENT concern: nothing is shared, so nothing goes in the document.
+  `list()` renders arrival order; sort what you already hold and set each
+  row's flex `order` from a lens, or sort in a `computed()`. No schema, no
+  ops, no dispatch. SHARED order — everyone sees one manually arranged
+  list — is ordinary MODEL DATA: a number on the row, composed by
+  `<t>_open`, written by an ordinary `replace` op like `done` or `text`.
+  There is nothing for the kit to add, because a doc already carries
+  arbitrary fields. Concurrent reordering resolves LWW like every other
+  field (the log names who moved what, and undo reverts it); if you need
+  reordering that CONVERGES under simultaneous edits, that is the
+  OT/CRDT this stack declines by design — see DESIGN.md's non-goals.
+  Do NOT invent a move protocol: 0.10.2 shipped one (minted positions,
+  swap arithmetic) and 0.10.3 deleted it, because swapping two values
+  preserves the multiset, so two concurrent moves could tie two rows
+  forever. A plain LWW field cannot fail that way.
 - The kit owns locks, refusals (no existence oracle), versioning, audit,
   NOTIFY, undo (`doc_undo`), conflict detection (`doc_touched_since`);
   `doc_drop` deletes a doc whole — and tells the world: it rings the

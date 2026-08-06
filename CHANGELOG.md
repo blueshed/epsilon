@@ -7,6 +7,63 @@ will ship.
 
 ## [Unreleased]
 
+## [0.10.3] — 2026-08-06
+
+An independent multi-agent review of 0.10.2, and the withdrawal it earned.
+0.10.2's three security/grain fixes survived four adversarial lenses intact;
+its **ordering pattern did not**, and its upgrade instructions broke a boot.
+This release removes a mechanism and adds a distinction — see UPGRADING.md,
+whose 0.10.2 section is superseded rather than amended, because following it
+fails.
+
+### Removed
+
+- **The `pos` ordering mechanism is withdrawn whole** — `db/102-card-pos.sql`,
+  `db/fn/board.sql`, the move buttons, the swap arithmetic, `Card.pos`. Two
+  reviewers independently found the wedge: a MOVE expressed as a swap of two
+  values preserves the multiset, so two moves computed from stale copies
+  could tie two rows at one position — and a swap between tied rows writes
+  each the value it already has, so the pair could never be separated again.
+  A third found the same tie reachable through undo.
+  **The bug is not the lesson.** A MECHANISM was invented where a
+  DISTINCTION was needed, and inventing mechanisms is the failure mode this
+  project exists to avoid. DESIGN.md now carries the distinction:
+  - *Display order is a client concern* — nothing shared, nothing in the
+    document; sort what the doc already gave you.
+  - *Shared order is ordinary model data* — a number on the row, written
+    with a `replace` op like `done`. There is nothing for the kit to add.
+  - *Concurrent reordering is LWW*, like every other field; convergent
+    reordering is the OT/CRDT this stack declines by design.
+  SKILL.md and REFERENCE.md say it in those terms, and say plainly: do not
+  invent a move protocol.
+
+### Fixed
+
+- **The 0.10.2 upgrade instructions bricked a boot** (UPGRADING.md,
+  CHANGELOG). They said to copy 007 plus "the `db/fn/` files" — but
+  `db/fn/board.sql` read `cards.pos`, which only `db/102-card-pos.sql`
+  creates, and that file was never mentioned. Since 007 commits in its own
+  transaction before the vocabulary pass, the failure left `doc_open`
+  dropped and the app down, behind an error naming the wrong repair. With
+  `db/fn/board.sql` withdrawn, core vocabulary touches core tables only —
+  pinned by a test that boots an app which deleted the demo entirely.
+- **`migrate()` names the real cause of a `db/fn` failure** (`epsilon/migrate.ts`).
+  A vocabulary file referencing a table no migration creates now says so —
+  and says that a `db/fn` file lives and dies with its numbered file —
+  instead of offering the signature/`DROP FUNCTION` hint, which is the wrong
+  repair. A missing-`DROP` default change gets its own message too.
+- **`migrate()` refuses to finish with 007 applied and `doc_open` missing.**
+  Copying the numbered half without `db/fn/doc-kit.sql` used to boot green
+  and fail at the first doc open, far from the cause.
+- **Sibling docs a factory hosts are gate-checked too** (`epsilon/doc.ts`).
+  0.10.2's gateless-doc refusal inspected only the name that was asked for,
+  so a factory hosting a second doc left that one ungated *and* permanently
+  hosted (never marked dynamic, so never evicted). Both closed.
+- Stale prose corrected where it now contradicted the schema: `DESIGN.md`'s
+  NULL-user rule and law description, `epsilon/law.ts`'s header, the
+  scaffold's core-file range (`db/001`–`007` plus the two core `db/fn`
+  files).
+
 ## [0.10.2] — 2026-08-06
 
 Grain hardening: the 2026-08 architecture review found three places where
