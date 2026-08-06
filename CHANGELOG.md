@@ -41,6 +41,33 @@ the last five open findings from the 0.8.0 shakedown.
   noticed by a sweep — so they were re-homed onto a relational board rather
   than deleted.
 
+### Added
+
+- **The demo shows the doc kit at last.** `db/003-doc-kit.sql` is described
+  as "locking, audit, undo, history" and the README sells undo and the audit
+  as headline knowns — and none of it had a single pixel. Three gaps, all in
+  the same half of the database:
+  - **Row stamps.** `card_json` puts `created_by`, `updated_by` and
+    `updated_at` on **every echo**, and `types.ts` declared all three, but
+    nothing ever read them — `git log -S updated_by -- index.ts` is empty.
+    The column's own comment calls it *"the badge"*; the badge was never
+    built. Each card now carries a byline, resolved through the board's own
+    live `members` map (a lookup, not a fetch) and hidden rather than showing
+    a bare id for someone it cannot name.
+  - **Undo.** `pgUndo` was wired in `server.ts` and reachable over the wire;
+    nothing called it. There is now an undo button, and a refusal ("someone
+    wrote after you") is shown rather than swallowed — the refusal is the
+    interesting part.
+  - **History.** Same story for `pgHistory`. A toggle reads the audit back,
+    newest first, each writer named at read time.
+
+  All three are proven in a real browser by `app.test.ts`, not only at the
+  SQL and wire level where `rel.test.ts` already had them covered — which is
+  why the gap survived six releases with every suite green.
+- The kit controls hide themselves in in-memory mode, where `server.ts` wires
+  neither adapter: one capability probe per session, and any refusal OTHER
+  than "unknown method" still counts as present.
+
 ### Changed
 
 - **`bun create` now leaves an app, not a copy of this repo.** The

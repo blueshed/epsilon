@@ -28,11 +28,92 @@ function el<K extends keyof HTMLElementTagNameMap>(
   return n;
 }
 
+/** How long ago, in the roughest useful unit. The stamp is a timestamptz
+ *  string from the echo — never parsed on the server, never re-fetched. */
+function ago(at: string): string {
+  const s = Math.max(0, (Date.now() - new Date(at).getTime()) / 1000);
+  if (s < 45) return "just now";
+  const [n, unit] =
+    s < 3600 ? [s / 60, "m"] :
+    s < 86400 ? [s / 3600, "h"] :
+    [s / 86400, "d"];
+  return `${Math.round(n)}${unit} ago`;
+}
+
+/** A stamp's display name. The board's OWN members map is already composed
+ *  and live on the doc, so this is a lookup, not a fetch. An id it can't
+ *  resolve — the owner, who has no member row — renders as nothing rather
+ *  than a bare "#4": a demo shouldn't teach leaking internal ids. */
+function stampName(
+  uid: number | null | undefined,
+  members: Record<string, Member> | null | undefined,
+): string {
+  if (uid == null) return "";
+  if (mineFor != null && String(uid) === String(mineFor)) return "you";
+  return members?.[String(uid)]?.name ?? "";
+}
+
+/**
+ * Undo and history are doc-kit verbs of the RELATIONAL tier: `server.ts`
+ * wires `pgUndo`/`pgHistory` only when an engine is set. In-memory mode — a
+ * shape preview, not a tier — has neither, and offering a button that can
+ * only answer "unknown method" is worse than not offering it.
+ *
+ * So: one probe per session, not per board. Any OTHER refusal (a permit, a
+ * missing board) still proves the method is there — only the host's own
+ * "unknown method" hides the controls.
+ */
+let docKit: Promise<boolean> | null = null;
+function hasDocKit(doc: string): Promise<boolean> {
+  docKit ??= remote.call("history", { doc, limit: 1 })
+    .then(() => true)
+    .catch((err) => !/unknown method/i.test(String(err instanceof Error ? err.message : err)));
+  return docKit;
+}
+
+/** One line of board status — an undo refusal, mostly. Cleared by the next
+ *  thing that succeeds; never a dialog, because a refusal is information. */
+function say(msg: string): void {
+  boardMsg.textContent = msg;
+}
+
+interface HistoryEntry {
+  v: number;
+  at: string;
+  by: number | null;
+  /** Joined at READ time, so someone who has since left is still named. */
+  name: string | null;
+  ops: { op: string; path: string }[];
+}
+
+/** The audit, read back. Gated in SQL by the doc's own permit, so this can
+ *  never be a side door into a board you may not open. */
+async function loadHistory(doc: string): Promise<void> {
+  historyPanel.replaceChildren(el("li", {}, "…"));
+  try {
+    const rows = await remote.call<HistoryEntry[]>("history", { doc, limit: 20 });
+    historyPanel.replaceChildren(
+      ...(rows.length
+        ? rows.map((h) =>
+            el("li", {},
+              el("span", {}, `${h.name ?? "someone"} · ${h.ops.map((o) => `${o.op} ${o.path}`).join(", ")}`),
+              el("small", { class: "byline" }, `v${h.v} · ${ago(h.at)}`)))
+        : [el("li", {}, "nothing yet.")]),
+    );
+  } catch (err) {
+    historyPanel.replaceChildren(el("li", {}, String(err instanceof Error ? err.message : err)));
+  }
+}
+
 // The board's own elements, rebuilt per visit by boardView() below.
 // Held as refs, not looked up: routes() appends the handler's fragment AFTER
 // the handler returns, so a getElementById inside it would find nothing.
 let boardName!: HTMLElement;
 let boardBack!: HTMLButtonElement;
+let undoBtn!: HTMLButtonElement;
+let historyBtn!: HTMLButtonElement;
+let historyPanel!: HTMLElement;
+let boardMsg!: HTMLElement;
 let log!: HTMLElement;
 let share!: HTMLElement;
 let membersUl!: HTMLElement;
@@ -86,6 +167,12 @@ const remote = connect(
 );
 
 // --- the board on screen ---------------------------------------------------
+
+// Who we are, once an auth method vouches for the socket — read by
+// stampName() to say "you". Declared HERE, above every render path, not
+// beside afterAuth(): a `let` in the auth section is in its temporal dead
+// zone while routes() builds the first board during module evaluation.
+let mineFor: number | string | null = null;
 
 let disposeBoard: Dispose | null = null;
 let boardDoc: DocHandle<Board> | null = null;
@@ -153,6 +240,30 @@ function openBoard(name: string): void {
         label.style.textDecoration = d ? "line-through" : "";
       });
       effect(() => { label.textContent = textL.get() ?? ""; });
+      // The row stamps, which card_json puts on EVERY echo (db/100-board.sql).
+      // Nothing else in the app reads them, so without this the schema is
+      // sending three fields into the void. Each is its own lens, so a card's
+      // byline re-renders when that card is edited — not when any card is.
+      const byline = document.createElement("small");
+      byline.className = "byline";
+      const createdByL = card.at<number | null>("/created_by");
+      const updatedByL = card.at<number | null>("/updated_by");
+      const updatedAtL = card.at<string | null>("/updated_at");
+      effect(() => {
+        const roster = members.get();
+        const author = stampName(createdByL.get(), roster);
+        const editor = stampName(updatedByL.get(), roster);
+        const at = updatedAtL.get();
+        // board_apply stamps updated_* on the INSERT too, so a fresh card has
+        // author === editor. Saying "added by you · edited by you" of a card
+        // nobody has touched would be noise, so the two collapse into one
+        // name; they only split once someone else has been in.
+        byline.textContent =
+          !at ? (author ? `added by ${author}` : "")
+          : !editor ? `edited ${ago(at)}`
+          : author && author !== editor ? `added by ${author} · edited by ${editor}, ${ago(at)}`
+          : `${editor}, ${ago(at)}`;
+      });
       done.onchange = () => card.at("/done").set(done.checked);
       const del = document.createElement("button");
       del.textContent = "✕";
@@ -161,7 +272,7 @@ function openBoard(name: string): void {
           cards.apply([{ op: "remove", path: `/${id}` }]);
         }
       };
-      li.append(done, " ", label, " ", del);
+      li.append(done, " ", label, " ", byline, " ", del);
       return li;
     }),
   );
@@ -183,6 +294,41 @@ function openBoard(name: string): void {
     }),
   );
   disposeBoard = popDisposeScope();
+
+  // Undo — the other half of the doc kit. doc_ops stores each write's inverse
+  // (003), so this is a call, not a client-side stack: it reverts YOUR last
+  // write and REFUSES, never clobbers, when someone wrote after you. The
+  // refusal is the interesting part, so it is shown rather than swallowed.
+  undoBtn.onclick = async () => {
+    undoBtn.disabled = true;
+    try {
+      await remote.call("undo", { doc: name });
+      say("");
+    } catch (err) {
+      say(String(err instanceof Error ? err.message : err).replace(/^Error:\s*/, ""));
+    } finally {
+      undoBtn.disabled = false;
+      if (!historyPanel.hidden) loadHistory(name);
+    }
+  };
+
+  // History — the SAME table the undo log lives in, read back through the
+  // doc's own permit. A paged read, not a doc: it has no live claim to make,
+  // so it loads when opened and after a write of ours changes it.
+  historyBtn.onclick = () => {
+    historyPanel.hidden = !historyPanel.hidden;
+    historyBtn.textContent = historyPanel.hidden ? "history" : "hide history";
+    if (!historyPanel.hidden) loadHistory(name);
+  };
+  historyPanel.hidden = true;
+  historyBtn.textContent = "history";
+  say("");
+  // Hidden until the server proves it has the kit — see hasDocKit(). The
+  // shell outlives a board switch, so setting these late is safe.
+  undoBtn.hidden = historyBtn.hidden = true;
+  void hasDocKit(name).then((ok) => {
+    undoBtn.hidden = historyBtn.hidden = !ok;
+  });
 
   memberForm.onsubmit = (e) => {
     e.preventDefault();
@@ -225,6 +371,10 @@ function openBoard(name: string): void {
 function boardView(params$: Signal<Record<string, string>>): Node {
   boardBack = el("button", { id: "board-back", hidden: "" }, "←");
   boardName = el("h2", { id: "board-name" });
+  undoBtn = el("button", { id: "undo", title: "revert your last write" }, "undo");
+  historyBtn = el("button", { id: "history-toggle" }, "history");
+  historyPanel = el("ul", { id: "history", hidden: "" });
+  boardMsg = el("p", { id: "board-msg" });
   who = el("p", { id: "who" });
   log = el("ul", { id: "log" });
   membersUl = el("ul", { id: "members" });
@@ -241,10 +391,12 @@ function boardView(params$: Signal<Record<string, string>>): Node {
 
   const frag = document.createDocumentFragment();
   frag.append(
-    el("div", { id: "board-header" }, boardBack, boardName),
+    el("div", { id: "board-header" }, boardBack, boardName, undoBtn, historyBtn),
     who,
+    boardMsg,
     cardForm,
     log,
+    historyPanel,
     share,
   );
 
@@ -342,8 +494,6 @@ function showMine(userId: number | string): void {
 }
 
 // --- auth ------------------------------------------------------------------
-
-let mineFor: number | string | null = null;
 
 function afterAuth(user: { id: number | string }): void {
   authDialog.close();

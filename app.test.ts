@@ -48,6 +48,14 @@ describe("the app, end to end", () => {
     );
     expect(who).toContain("here:");
 
+    // In-memory is a shape PREVIEW: server.ts wires pgUndo/pgHistory only
+    // behind an engine, so the doc-kit controls stay hidden rather than
+    // offering a button that can only answer "unknown method". The probe has
+    // had its round trip by now — the card above needed one. (The postgres
+    // test asserts the other side: there, #undo IS revealed.)
+    expect(await view.evaluate<boolean>("document.querySelector('#undo').hidden")).toBe(true);
+    expect(await view.evaluate<boolean>("document.querySelector('#history-toggle').hidden")).toBe(true);
+
     // The router, in a real browser. A cold load resolves to the shared
     // board before first paint — no placeholder flash, because the hash is
     // set before routes() reads it.
@@ -199,6 +207,40 @@ describe("the app, end to end", () => {
       () => view.evaluate<string>("document.querySelector('#tally').textContent"),
       (t) => t.includes("1 done"),
     );
+
+    // --- the doc kit, on screen (003) --------------------------------------
+    // The stamps: card_json puts created_by/updated_by/updated_at on every
+    // echo, and the byline is the only thing that reads them. The checkbox
+    // above was an edit by us, so it resolves to "you" through the members
+    // map — no lookup, no fetch.
+    await waitFor(
+      () => view.evaluate<string>("document.querySelector('#log li .byline').textContent"),
+      (t) => t.startsWith("you, "),
+    );
+
+    // Undo: doc_ops holds each write's inverse, so the /done edit reverts
+    // through board_apply itself — there is no client-side stack to drift.
+    expect(await view.evaluate<boolean>("document.querySelector('#undo').hidden")).toBe(false);
+    await view.click("#undo");
+    await waitFor(
+      async () => (await db`SELECT done FROM cards WHERE board_id = ${myBoard.id}`)[0]?.done as boolean,
+      (d) => d === false,
+    );
+    await waitFor(
+      () => view.evaluate<string>("document.querySelector('#tally').textContent"),
+      (t) => t.includes("0 done"),
+    );
+
+    // History: the SAME table, read back through the doc's own permit —
+    // newest first, the writer named at read time, paths resolved.
+    await view.click("#history-toggle");
+    await waitFor(
+      () => view.evaluate<string>("document.querySelector('#history').textContent"),
+      (t) => t.includes("Pete") && t.includes("/cards/"),
+    );
+    await view.click("#history-toggle");
+    expect(await view.evaluate<boolean>("document.querySelector('#history').hidden")).toBe(true);
+
     // ✕ → a confirm dialog (not window.confirm() — Bun's WebView can't
     // drive a browser-chrome dialog, only a DOM one). Cancel changes nothing.
     await view.click("#log li button");

@@ -62,8 +62,10 @@ host: start `bun server.ts`, healthcheck `/`, a volume behind
 - [`db/`](db/) — your schema: numbered migrations, applied at boot, forward-only — and [`db/fn/`](db/fn/), your stored functions, replayed every boot and **edited in place** (`CREATE OR REPLACE` is idempotent; hash-locking it only forces a copy per edit). `003-doc-kit.sql` is the reusable skeleton of a relational doc type (locking, the audit, undo, history); `100-board.sql` is the worked example — tables, composition, transactional writes, ownership. Number your own migrations from 100 up: 001–099 are epsilon core, frozen once released, so an upgrade never collides with your files.
 
 A scaffold arrives as a **working multi-user kanban board**, so nothing here
-is theoretical — and it is yours to delete the moment the app has its own
-doc type. The scaffold's README says exactly which files are the demo.
+is theoretical: every known above is on screen — sharing, presence, the
+`tally:` view, and the doc kit's undo, audit trail and per-row "who touched
+this last". It is yours to delete the moment the app has its own doc type;
+the scaffold's README says exactly which files are the demo.
 
 ```sh
 bun run db:up            # compose Postgres (or use your own)
