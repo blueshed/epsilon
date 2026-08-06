@@ -29,7 +29,7 @@ that a scaffold cannot update is wrong the day after it ships, so
 
 ---
 
-## → Unreleased (grain hardening)
+## → 0.10.2
 
 Two of the three structural fixes need a look from you; the third
 (`doc_commit` refusing root-path ops) is automatic unless a dispatch of

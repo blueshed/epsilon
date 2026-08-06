@@ -7,6 +7,8 @@ will ship.
 
 ## [Unreleased]
 
+## [0.10.2] — 2026-08-06
+
 Grain hardening: the 2026-08 architecture review found three places where
 the cheap path and the correct path still diverged and only prose stood
 guard. All three are now structural, and the two worked patterns the review
