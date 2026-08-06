@@ -40,7 +40,8 @@ bun dev              # the app on EMBEDDED Postgres (./data); writes .epsilon.pi
 bun run dev:memory   # the in-memory shape preview — no auth, no permits, no doc kit
 bun run stop         # stop it
 bun run check        # tsc --noEmit, strict
-bun test             # the vendored suites — no database needed
+bun test             # everything; suites needing a service skip and say why
+bun run test         # the curated no-service list
 bun run test:pglite  # the relational tier on embedded Postgres — no database needed
 bun run db:up        # compose Postgres on :5599, for test:pg
 bun run test:pg      # durability, fan-out, users

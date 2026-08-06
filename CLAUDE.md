@@ -29,7 +29,8 @@ schema-native users. Merges the ideas of `../delta` and `../railroad`.
 ## Commands
 
 ```sh
-bun test           # unit + wire + DOM suites (no DB needed)
+bun test           # EVERYTHING; suites needing pg/a browser skip and explain
+bun run test       # the curated no-service list (unit + wire + DOM)
 bun run test:pglite  # the relational tier on EMBEDDED Postgres (no DB needed)
 bun run db:up      # compose Postgres on :5599
 bun run test:pg    # durability, fan-out, users (needs db:up)

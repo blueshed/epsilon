@@ -5,6 +5,7 @@ import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { migrate, migrationFiles, functionFiles } from "./migrate";
+import { pgReachable, skipped } from "./testdb";
 
 // Test db namespaced by app (package.json name) — see pg.test.ts's note.
 const APP = ((await Bun.file(new URL("../package.json", import.meta.url)).json()).name as string)
@@ -13,11 +14,16 @@ const DB = `${APP}_migrate_test`;
 const ADMIN_URL = "postgres://epsilon:epsilon@localhost:5599/epsilon";
 const PG_URL = process.env.EPSILON_TEST_PG_URL ?? `postgres://epsilon:epsilon@localhost:5599/${DB}`;
 
+// Bare `bun test` runs this file too. Ask before assuming.
+const DB_UP = await pgReachable(ADMIN_URL);
+if (!DB_UP) skipped('migrate.test.ts (the ledger)');
+
 let sql: SQL;
 let dir: string;
 const quiet = { log: () => {} };
 
 beforeAll(async () => {
+  if (!DB_UP) return;   // nothing to set up; the describes are skipped
   if (!process.env.EPSILON_TEST_PG_URL) {
     const admin = new SQL(ADMIN_URL);
     const [exists] = await admin`SELECT 1 FROM pg_database WHERE datname = ${DB}`;
@@ -29,9 +35,13 @@ beforeAll(async () => {
   await sql.unsafe("DROP TABLE IF EXISTS migrations, m_a, m_b, m_c CASCADE");
 });
 
-afterAll(async () => { await sql.end(); });
+afterAll(async () => {
+  if (!DB_UP) return;   // nothing was opened
+  await sql.end();
+});
 
 afterEach(async () => {
+  if (!DB_UP) return;
   await sql.unsafe("DROP TABLE IF EXISTS migrations, m_a, m_b, m_c CASCADE");
   await sql.unsafe("DROP FUNCTION IF EXISTS m_greet(text); DROP FUNCTION IF EXISTS m_shout(text)");
   if (dir) rmSync(dir, { recursive: true, force: true });
@@ -47,7 +57,7 @@ function fixture(files: Record<string, string>): string {
   return dir;
 }
 
-describe("migrate", () => {
+describe.skipIf(!DB_UP)("migrate", () => {
   test("applies in numeric order and records each file", async () => {
     const d = fixture({
       "002-b.sql": "CREATE TABLE m_b (id int);",
@@ -111,7 +121,7 @@ describe("migrate", () => {
 // A function body is NOT a migration: CREATE OR REPLACE is idempotent by
 // construction, so hash-locking it forces a full copy per edit. db/fn is
 // replayed every boot and never recorded.
-describe("db/fn — the vocabulary, edited in place", () => {
+describe.skipIf(!DB_UP)("db/fn — the vocabulary, edited in place", () => {
   test("replays on every boot, and an EDIT just takes effect", async () => {
     const d = fixture({
       "001-a.sql": "CREATE TABLE m_a (id int)",

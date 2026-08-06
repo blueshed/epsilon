@@ -2,10 +2,10 @@
 # suites that need no service — unit/wire/DOM, and the whole relational tier
 # (schema, migrations, durability) on embedded Postgres.
 #
-# Three suites are left out because they need more than a runner gives for
-# free: `test:pg` and `test:migrate` (a Postgres on :5599) and `test:app` (a
-# browser). All are worth adding once the app is real — epsilon's own
-# workflow shows how, service container and all:
+# The suites needing a Postgres on :5599 skip themselves here and say so —
+# there is no service container below. When the app is real, add one and set
+# EPSILON_REQUIRE_DB=1 so a database that fails to start FAILS the build
+# instead of quietly skipping. epsilon's own workflow shows the whole shape:
 # https://github.com/blueshed/epsilon/blob/main/.github/workflows/ci.yml
 name: ci
 

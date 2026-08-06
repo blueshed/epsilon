@@ -4,6 +4,7 @@
 import { describe, test, expect } from "bun:test";
 import { SQL } from "bun";
 import { startServer } from "./server";
+import { pgReachable, skipped } from "./epsilon/testdb";
 
 const DB_DIR = new URL("./db", import.meta.url).pathname;
 
@@ -11,6 +12,12 @@ const DB_DIR = new URL("./db", import.meta.url).pathname;
 const APP = ((await Bun.file(new URL("./package.json", import.meta.url)).json()).name as string)
   .toLowerCase().replace(/[^a-z0-9_]/g, "_").replace(/^(?![a-z_])/, "app_");
 const TEST_DB = `${APP}_test_app`;
+
+// Half of this file needs a Postgres, and bare `bun test` runs it regardless.
+// The in-memory half always runs — it needs nothing but a browser.
+const ADMIN_URL = "postgres://epsilon:epsilon@localhost:5599/epsilon";
+const DB_UP = await pgReachable(ADMIN_URL);
+if (!DB_UP) skipped("app.test.ts's postgres half (auth, tables, audit)");
 
 const waitFor = async <T>(fn: () => Promise<T>, pred: (v: T) => boolean, ms = 4000): Promise<T> => {
   const start = Date.now();
@@ -83,8 +90,7 @@ describe("the app, end to end", () => {
     server.stop(true);
   });
 
-  test("postgres: auth gate → register → card in the TABLE, write in the audit log", async () => {
-    const ADMIN_URL = "postgres://epsilon:epsilon@localhost:5599/epsilon";
+  test.skipIf(!DB_UP)("postgres: auth gate → register → card in the TABLE, write in the audit log", async () => {
     const PG_URL = process.env.EPSILON_TEST_PG_URL ?? `postgres://epsilon:epsilon@localhost:5599/${TEST_DB}`;
     if (!process.env.EPSILON_TEST_PG_URL) {
       const admin = new SQL(ADMIN_URL);

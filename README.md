@@ -9,7 +9,10 @@ cd my-app && bun dev     # two tabs, type in one, watch the other
 
 **There is no library to install.** The runtime is the [`epsilon/`](epsilon/)
 folder in your app — ~3.8k lines of TypeScript you own, with its own tests.
-`bun test` verifies your stack, in your repo, forever. Edit it; it's yours.
+`bun test` verifies your stack, in your repo, forever — bare, with no
+arguments: the suites that need a Postgres or a browser **skip themselves
+and say so** rather than failing on a machine that hasn't got one. Edit the
+runtime; it's yours.
 
 ## The knowns
 
@@ -56,7 +59,7 @@ host: start `bun server.ts`, healthcheck `/`, a volume behind
 
 ## The app (yours, and a demo to delete)
 
-- [`server.ts`](server.ts) — the authority. In-memory out of the box (a shape *preview*: uuid ids, no permits); Postgres — the real implementation, with auth + ownership — via one env var.
+- [`server.ts`](server.ts) — the authority. `bun dev` starts it on embedded Postgres with auth and ownership; `bun run dev:memory` is the shape preview (uuid ids, no permits).
 - [`index.ts`](index.ts) — the pixels. A remote doc is a signal whose writes go over the wire; the echo renders them.
 - [`index.html`](index.html) / [`index.css`](index.css) — Bun serves and bundles them.
 - [`db/`](db/) — your schema: numbered migrations, applied at boot, forward-only — and [`db/fn/`](db/fn/), your stored functions, replayed every boot and **edited in place** (`CREATE OR REPLACE` is idempotent; hash-locking it only forces a copy per edit). `003-doc-kit.sql` is the reusable skeleton of a relational doc type (locking, the audit, undo, history); `100-board.sql` is the worked example — tables, composition, transactional writes, ownership. Number your own migrations from 100 up: 001–099 are epsilon core, frozen once released, so an upgrade never collides with your files.

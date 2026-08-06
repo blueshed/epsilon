@@ -325,7 +325,10 @@ is, for when you want a value in the DOM without an element to hang it on.
 
 ## Testing
 
-- `bun test` (unit/wire/DOM), `bun run test:pglite` (embedded, no server),
+- `bun test` runs EVERY suite; the ones needing a Postgres on :5599 or a
+  browser skip themselves with a line saying how to enable them, so a bare
+  run is always green. `bun run test` is the curated no-service list.
+- `bun run test:pglite` (embedded, no server),
   `bun run test:pg` + `test:app` (need `bun run db:up`), `bun run check`
   (strict tsc), `bun run ci` (everything).
 - Each test file owns its OWN database (`<app>_test_pg`, `_rel`, `_app`,

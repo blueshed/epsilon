@@ -7,7 +7,8 @@ own, with its own tests. Edit it; it's yours.
 
 ```sh
 bun dev            # embedded Postgres in ./data — two tabs, type in one, watch the other
-bun test           # the runtime's contract (no database needed)
+bun test           # everything; DB/browser suites skip themselves and say why
+bun run test       # just the suites that never need a service
 bun run check      # tsc --noEmit, strict
 ```
 
@@ -32,11 +33,11 @@ with your files.
 **Keep `db/100-board.sql` and `db/101-tally.sql` too, for now.** They are the
 demo's schema *and* the fixture the vendored relational suites drive:
 `test:pg` and `test:pglite` call `board_apply` and compose `tally_open` in
-some 360 places. Delete the SQL and `bun test`'s promise — your stack,
-verified in your repo — turns into a red suite. Two small tables are a cheap
-price until you have a doc type of your own and have re-pointed those tests
-at it; `proveLaw` (`epsilon/law.ts`) is how you pin yours, the way
-`epsilon/rel.test.ts` pins the board.
+some 360 places. Delete the SQL and those suites stop with one plain message
+naming the file and your two options — they will not fail mysteriously — but
+they do stop. Two small tables are a cheap price until you have a doc type of
+your own and have re-pointed the tests at it; `proveLaw` (`epsilon/law.ts`)
+is how you pin yours, the way `epsilon/rel.test.ts` pins the board.
 
 ## Choosing an engine
 

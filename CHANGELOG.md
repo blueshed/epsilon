@@ -115,6 +115,27 @@ the last five open findings from the 0.8.0 shakedown.
   remote write. The first two were only in `CHANGELOG.md` and `UPGRADING.md`,
   both of which 0.10.0 stops shipping to scaffolds.
 
+### Fixed (the test suite explains itself)
+
+- **Bare `bun test` failed out of the box.** It is what everyone types, and
+  it discovers every `*.test.ts` — including the five that need a Postgres on
+  :5599 and the one that drives a browser. On a machine without Docker that
+  was **nine failures** of `ERR_POSTGRES_CONNECTION_CLOSED` plus a cascading
+  `TypeError: undefined is not an object (evaluating 'sql.end')`, under a
+  README promising "`bun test` verifies your stack, in your repo, forever".
+  Those suites now ask first (`epsilon/testdb.ts`), skip cleanly, and print
+  one line saying what would have run and how to enable it. Bare `bun test`
+  with no database: **127 pass, 69 skip, 0 fail**. With one: 194 pass.
+- **A skip must never be a silent pass in CI.** `EPSILON_REQUIRE_DB=1` turns
+  an unreachable database into a loud failure instead of a skip, and
+  epsilon's own workflow sets it — a database that fails to come up now
+  fails the build rather than greening it.
+- **Deleting the demo's schema now stops with an explanation.** The
+  relational suites check for `board_apply` after migrating and, when it is
+  gone, raise one message naming `db/100-board.sql`, saying it is the demo's
+  file *and* their fixture, and giving the two ways forward. Previously an
+  app that took the README's advice got seven cryptic failures.
+
 ### Fixed (documentation)
 
 - **The scaffold README told you to delete the demo's schema, which breaks

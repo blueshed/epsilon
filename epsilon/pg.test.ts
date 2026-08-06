@@ -4,6 +4,7 @@ import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { SQL } from "bun";
 import { createHost, connect, type Host, type Remote } from "./doc";
 import { migrate, pgDoc, pgSync, pgAuth } from "./pg";
+import { pgReachable, skipped, hasBoardFixture, NO_FIXTURE } from "./testdb";
 
 // Tests own a SEPARATE database (created on demand) — the suite wipes its
 // schema, and it must never share the app's DB. NAMESPACED BY APP (package.json
@@ -16,6 +17,10 @@ const APP = ((await Bun.file(new URL("../package.json", import.meta.url)).json()
 const DB = `${APP}_test_pg`;
 const ADMIN_URL = "postgres://epsilon:epsilon@localhost:5599/epsilon";
 const PG_URL = process.env.EPSILON_TEST_PG_URL ?? `postgres://epsilon:epsilon@localhost:5599/${DB}`;
+
+// Bare `bun test` runs this file too. Ask before assuming.
+const DB_UP = await pgReachable(ADMIN_URL);
+if (!DB_UP) skipped('pg.test.ts (durability, fan-out, users)');
 const DB_DIR = new URL("../db", import.meta.url).pathname;
 
 async function ensureTestDb(): Promise<void> {
@@ -66,6 +71,7 @@ const until = async (cond: () => boolean | Promise<boolean>, ms = 2000) => {
 };
 
 beforeAll(async () => {
+  if (!DB_UP) return;   // nothing to set up; the describes are skipped
   await ensureTestDb();
   sql = freshSql();
   // Start from NOTHING: released core files are frozen and only guaranteed
@@ -78,9 +84,11 @@ beforeAll(async () => {
   // replays by design, so filter it out rather than asserting an empty
   // result: an app that adopts db/fn would otherwise fail this line.
   expect((await migrate(sql, { dir: DB_DIR })).filter((m) => !m.fn)).toEqual([]);
+  if (!(await hasBoardFixture(sql))) throw new Error(NO_FIXTURE);
 });
 
 afterAll(async () => {
+  if (!DB_UP) return;   // nothing was opened
   for (const stop of stops) stop();
   for (const r of remotes) r.close();
   for (const s of servers) s.stop(true);
@@ -95,7 +103,7 @@ afterAll(async () => {
 // copies with it. What remains here is what rel.test.ts does NOT cover: the
 // POLL path, chosen when `pg` is absent, where a doc's death is noticed by a
 // sweep rather than a doorbell.
-describe("cross-process fan-out — the poll fallback", () => {
+describe.skipIf(!DB_UP)("cross-process fan-out — the poll fallback", () => {
   test("poll fallback sweeps every hosted doc in one query", async () => {
     const a = createHost();
     const c = createHost();
@@ -146,7 +154,7 @@ describe("cross-process fan-out — the poll fallback", () => {
   });
 });
 
-describe("schema-native users", () => {
+describe.skipIf(!DB_UP)("schema-native users", () => {
   test("register → session; wrong password rejects; token authenticates a NEW socket", async () => {
     const host = createHost();
     await pgAuth(host, sql);
@@ -231,7 +239,7 @@ describe("schema-native users", () => {
   });
 });
 
-describe("housekeeping", () => {
+describe.skipIf(!DB_UP)("housekeeping", () => {
   test("epsilon_prune drops old ops and dead sessions, keeps the rest", async () => {
     await sql`INSERT INTO docs (name, v, data) VALUES ('prune:1', 2, '{}'::jsonb)
               ON CONFLICT (name) DO NOTHING`;

@@ -26,6 +26,9 @@ jobs:
           --health-interval 1s
           --health-timeout 3s
           --health-retries 30
+    env:
+      # A database that failed to come up must FAIL this build, not skip it.
+      EPSILON_REQUIRE_DB: "1"
     steps:
       - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2
