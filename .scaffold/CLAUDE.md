@@ -1,73 +1,57 @@
 # CLAUDE.md
 
-An [epsilon](https://github.com/blueshed/epsilon) app. The realtime stack is
-**not a dependency** — `epsilon/` IS the stack, vendored in this repo:
-op-carrying signals, doc sync over one WebSocket, Postgres durability,
-schema-native users. Never add Firebase/Supabase/socket.io/React Query.
+<!-- Replace this line with what this app is. It is the first thing Claude
+     reads, and nobody else can write it for you. -->
+An app built on [epsilon](https://github.com/blueshed/epsilon).
 
-## Layout
+## The stack is already here
+
+Realtime is **not a dependency**: `epsilon/` is the runtime, vendored in this
+repo, and `.claude/skills/epsilon/SKILL.md` is how to use it — read it before
+any shared-state, live, multi-user or collaborative work. Its `REFERENCE.md`
+is the deep manual. Never add Firebase/Supabase/socket.io/React Query.
+
+**Nothing about how the runtime works belongs in this file.** The skill and
+`epsilon/` are what `bun run epsilon:upgrade` keeps current; a copy of their
+rules here would freeze on the day you scaffolded and quietly start lying.
+This file is for *your app*.
+
+## This app
 
 - `server.ts` — the authority: which docs exist, who may open them.
-- `index.ts`, `index.html`, `index.css`, `types.ts` — the app, at project
-  root (bun-route convention: root route = `index.html` + `index.css` +
-  `index.ts`). `app.test.ts` drives the real app in `Bun.WebView`.
-- `epsilon/` — the runtime + its tests. Tests are the contract;
-  `epsilon/DESIGN.md` is the why. Upgrade it with `bun run epsilon:upgrade`.
-- `db/` — numbered migrations, applied at boot, forward-only, hash-recorded.
-  `001`–`099` are **epsilon core and frozen** — never edit them; adopt a new
-  one by copying that file. Your doc types start at **100**.
-- `db/fn/` — stored functions: unnumbered, NOT hash-recorded, replayed every
-  boot in one transaction. Edit in place. A signature change needs
-  `DROP FUNCTION` in a numbered file first.
+- `index.ts` / `index.html` / `index.css` / `types.ts` — the app, at project root.
+- `app.test.ts` — the app driven in a real browser.
+- `db/` — your migrations, numbered from **100**. `001`–`099` are epsilon's
+  and frozen. Stored functions live in `db/fn/`, edited in place.
 
-The board (`index.ts`, `index.css`, `types.ts`, `app.test.ts`,
-`db/100-board.sql`, `db/101-tally.sql`, and the `board:`/`mine:`/`tally:`
-blocks in `server.ts`) is the **scaffold's demo** — the worked example of a
-doc type end to end. Delete it when the app has its own; see README.md.
+The kanban board is the scaffold's **demo** — a worked example of a doc type
+end to end, and yours to delete once this app has its own. README.md lists
+exactly which files it is.
 
-## Rules
+## House rules
 
-- **Bun only** — never npm/npx/node. No build step. Zero runtime deps (`pg`
-  and `@electric-sql/pglite` are optional dev-time).
-- **Db-first**: schema is the source of truth; the database mints identity —
-  every tier, server-side. Never invent ids client-side.
-- **Small language**: three verbs (`add`/`replace`/`remove`), JSON-Pointer
-  paths. Never invent verbs.
-- The law: ops are the fast path; recompute-from-state must always be
-  correct on its own.
-- For realtime work, follow `.claude/skills/epsilon/SKILL.md`; its
-  `REFERENCE.md` is the deep manual, read on demand.
-- If you deliberately diverge from upstream `epsilon/`, say so in a "Local
-  divergence" section here — naming the files and the reason. The next
-  upgrade will surface it as a conflict, and that is information.
-- Keep docs and reports SHORT.
+- **Bun only** — never npm/npx/node. No build step.
+- Add your own here. This file is yours; the skill is upstream's.
 
 ## Commands
 
 ```sh
-bun dev              # the app, in-memory (writes .epsilon.pid)
-bun run stop         # kill the server the pid file points at
-bun test             # unit + wire + DOM suites (no DB needed)
-bun run test:pglite  # the relational tier on EMBEDDED Postgres (no DB needed)
-bun run db:up        # compose Postgres on :5599
-bun run test:pg      # durability, fan-out, users (needs db:up)
-bun run test:app     # the real app in a real browser (needs Bun ≥ 1.3.14)
+bun dev              # the app (writes .epsilon.pid)
+bun run stop         # stop it
 bun run check        # tsc --noEmit, strict
-bun run ci           # db up → check + everything → db down
+bun test             # the vendored suites — no database needed
+bun run test:pglite  # the relational tier on embedded Postgres — no database needed
+bun run db:up        # compose Postgres on :5599, for test:pg
+bun run test:pg      # durability, fan-out, users
+bun run test:app     # the real app in a real browser (Bun ≥ 1.3.14)
+bun run ci           # all of it, database up and down
 ```
 
-## Testing in a container with no Docker
+## Local divergence
 
-`db:up` needs Docker. Where there is none but Postgres 16 binaries exist
-(Claude's cloud containers), once per container:
+`epsilon:upgrade` replays upstream's changes over your patches. If you
+deliberately change something in `epsilon/`, record it here — the file and
+the reason — so the next conflict reads as information rather than a
+surprise.
 
-```sh
-su postgres -c "/usr/lib/postgresql/16/bin/initdb -D /var/lib/postgresql/pgdata -A trust -U postgres"
-su postgres -c "/usr/lib/postgresql/16/bin/pg_ctl -D /var/lib/postgresql/pgdata -o '-p 5599 -c listen_addresses=localhost' -l /var/lib/postgresql/pg.log start"
-su postgres -c "/usr/lib/postgresql/16/bin/psql -p 5599 -U postgres -c \"CREATE ROLE epsilon LOGIN PASSWORD 'epsilon' CREATEDB\" -c 'CREATE DATABASE epsilon OWNER epsilon'"
-```
-
-Then `test:pg`, `test:migrate` and `test:app` run against it directly (skip
-`db:up`/`db:down`; after a restart, only the `pg_ctl start` line). If the
-container's Chromium won't sandbox as root, wrap it and point
-`BUN_CHROME_PATH` at the wrapper.
+_(none yet)_

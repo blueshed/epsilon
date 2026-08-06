@@ -82,6 +82,15 @@ the last five open findings from the 0.8.0 shakedown.
     rather than for this repo — what the demo is and which files to delete,
     which engine to pick, where things are — plus a CI workflow that runs
     the suites needing no service.
+  - **The scaffold's `CLAUDE.md` is the app's file, not a trimmed copy of
+    this repo's.** The first attempt swapped the file but not whose it was:
+    it still carried the verbs, the law, db-first, `db/fn`'s rules and the
+    `epsilon/` layout — all of which `SKILL.md` and `REFERENCE.md` already
+    own, and which travel and stay current because the skill is inside the
+    upgrade whitelist. `CLAUDE.md` is not, so those copies would have frozen
+    at scaffold time — the identical trap that stranded root `DESIGN.md`.
+    It now points at the skill for anything about the runtime and otherwise
+    talks about the app, opening with a line the author is asked to replace.
   - `.scaffold/init.test.ts` is the contract, run by this repo's CI. It also
     pins the package.json invariants below, which no script can repair.
 - **`DESIGN.md` → `epsilon/DESIGN.md`, and the runtime's notice →

@@ -12,6 +12,7 @@ schema-native users. Merges the ideas of `../delta` and `../railroad`.
 - `db/fn/` — stored functions: unnumbered, NOT hash-recorded, replayed every boot in one transaction. Edit in place. A signature change needs `DROP FUNCTION` in a numbered file first.
 - `db/` — numbered migrations: 001–002 core (doc registry, auth), 003 the doc kit (locking, audit, undo, history), 004 housekeeping, 005 gone. 001–099 are CORE and FROZEN once released — new core behavior is the next number, never an edit. The app's doc types start at 100 (`100-board.sql`). See `epsilon/DESIGN.md` "The doc kit" and "Upgrades".
 - `.scaffold/` — **template only, deleted by `bun create`**: the app-facing `README.md`, `CLAUDE.md` and CI that replace this repo's own, plus `init.ts` (the `bun-create.postinstall` hook) and its test. Anything a scaffolded app should NOT inherit is removed there — see its `REMOVE` list.
+  - `.scaffold/CLAUDE.md` is **the app's file, not a trimmed copy of this one**. `CLAUDE.md` is outside the upgrade whitelist, so any runtime rule written there freezes at scaffold time — the same trap that stranded `DESIGN.md` at root. How the runtime works goes in `.claude/skills/epsilon/`, which travels and stays current; the scaffold's CLAUDE.md points at it and otherwise talks about the app. The same test applies to `.scaffold/README.md`.
 
 ## Rules
 
