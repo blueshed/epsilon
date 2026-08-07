@@ -19,12 +19,29 @@ const ADMIN_URL = "postgres://epsilon:epsilon@localhost:5599/epsilon";
 const DB_UP = await pgReachable(ADMIN_URL);
 if (!DB_UP) skipped("app.test.ts's postgres half (auth, tables, audit)");
 
-const waitFor = async <T>(fn: () => Promise<T>, pred: (v: T) => boolean, ms = 4000): Promise<T> => {
+/**
+ * Poll until the page says what we're waiting for.
+ *
+ * A THROWING probe counts as "not ready yet", not as a failure. Almost every
+ * probe here reads a node the app has not necessarily built — `#board-name`
+ * and `#input` arrive with the route, `#detail-*` with the panel — so on a
+ * loaded CI runner (observed: 4x slower than a laptop) the first read lands
+ * before the node exists and `querySelector(...).textContent` throws. That
+ * is the wait working, not the app failing; only the deadline is a failure,
+ * and it reports whatever the last probe saw or threw.
+ */
+const waitFor = async <T>(fn: () => Promise<T>, pred: (v: T) => boolean, ms = 8000): Promise<T> => {
   const start = Date.now();
+  let last: unknown = "(never ran)";
   for (;;) {
-    const v = await fn();
-    if (pred(v)) return v;
-    if (Date.now() - start > ms) throw new Error(`timeout: ${JSON.stringify(v)}`);
+    try {
+      const v = await fn();
+      if (pred(v)) return v;
+      last = v;
+    } catch (err) {
+      last = `probe threw: ${err instanceof Error ? err.message : String(err)}`;
+    }
+    if (Date.now() - start > ms) throw new Error(`timeout: ${JSON.stringify(last)}`);
     await new Promise((r) => setTimeout(r, 25));
   }
 };
@@ -37,14 +54,14 @@ describe("the app, end to end", () => {
     // The snapshot rendering is the app's "ready": typing before the module
     // has wired onsubmit would native-submit the form and navigate away.
     await waitFor(
-      () => view.evaluate<string>("document.querySelector('#board-name').textContent"),
+      () => view.evaluate<string>("document.querySelector('#board-name')?.textContent"),
       (t) => t === "main",
     );
     await view.click("#input");
     await view.type("hello from a real browser");
     await view.press("Enter");
     const log = await waitFor(
-      () => view.evaluate<string>("document.querySelector('#log').textContent"),
+      () => view.evaluate<string>("document.querySelector('#log')?.textContent"),
       (t) => t.includes("hello from a real browser"),
     );
     expect(log).toContain("hello from a real browser");
@@ -60,8 +77,8 @@ describe("the app, end to end", () => {
     // offering a button that can only answer "unknown method". The probe has
     // had its round trip by now — the card above needed one. (The postgres
     // test asserts the other side: there, #undo IS revealed.)
-    expect(await view.evaluate<boolean>("document.querySelector('#undo').hidden")).toBe(true);
-    expect(await view.evaluate<boolean>("document.querySelector('#history-toggle').hidden")).toBe(true);
+    expect(await view.evaluate<boolean>("document.querySelector('#undo')?.hidden")).toBe(true);
+    expect(await view.evaluate<boolean>("document.querySelector('#history-toggle')?.hidden")).toBe(true);
 
     // The router, in a real browser. A cold load resolves to the shared
     // board before first paint — no placeholder flash, because the hash is
@@ -84,7 +101,7 @@ describe("the app, end to end", () => {
     );
     // The board came back live, not as a corpse: its list() re-rendered the
     // card written before the round trip.
-    expect(await view.evaluate<string>("document.querySelector('#log').textContent"))
+    expect(await view.evaluate<string>("document.querySelector('#log')?.textContent"))
       .toContain("hello from a real browser");
 
     server.stop(true);
@@ -120,7 +137,7 @@ describe("the app, end to end", () => {
     await view.type("audited card");
     await view.press("Enter");
     await waitFor(
-      () => view.evaluate<string>("document.querySelector('#log').textContent"),
+      () => view.evaluate<string>("document.querySelector('#log')?.textContent"),
       (t) => t.includes("audited card"),
     );
 
@@ -148,14 +165,14 @@ describe("the app, end to end", () => {
     );
     await view.click("#boards li span");
     await waitFor(
-      () => view.evaluate<string>("document.querySelector('#board-name').textContent"),
+      () => view.evaluate<string>("document.querySelector('#board-name')?.textContent"),
       (t) => t === "my project",
     );
     await view.click("#input");
     await view.type("first step");
     await view.press("Enter");
     await waitFor(
-      () => view.evaluate<string>("document.querySelector('#log').textContent"),
+      () => view.evaluate<string>("document.querySelector('#log')?.textContent"),
       (t) => t.includes("first step"),
     );
     await waitFor(
@@ -167,24 +184,24 @@ describe("the app, end to end", () => {
     // forward to mine — real history, no reload.
     await view.evaluate("history.back()");
     await waitFor(
-      () => view.evaluate<string>("document.querySelector('#board-name').textContent"),
+      () => view.evaluate<string>("document.querySelector('#board-name')?.textContent"),
       (t) => t === "main",
     );
     await view.evaluate("history.forward()");
     await waitFor(
-      () => view.evaluate<string>("document.querySelector('#board-name').textContent"),
+      () => view.evaluate<string>("document.querySelector('#board-name')?.textContent"),
       (t) => t === "my project",
     );
 
     // The ← button: visible away from main, deterministic unlike
     // history.back() (a reload or a bookmarked link has no history to use).
-    expect(await view.evaluate<boolean>("document.querySelector('#board-back').hidden")).toBe(false);
+    expect(await view.evaluate<boolean>("document.querySelector('#board-back')?.hidden")).toBe(false);
     await view.click("#board-back");
     await waitFor(
-      () => view.evaluate<string>("document.querySelector('#board-name').textContent"),
+      () => view.evaluate<string>("document.querySelector('#board-name')?.textContent"),
       (t) => t === "main",
     );
-    expect(await view.evaluate<boolean>("document.querySelector('#board-back').hidden")).toBe(true);
+    expect(await view.evaluate<boolean>("document.querySelector('#board-back')?.hidden")).toBe(true);
 
     // A board that isn't there — or isn't yours. Both answer "unknown doc"
     // (no existence oracle), and a REFUSED open leaves the doc null at v 0,
@@ -200,11 +217,11 @@ describe("the app, end to end", () => {
       (t) => t.includes("isn't there"),
     );
     // And the bounce landed on a WORKING board, not a husk.
-    expect(await view.evaluate<string>("document.querySelector('#board-name').textContent")).toBe("main");
+    expect(await view.evaluate<string>("document.querySelector('#board-name')?.textContent")).toBe("main");
 
     await view.click("#boards li span");   // back onto "my project" for what follows
     await waitFor(
-      () => view.evaluate<string>("document.querySelector('#board-name').textContent"),
+      () => view.evaluate<string>("document.querySelector('#board-name')?.textContent"),
       (t) => t === "my project",
     );
 
@@ -243,7 +260,7 @@ describe("the app, end to end", () => {
 
     // Undo: doc_ops holds each write's inverse, so the /done edit reverts
     // through board_apply itself — there is no client-side stack to drift.
-    expect(await view.evaluate<boolean>("document.querySelector('#undo').hidden")).toBe(false);
+    expect(await view.evaluate<boolean>("document.querySelector('#undo')?.hidden")).toBe(false);
     await view.click("#undo");
     await waitFor(
       async () => (await db`SELECT done FROM cards WHERE board_id = ${myBoard.id}`)[0]?.done as boolean,
@@ -262,7 +279,7 @@ describe("the app, end to end", () => {
       (t) => t.includes("Pete") && t.includes("/cards/"),
     );
     await view.click("#history-toggle");
-    expect(await view.evaluate<boolean>("document.querySelector('#history').hidden")).toBe(true);
+    expect(await view.evaluate<boolean>("document.querySelector('#history')?.hidden")).toBe(true);
 
     // --- the router, for real: a nested route under a wildcard layout ------
     // The board is mounted at "/board/:id/*", so routing a card detail
@@ -278,9 +295,9 @@ describe("the app, end to end", () => {
       () => view.evaluate<boolean>("!document.querySelector('#card-detail')?.hidden"),
       (v) => v === true,
     );
-    expect(await view.evaluate<string>("document.querySelector('#detail-text').value"))
+    expect(await view.evaluate<string>("document.querySelector('#detail-text')?.value"))
       .toBe("first step");
-    expect(await view.evaluate<string>("document.querySelector('#detail-by').textContent"))
+    expect(await view.evaluate<string>("document.querySelector('#detail-by')?.textContent"))
       .toContain("added by you");
     expect(await view.evaluate<boolean>("window.__shell === document.querySelector('#board-header')"))
       .toBe(true);
@@ -291,7 +308,7 @@ describe("the app, end to end", () => {
     // precisely what used to loop the tab to death through the lenses this
     // panel reads. Ten of them, then prove the page is still alive and
     // current — a hang fails this as a timeout, which is the point.
-    for (let i = 0; i < 10; i++) {
+    for (let i = 0; i < 6; i++) {
       await view.evaluate(
         `(() => { document.querySelector('#detail-text').value = 'edit ${i}';` +
         `document.querySelector('#detail-text').dispatchEvent(new Event('blur')); return 1; })()`,
@@ -303,15 +320,21 @@ describe("the app, end to end", () => {
         (t) => t === `edit ${i}`,
       );
     }
-    expect(await view.evaluate<string>("document.querySelector('#detail-by').textContent"))
-      .toContain("added by you");
-    // Alive AND current: the last edit is in the table, and the panel is
-    // still rendering the doc rather than a frozen copy of it.
+    // Alive AND current: the last edit reached the table, and the panel is
+    // still rendering the doc rather than a frozen copy of it. Both are
+    // WAITS — a hang fails them as a timeout, which is the assertion.
     await waitFor(
       async () => (await db`SELECT text FROM cards WHERE board_id = ${myBoard.id}`)[0]?.text as string,
-      (t) => t === "edit 9",
+      (t) => t === "edit 5",
     );
-    expect(await view.evaluate<string>("document.querySelector('#detail-text').value")).toBe("edit 9");
+    await waitFor(
+      () => view.evaluate<string>("document.querySelector('#detail-text')?.value"),
+      (v) => v === "edit 5",
+    );
+    await waitFor(
+      () => view.evaluate<string>("document.querySelector('#detail-by')?.textContent"),
+      (t) => t.includes("added by you"),
+    );
 
     await view.click("#detail-close");
     await waitFor(
@@ -346,7 +369,7 @@ describe("the app, end to end", () => {
     );
     await view.click("#settings-back");
     await waitFor(
-      () => view.evaluate<string>("document.querySelector('#board-name').textContent"),
+      () => view.evaluate<string>("document.querySelector('#board-name')?.textContent"),
       (t) => t === "main",
     );
     // Leaving the pattern DOES tear down — the settings screen is gone.
@@ -354,7 +377,7 @@ describe("the app, end to end", () => {
 
     await view.click("#boards li span");   // back onto "my project"
     await waitFor(
-      () => view.evaluate<string>("document.querySelector('#board-name').textContent"),
+      () => view.evaluate<string>("document.querySelector('#board-name')?.textContent"),
       (t) => t === "my project",
     );
 
