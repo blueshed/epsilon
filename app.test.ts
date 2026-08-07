@@ -216,8 +216,13 @@ describe("the app, end to end", () => {
       () => view.evaluate<string>("document.querySelector('#board-msg').textContent"),
       (t) => t.includes("isn't there"),
     );
-    // And the bounce landed on a WORKING board, not a husk.
-    expect(await view.evaluate<string>("document.querySelector('#board-name')?.textContent")).toBe("main");
+    // And the bounce landed on a WORKING board, not a husk. A WAIT, because
+    // the refusal message is written synchronously by openBoard while the
+    // name arrives with board:1's snapshot — a round trip later.
+    await waitFor(
+      () => view.evaluate<string>("document.querySelector('#board-name')?.textContent"),
+      (t) => t === "main",
+    );
 
     await view.click("#boards li span");   // back onto "my project" for what follows
     await waitFor(
@@ -260,7 +265,11 @@ describe("the app, end to end", () => {
 
     // Undo: doc_ops holds each write's inverse, so the /done edit reverts
     // through board_apply itself — there is no client-side stack to drift.
-    expect(await view.evaluate<boolean>("document.querySelector('#undo')?.hidden")).toBe(false);
+    // The button is revealed by hasDocKit's probe — a round trip — so wait.
+    await waitFor(
+      () => view.evaluate<boolean>("document.querySelector('#undo')?.hidden"),
+      (h) => h === false,
+    );
     await view.click("#undo");
     await waitFor(
       async () => (await db`SELECT done FROM cards WHERE board_id = ${myBoard.id}`)[0]?.done as boolean,
