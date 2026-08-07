@@ -318,7 +318,15 @@ describe("the app, end to end", () => {
       () => view.evaluate<string>("location.hash"),
       (h) => /#\/board\/\d+$/.test(h),
     );
-    expect(await view.evaluate<boolean>("document.querySelector('#card-detail').hidden")).toBe(true);
+    // WAIT for the panel, don't assert it: `location.hash` updates
+    // synchronously but `hashchange` — and therefore the route effect that
+    // hides this — does not fire until a later task (REFERENCE.md's own
+    // sharp edge). Asserting straight after the hash is a race that passes
+    // on a fast machine and fails in CI.
+    await waitFor(
+      () => view.evaluate<boolean>("document.querySelector('#card-detail').hidden"),
+      (h) => h === true,
+    );
     expect(await view.evaluate<boolean>("window.__shell === document.querySelector('#board-header')"))
       .toBe(true);
 
