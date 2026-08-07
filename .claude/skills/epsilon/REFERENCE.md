@@ -111,7 +111,11 @@ site instead of silently serving the permit-free view.
 
 A type is ONE composition query + ONE dispatch function (~30 lines of app
 SQL). Copy `db/100-board.sql` (worked example) or rel.test.ts's `todo`
-type (minimal). 001–099 are epsilon core, frozen once released, and
+type (minimal). A domain modelled in [hjeli](https://github.com/blueshed/hjeli)
+(0.6.0+) can generate its types instead — `hjeli export epsilon <model>
+<this-app>` emits the migration, the wiring, and a proveLaw scaffold per
+type, and names anything it couldn't lower as a custom stub to hand-write
+here. 001–099 are epsilon core, frozen once released, and
 `migrate()` warns if you squat below; 100/101 are the scaffold's demo, so
 number your own from **102**. The TABLES need a number — the `_open` and
 `_apply` FUNCTIONS go in `db/fn/`, edited in place (100-board.sql defines

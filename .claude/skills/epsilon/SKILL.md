@@ -168,6 +168,15 @@ users/sessions, reload-worthy for doc tables.
   batch per dispatch branch, driven over the real wire, checked against
   recompute after every echo (undo and mirrors too). The failure names the
   defect class. rel.test.ts's law describe is the worked call.
+- **Modelled domains can GENERATE their doc types.** If the app's domain is
+  modelled in [hjeli](https://github.com/blueshed/hjeli) (0.6.0+), `hjeli
+  export epsilon <model> <this-app>` emits a numbered db/ migration (tables +
+  `_open`/`_apply` on the doc kit — composition as the permit, inverse ops
+  recorded, mirrors in-transaction, undeclared op paths RAISE), host wiring
+  (`registerModelDocs`), and a proveLaw scaffold per doc type. What it can't
+  lower it names as a custom stub — hand-write those against `db/100-board.sql`,
+  the worked example either way. Generated or hand-written, the law is the
+  same gate.
 - **Auth before docs** on `requireAuth` hosts; re-auth belongs in
   `onConnect` — it runs on every reconnect, before docs re-open.
 - **A method is not a side door.** `host.method(name, fn)` requires a session
