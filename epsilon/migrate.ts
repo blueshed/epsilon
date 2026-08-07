@@ -39,6 +39,10 @@ import type { Sql } from "./pg";
 /** Namespace for the boot-time advisory lock (arbitrary, stable). */
 const LOCK_KEY = 8_147_231;
 
+/** The one numbered file whose effect is INCOMPLETE without a db/fn file:
+ *  it drops doc_open so the vocabulary can recreate it without a default. */
+const CORE_DOC_OPEN = "007-doc-open-explicit.sql";
+
 export interface Migration {
   name: string;
   hash: string;
@@ -241,15 +245,47 @@ export async function migrate(
         );
       } catch (err) {
         try { await conn.unsafe("ROLLBACK"); } catch { /* already aborted */ }
-        throw new Error(
-          `[epsilon/migrate] db/fn failed: ${err}\n` +
-            `If this is "cannot change return type" or "cannot change name of input parameter", ` +
+        // Name the likely cause. The generic signature hint used to be the
+        // ONLY advice, and it points at the wrong repair for the two
+        // commonest failures — a vocabulary file outliving its tables, and
+        // a default that needs a numbered DROP (0.10.2 shipped both).
+        const text = String(err);
+        const hint =
+          /does not exist|missing FROM-clause|unknown (column|type)/i.test(text)
+            ? `A db/fn file references a table or column that no migration creates. db/fn is REPLAYED ` +
+              `and re-validated on EVERY boot, so this fails the BOOT, not the call. Either the ` +
+              `numbered file that creates it was deleted (delete its db/fn vocabulary too — they live ` +
+              `and die together), or it has not been copied/applied yet (an upgrade that adds a column ` +
+              `must bring its numbered file along with the db/fn edit).`
+          : /parameter default/i.test(text)
+            ? `CREATE OR REPLACE cannot add or remove a parameter DEFAULT — put ` +
+              `\`DROP FUNCTION IF EXISTS <name>(<old args>);\` in the next NUMBERED file and apply it ` +
+              `in the same boot, then edit db/fn. (Taking a db/fn change without its numbered DROP is ` +
+              `exactly this error.)`
+          : `If this is "cannot change return type" or "cannot change name of input parameter", ` +
             `CREATE OR REPLACE cannot alter a signature — put ` +
-            `\`DROP FUNCTION IF EXISTS <name>(<old args>);\` in the next NUMBERED file, then edit db/fn.`,
-        );
+            `\`DROP FUNCTION IF EXISTS <name>(<old args>);\` in the next NUMBERED file, then edit db/fn.`;
+        throw new Error(`[epsilon/migrate] db/fn failed: ${err}\n${hint}`);
       }
       log(`vocabulary: ${fns.length} file${fns.length === 1 ? "" : "s"} in db/fn`);
       for (const name of fns) ran.push({ name: `fn/${name}`, hash: "", applied: true, fn: true });
+    }
+
+    // The pair check. 007 DROPs doc_open in its own committed transaction and
+    // db/fn recreates it — two files, one boot, and `db/` is outside the
+    // upgrade whitelist, so an app copies them by hand. Copying only the
+    // NUMBERED one boots green and then fails at the first doc open, far from
+    // the cause. Assert the pair landed, once, at the end of the run.
+    if (done.has(CORE_DOC_OPEN) || ran.some((m) => m.name === CORE_DOC_OPEN)) {
+      const [row] = await conn`SELECT to_regprocedure('doc_open(text,bigint)') IS NULL AS missing`;
+      if (row?.missing) {
+        throw new Error(
+          `[epsilon/migrate] ${CORE_DOC_OPEN} has been applied (it DROPs doc_open) but nothing ` +
+            `recreated it — db/fn/doc-kit.sql is missing from this app's db/fn directory.\n` +
+            `They are ONE change: copy db/fn/doc-kit.sql alongside the numbered file. Without it ` +
+            `every doc open fails with "function doc_open(unknown, unknown) does not exist".`,
+        );
+      }
     }
     return ran;
   } finally {

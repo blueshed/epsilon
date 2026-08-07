@@ -5,7 +5,8 @@
  *
  * proveLaw() drives batches through an open client doc over the REAL wire
  * and, after every echo, asserts the client's copy deep-equals
- * doc_open(name) composed fresh from the tables. A dispatch whose op stream
+ * doc_open(name, NULL) composed fresh from the tables — as the host, said
+ * out loud (007). A dispatch whose op stream
  * lies — an FK cascade the log never saw, an echo narrower than what the
  * DML changed, a mirror that skipped — fails HERE, with the defect class
  * named in the error. With `undo` wired it also undoes and redoes every

@@ -314,3 +314,99 @@ describe("the flush scheduler's guarantees (pinned here, not just inherited)", (
     popDisposeScope()();
   });
 });
+
+describe("a lens minted inside an effect is wasteful, never fatal", () => {
+  // The field report that produced this suite (a kanban built on 0.10.2):
+  // "the second or third echo left the tab completely unresponsive — no
+  // error, no warning, no console output: a hang." The demo taught the
+  // shape, and the runtime turned it into an unbounded loop.
+  const rowEcho = (i: number) =>
+    [{ op: "replace" as const, path: "/cards/1", value: { text: `e${i}`, by: 1, at: `t${i}` } }];
+
+  test("one echo re-runs it ONCE — not until the process dies", () => {
+    const doc = signal<any>({ cards: { 1: { text: "a", by: 1, at: "t" } } });
+    const card = doc.at<any>("/cards/1");
+    let runs = 0;
+    pushDisposeScope();
+    effect(() => {
+      // Minted INSIDE, on every run — what the demo's cardDetail did, and
+      // what anyone reading three fields off a row writes first.
+      if (++runs > 100) throw new Error("runaway: the loop is back");
+      card.at<string>("/text").get();
+    });
+    const dispose = popDisposeScope();
+    expect(runs).toBe(1);
+
+    doc.apply(rowEcho(1));
+    expect(runs).toBe(2);                       // once, not 2001
+    expect((doc as any).opsHandlers.size).toBe(1);
+
+    for (let i = 2; i <= 20; i++) doc.apply(rowEcho(i));
+    expect(runs).toBe(21);                      // linear in ops, always
+    expect((doc as any).opsHandlers.size).toBe(1);   // ...and in subscriptions
+    dispose();
+    expect((doc as any).opsHandlers.size).toBe(0);   // released by refcount
+  });
+
+  test("minting inside costs exactly what hoisting costs", () => {
+    const build = (hoist: boolean) => {
+      const doc = signal<any>({ cards: { 1: { text: "a", by: 1, at: "t" } } });
+      const card = doc.at<any>("/cards/1");
+      const t = card.at<string>("/text"), b = card.at<number>("/by"), a = card.at<string>("/at");
+      let runs = 0;
+      pushDisposeScope();
+      effect(() => {
+        runs++;
+        if (hoist) { t.get(); b.get(); a.get(); }
+        else { card.at<string>("/text").get(); card.at<number>("/by").get(); card.at<string>("/at").get(); }
+      });
+      const dispose = popDisposeScope();
+      for (let i = 1; i <= 12; i++) doc.apply(rowEcho(i));
+      const handlers = (doc as any).opsHandlers.size;
+      dispose();
+      return { runs, handlers, after: (doc as any).opsHandlers.size };
+    };
+    expect(build(false)).toEqual(build(true));   // identical, which is the fix
+    expect(build(false).after).toBe(0);
+  });
+
+  test("two scopes share one subscription; disposing one leaves the other live", () => {
+    // The reason the tick is refcounted rather than owned by whoever read
+    // first: a shared slice must not go deaf when one reader leaves.
+    const doc = signal<any>({ cards: { 1: { text: "a" } } });
+    const seenA: string[] = [], seenB: string[] = [];
+    pushDisposeScope();
+    effect(() => { seenA.push(doc.at<any>("/cards/1").at<string>("/text").get()); });
+    const disposeA = popDisposeScope();
+    pushDisposeScope();
+    effect(() => { seenB.push(doc.at<string>("/cards/1/text").get()); });
+    const disposeB = popDisposeScope();
+    expect((doc as any).opsHandlers.size).toBe(1);   // ONE, for one path
+
+    doc.apply([{ op: "replace", path: "/cards/1/text", value: "b" }]);
+    expect(seenA).toEqual(["a", "b"]);
+    expect(seenB).toEqual(["a", "b"]);
+
+    disposeA();
+    doc.apply([{ op: "replace", path: "/cards/1/text", value: "c" }]);
+    expect(seenB).toEqual(["a", "b", "c"]);         // B still hears it
+    expect(seenA).toEqual(["a", "b"]);
+    disposeB();
+    expect((doc as any).opsHandlers.size).toBe(0);
+  });
+
+  test("a handler subscribed DURING delivery hears the next op, not this one", () => {
+    // The Set-visits-what-you-append hazard, pinned directly: this is what
+    // turned one echo into an unbounded pass.
+    const doc = signal<any>({ n: 0 });
+    let inner = 0;
+    pushDisposeScope();
+    doc.onOps(() => { doc.onOps(() => { inner++; }); });
+    const dispose = popDisposeScope();
+    doc.apply([{ op: "replace", path: "/n", value: 1 }]);
+    expect(inner).toBe(0);                    // not re-entered in the same pass
+    doc.apply([{ op: "replace", path: "/n", value: 2 }]);
+    expect(inner).toBeGreaterThan(0);         // heard from the next one
+    dispose();
+  });
+});

@@ -46,6 +46,27 @@ day-zero files pre-1.0 — apps never edit applied files.)
 the wire adapter. To change auth policy, write a migration that replaces
 the function — no runtime change.
 
+**Raising the sign-in UI when you have no public doc.** The demo's dialog
+appears because a cold load opens the seeded, ownerless `board:1`, is
+refused with `unauthenticated`, and `onError` shows it. **An app that
+deletes the demo has no such doc** — its docs are all `mine:<uid>`-shaped
+and it has no uid yet — so nothing triggers the refusal and the screen
+stays blank. This will happen to every app that follows "delete the demo".
+Do the obvious thing instead of inheriting the demo's accident: if there is
+no stored token, show the sign-in UI; open docs after `authenticate`
+resolves (in `onConnect`). If you genuinely need to know whether the HOST
+requires auth — an app that must also run on the in-memory preview — open a
+name that cannot exist and read the refusal: `unauthenticated` means a
+`requireAuth` host, `unknown doc` means the preview.
+
+**A NULL user READS as the host and WRITES as nobody.** `<t>_open(doc,
+NULL)` composes the full copy (001's rule); `<t>_may(id, NULL)` is false,
+so `<t>_apply(doc, ops, NULL)` raises through `doc_begin` — and the message
+is `not found`, which reads like a missing doc when it means a missing
+permit. That asymmetry is deliberate (the host reads its own copy; nothing
+writes anonymously), and it bites in debug scripts: pass a real user id
+when calling a dispatch by hand.
+
 **Passkeys** (`db/002-auth.sql` + `epsilon/passkey.ts`): the boundary
 rule applied to auth — SQL owns identity and state (credentials beside
 users/sessions, counter policy in `credential_use`), TS owns the CEREMONY
@@ -89,14 +110,20 @@ site instead of silently serving the permit-free view.
 ## Authoring a doc type (the kit — db/003)
 
 A type is ONE composition query + ONE dispatch function (~30 lines of app
-SQL). Copy `db/100-board.sql` + `db/fn/board.sql` (worked example) or
-rel.test.ts's `todo` type (minimal). 001–099 are epsilon core, frozen once
-released, and `migrate()` warns if you squat below; 100–102 are the
-scaffold's demo, so number your own from **103**. The TABLES need a number
-— the `_open` and `_apply` FUNCTIONS go in `db/fn/`, edited in place
-(100-board.sql defines early bodies inline only because it predates
-`db/fn/` and its hash is already recorded in deployed ledgers; the live
-board vocabulary is `db/fn/board.sql`).
+SQL). Copy `db/100-board.sql` (worked example) or rel.test.ts's `todo`
+type (minimal). 001–099 are epsilon core, frozen once released, and
+`migrate()` warns if you squat below; 100/101 are the scaffold's demo, so
+number your own from **102**. The TABLES need a number — the `_open` and
+`_apply` FUNCTIONS go in `db/fn/`, edited in place (100-board.sql defines
+its own inline only because it predates `db/fn/` and its hash is already
+recorded in deployed ledgers).
+
+**Anything in `db/fn/` must only reference tables that will still exist.**
+The vocabulary is replayed and re-validated on every boot, so a function
+there that reads a table whose migration was deleted fails the boot, not
+the call. That is why the kit's own `db/fn/doc-kit.sql` touches core
+tables only, and why a doc type's vocabulary file lives and dies with its
+numbered tables — delete them together.
 
 - `<x>_open(doc, user)` — one composition query; NULL user = the host,
   full view; NULL result = refused.
@@ -121,15 +148,50 @@ board vocabulary is `db/fn/board.sql`).
   dispatch (recording `remove /steps/<id>` needs a `remove /steps/<id>`
   branch). pglite.test.ts's `recipe` type is the worked cascade+undo
   combination, pinned by proveLaw.
-- **Ordering is model data** (db/102 + db/fn/board.sql, the worked
-  pattern): rows get a `pos` column — minted `max+1` on insert, restored
-  from the value, composed like any field. A MOVE is a SWAP: two pos
-  replaces in ONE batch, atomic in one transaction, both stamped (echoes
-  widen to the row, like `/done`), both undone together. The client
-  renders each row's flex `order` from its own pos lens (index.ts) — no
-  DOM surgery, `list()` stays untouched. Positions are integers as
-  written (CSS `order` takes nothing else); the column is double
-  precision so drag-drop can graduate to fractional midpoints later.
+- **Ordering — two different things, and only one of them is the doc's.**
+  DISPLAY order (newest first, alphabetical, done at the bottom) is a
+  CLIENT concern: nothing is shared, so nothing goes in the document.
+  `list()` renders arrival order; sort what you already hold and set each
+  row's flex `order` from a lens, or sort in a `computed()`. No schema, no
+  ops, no dispatch. SHARED order — everyone sees one manually arranged
+  list — is ordinary MODEL DATA: a number on the row, composed by
+  `<t>_open`, written by an ordinary `replace` op like `done` or `text`.
+  There is nothing for the kit to add, because a doc already carries
+  arbitrary fields. Concurrent reordering resolves LWW like every other
+  field (the log names who moved what, and undo reverts it); if you need
+  reordering that CONVERGES under simultaneous edits, that is the
+  OT/CRDT this stack declines by design — see DESIGN.md's non-goals.
+  **When you do write shared order, write the whole affected SEQUENCE, never
+  swap two values.** A renumber (`1..n` over the cards of the target column,
+  emitting a replace only for the rows that actually moved) assigns distinct
+  values, so concurrent writers at worst lose an update and the next drop
+  HEALS any tie. A swap preserves the multiset: two concurrent moves can tie
+  two rows at one position, and a swap between tied rows writes each the
+  value it already has — the pair is stuck forever. 0.10.2 shipped the swap
+  as its worked example, an app copied it verbatim into its own column
+  reordering, and 0.10.3 withdrew it. The renumber shape came from that same
+  app's card drag-drop, which had no example to copy and got it right.
+
+  **Drag-to-reorder eats the click that selects.** A `draggable` element
+  whose mousedown wanders two pixels is reclassified by the browser as a
+  DRAG: `dragstart`/`dragend` fire and `click` never does, so "open this
+  card" fails intermittently with nothing wrong in the DOM or the op stream.
+  Record where the drag began and treat a short one as the click the browser
+  took away:
+
+  ```ts
+  li.ondragstart = (e) => { from = { x: e.clientX, y: e.clientY }; };
+  li.ondragend = (e) => {
+    if (from && Math.hypot(e.clientX - from.x, e.clientY - from.y) < 6) open();
+    from = null;
+  };
+  ```
+
+  Make the whole row the drag/click target, not one span inside it — half of
+  "it didn't work" is people hitting the padding. And when `order` reorders
+  visually, DOM order is no longer visual order: compute a drop index from
+  the rows' own bounding boxes, and remember that TAB order and screen
+  readers still follow the DOM.
 - The kit owns locks, refusals (no existence oracle), versioning, audit,
   NOTIFY, undo (`doc_undo`), conflict detection (`doc_touched_since`);
   `doc_drop` deletes a doc whole — and tells the world: it rings the
@@ -275,6 +337,10 @@ bun epsilon/cli.ts add mine:1 /boards/- '{"name":"plan"}'   # creation is an op
 bun epsilon/cli.ts add board:2 /cards/- '{"text":"hi"}'     # echo has the minted id
 bun epsilon/cli.ts set board:2 /cards/1/done true
 bun epsilon/cli.ts rm  board:2 /cards/1
+# A BATCH — the whole point of a multi-op write (a move: two fields, one
+# transaction, one echo, one undo). add/set/rm each send exactly one op.
+bun epsilon/cli.ts apply board:2 '[{"op":"replace","path":"/cards/1/column_id","value":3},
+                                   {"op":"replace","path":"/cards/1/pos","value":2}]'
 bun epsilon/cli.ts watch board:2 --for 3000    # NDJSON: snapshot, then each op
 bun epsilon/cli.ts call login '{"email":"…","password":"…"}'
 bun epsilon/cli.ts call undo '{"doc":"board:2"}'      # revert YOUR last write
@@ -362,6 +428,21 @@ is, for when you want a value in the DOM without an element to hang it on.
 - `bun run test:pglite` (embedded, no server),
   `bun run test:pg` + `test:app` (need `bun run db:up`), `bun run check`
   (strict tsc), `bun run ci` (everything).
+- **Driving the app in `Bun.WebView`** (`app.test.ts` is the worked example)
+  has two traps, each of which hangs rather than fails:
+  - `evaluate()` takes an EXPRESSION, not a script. `"a(); 1"` is a
+    SyntaxError — wrap statements in an IIFE:
+    `"(() => { a(); return 1; })()"`. The demo's IIFEs are a requirement,
+    not a style.
+  - `click()` waits for actionability, so clicking an element BELOW THE
+    FOLD never resolves and takes the whole test with it. Any scrolling
+    layout will meet this: drive off-screen UI with
+    `evaluate("document.querySelector('#x').click()")`, or scroll first.
+- The vendored suites declare their own fixture types (`epsilon/fixture.ts`)
+  and drive `db/100-board.sql`. Deleting the demo is then: drop
+  `db/100`/`db/101`, your own `index.*`/`types.ts`, and re-point these
+  suites at your doc type with `proveLaw` — nothing of the demo has to stay
+  in YOUR model file.
 - Each test file owns its OWN database (`<app>_test_pg`, `_rel`, `_app`,
   `<app>_migrate_test` — `<app>` derived from package.json name, so
   checkouts sharing one dev Postgres never fight over migration ledgers) —
@@ -389,6 +470,29 @@ is, for when you want a value in the DOM without an element to hang it on.
   costs you is reading the whole doc (`doc.get()`) inside an effect: that
   tracks the whole doc and re-runs on every write. Narrow with `at()`, then
   read. (`bind()` is gone — the lens is what it bought.)
+- **Mint the lens OUTSIDE the effect that reads it.** `at()` inside an
+  effect body makes a new lens per run:
+
+  ```ts
+  const textL = card.at<string>("/text");        // once, outside
+  effect(() => { el.textContent = textL.get() ?? ""; });
+  ```
+
+  Until 0.10.4 this was not a style point but a **hang**: each lens took its
+  own root subscription, every subscription re-ran the effect, and a JS Set
+  visits entries appended while it is being iterated — so ONE echo could
+  loop until the tab died, with no error and no console output. A real app
+  lost most of a session to it (the demo taught the shape). The runtime now
+  shares one subscription per path, refcounted, so minting inside is merely
+  wasteful — but hoisting is still the shape to copy, and a doc type whose
+  echoes are whole-row replaces (any type that stamps `updated_*`) is
+  exactly where the waste concentrates.
+- **`null` means two things through a lens**, and any guard on absence has
+  to tell them apart: "the doc has not opened yet" (every path reads null)
+  and "this row is gone". Ask the DOC, not the lens —
+  `row.get() == null && doc.peek() != null`. Without it, a deep link closes
+  itself a beat before its own snapshot arrives. (`doc.v === 0` is the same
+  test at the doc level; the rule is general.)
 - **Set the boot hash BEFORE `routes()` reads it.** `location.hash` updates
   synchronously but `hashchange` does not fire until a later task, so routing
   through the event renders your placeholder first and flashes. A cold load

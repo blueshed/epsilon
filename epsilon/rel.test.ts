@@ -8,7 +8,7 @@ import type { Signal } from "./signal";
 import { migrate, pgDoc, pgSync, pgAuth, pgUndo, pgAdmin } from "./pg";
 import { pgReachable, skipped, hasBoardFixture, NO_FIXTURE } from "./testdb";
 import { proveLaw } from "./law";
-import type { Card, Board } from "../types";
+import type { FixtureCard as Card, FixtureBoard as Board } from "./fixture";
 
 // Test db namespaced by app (package.json name) — see pg.test.ts's note.
 const APP = ((await Bun.file(new URL("../package.json", import.meta.url)).json()).name as string)
@@ -765,17 +765,6 @@ describe.skipIf(!DB_UP)("the law, executable — proveLaw drives it (epsilon/law
         (d) => [{ op: "replace", path: `/cards/${cid(d)}/done`, value: true }],
         // Whole-row replace — the echo shape as INPUT (the kit's rule).
         (d) => [{ op: "replace", path: `/cards/${cid(d)}`, value: { text: "whole", done: false } }],
-        // Ordering is model data (102): a MOVE is a SWAP — two pos replaces
-        // in one batch, both stamped (echoes widen), both undone together.
-        () => [{ op: "add", path: "/cards/-", value: { text: "two" } }],
-        (d) => {
-          const [a, z] = Object.keys(d.cards)
-            .sort((x, y) => (d.cards[x]!.pos ?? 0) - (d.cards[y]!.pos ?? 0));
-          return [
-            { op: "replace", path: `/cards/${a}/pos`, value: d.cards[z!]!.pos },
-            { op: "replace", path: `/cards/${z!}/pos`, value: d.cards[a!]!.pos },
-          ];
-        },
         // A rename mirrors into the owner's own list — same transaction.
         () => [{ op: "replace", path: "/name", value: "law, renamed" }],
         (d) => {

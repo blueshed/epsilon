@@ -27,6 +27,11 @@ This file is for *your app*.
   `db/fn/session.sql` is the shape. `db/100-board.sql` defines its functions
   inline because it predates `db/fn/` and its hash is recorded in every
   deployed ledger; copy its logic, not its filing.
+  **A `db/fn/` file lives and dies with the numbered file that creates its
+  tables** — the vocabulary is replayed and re-validated on every boot, so
+  one left behind after its migration is deleted fails the BOOT. Delete them
+  together. (`db/fn/doc-kit.sql` and `db/fn/session.sql` are epsilon's own
+  and touch core tables only — keep both.)
 
 The kanban board is the scaffold's **demo** — a worked example of a doc type
 end to end, and yours to delete once this app has its own. README.md lists

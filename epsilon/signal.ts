@@ -37,6 +37,17 @@ type OpsHandler = (ops: Op[]) => void;
 
 let currentListener: Listener | null = null;
 let currentDeps: Set<Signal<any>> | null = null;
+/**
+ * Slice references taken during the effect run in progress (see Lens.get).
+ *
+ * An effect's FIRST run happens inside whatever dispose scope created it, but
+ * every RE-RUN happens from the flush, with no scope active at all. A lens
+ * minted inside the body therefore had nowhere to register its release: it
+ * warned (wrongly — the effect is a perfectly good owner) and held its
+ * reference forever. An effect owns the slices its body reads, and releases
+ * the previous run's when the next one has taken its own.
+ */
+let currentSliceReleases: (() => void)[] | null = null;
 let batchDepth = 0;
 const pendingEffects = new Set<Listener>();
 
@@ -204,11 +215,33 @@ export class Signal<T> implements OpSignal<T> {
   }
 
   onOps(handler: OpsHandler): () => void {
-    this.opsHandlers.add(handler);
-    const unsub = () => { this.opsHandlers.delete(handler); };
+    const unsub = this.subscribeOps(handler);
     trackDispose(unsub);
     return unsub;
   }
+
+  /** onOps WITHOUT scope tracking — for subscriptions whose lifetime is
+   *  refcounted rather than owned by whichever scope happened to be active
+   *  (the shared slice ticks below). @internal */
+  subscribeOps(handler: OpsHandler): () => void {
+    this.opsHandlers.add(handler);
+    return () => { this.opsHandlers.delete(handler); };
+  }
+
+  /**
+   * Per-path change ticks, SHARED by every lens over the same slice and
+   * refcounted by their readers. @internal
+   *
+   * Each lens used to mint its own tick and its own root subscription on
+   * first read, which is correct exactly once: a lens minted INSIDE an
+   * effect mints a new one on every re-run, and since each subscription
+   * re-runs the effect, the handler set grew without bound and the tab
+   * hung (a field report from a real app, 2026-08-06 — the demo taught the
+   * shape). Sharing per path makes `at()` idempotent for the reader: the
+   * hundredth lens over `/cards/1/text` costs a refcount, not a
+   * subscription.
+   */
+  slices = new Map<string, { tick: Signal<number>; refs: number; unsub: () => void }>();
 
   at<U = unknown>(path: string): OpSignal<U> {
     return new Lens<U>(this as Signal<any>, normalizePrefix(path));
@@ -216,7 +249,13 @@ export class Signal<T> implements OpSignal<T> {
 
   /** Deliver ops (handlers first, error-isolated), then flush state. @internal */
   private notify(ops: Op[]): void {
-    for (const h of this.opsHandlers) {
+    // Iterate a SNAPSHOT. A Set visits entries appended during iteration, and
+    // an ops handler can append one — a lens read inside an effect subscribes
+    // as it runs — so the live Set turned one echo into an unbounded loop:
+    // handler → tick → effect re-runs → new subscription → visited in THIS
+    // pass → … The flush guard never fired, because each re-entry started its
+    // own drain. A handler registered during delivery hears the NEXT op.
+    for (const h of [...this.opsHandlers]) {
       try { h(ops); }
       catch (err) { console.error("[epsilon/signal] onOps handler threw:", err); }
     }
@@ -250,11 +289,6 @@ class Lens<T> implements OpSignal<T> {
     private prefix: string,
   ) {}
 
-  /** Bumped only when an op TOUCHES this slice — the same test onOps applies.
-   *  Created on first tracked read, so an untracked peek()/set() lens costs
-   *  nothing. */
-  private tick: Signal<number> | null = null;
-
   get(): T {
     // Track THIS SLICE, not the root. onOps already knows precisely which ops
     // reach here — it rebases descendants, collapses ancestor writes, and
@@ -262,10 +296,44 @@ class Lens<T> implements OpSignal<T> {
     // channel too. Before 0.9.0 this delegated to root.get(), which meant an
     // effect over a lens re-ran on every unrelated write: correct, never
     // minimal, and the reason bind() existed at all.
-    if (!this.tick) {
-      const t = (this.tick = new Signal(0));
-      const unsub = this.onOps(() => t.set(t.peek() + 1));
-      if (hasActiveDisposeScope()) trackDispose(unsub);
+    //
+    // The tick is the ROOT's, keyed by path, and shared by every lens over
+    // this slice (see Signal.slices): minting a lens inside an effect is then
+    // merely wasteful instead of fatal.
+    const root = this.root;
+    let entry = root.slices.get(this.prefix);
+    if (!entry) {
+      const tick = new Signal(0);
+      // subscribeOps, NOT onOps: this subscription outlives whichever scope
+      // happened to read first, and is released by the refcount below.
+      const unsub = root.subscribeOps(this.rebased(() => tick.set(tick.peek() + 1)));
+      entry = { tick, refs: 0, unsub };
+      root.slices.set(this.prefix, entry);
+    }
+    // A reference per READ, not per lens instance: the owner below releases
+    // the previous run's references after this one has taken its own, so a
+    // long-lived lens read once per run holds exactly one. (Per-instance was
+    // wrong in the way only a test could show — a HOISTED lens acquired once
+    // and was then released by its effect's second run, leaving the shared
+    // subscription at zero and the lens deaf to ancestor writes.)
+    {
+      entry.refs++;
+      const held = entry;
+      const prefix = this.prefix;
+      let released = false;
+      const release = () => {
+        if (released) return;
+        released = true;
+        if (--held.refs <= 0) {
+          held.unsub();
+          if (root.slices.get(prefix) === held) root.slices.delete(prefix);
+        }
+      };
+      // The running effect owns it (and releases it on the next run); failing
+      // that, the active dispose scope does. Neither = nothing will ever let
+      // go of it, which is the one case worth a word.
+      if (currentSliceReleases) currentSliceReleases.push(release);
+      else if (hasActiveDisposeScope()) trackDispose(release);
       else {
         console.warn(
           "[epsilon/signal] a lens was read reactively outside a dispose scope — " +
@@ -274,8 +342,8 @@ class Lens<T> implements OpSignal<T> {
         );
       }
     }
-    this.tick.get();                       // the dependency
-    return valueAt(this.root.peek(), this.prefix) as T;
+    entry.tick.get();                      // the dependency
+    return valueAt(root.peek(), this.prefix) as T;
   }
 
   peek(): T {
@@ -298,9 +366,11 @@ class Lens<T> implements OpSignal<T> {
     return computed(() => fn(this.get()), options);
   }
 
-  onOps(handler: OpsHandler): () => void {
+  /** The rebasing wrapper — ops narrowed to this slice, or nothing. Shared
+   *  by onOps (scope-tracked) and the slice tick (refcounted). */
+  private rebased(handler: OpsHandler): OpsHandler {
     const childPrefix = this.prefix + "/";
-    return this.root.onOps((ops) => {
+    return (ops) => {
       const rebased: Op[] = [];
       let ancestorHit = false;
       for (const op of ops) {
@@ -320,7 +390,11 @@ class Lens<T> implements OpSignal<T> {
         rebased.push({ op: "replace", path: "", value: this.peek() });
       }
       if (rebased.length) handler(rebased);
-    });
+    };
+  }
+
+  onOps(handler: OpsHandler): () => void {
+    return this.root.onOps(this.rebased(handler));
   }
 
   at<U = unknown>(path: string): OpSignal<U> {
@@ -369,6 +443,9 @@ export function effect(fn: () => void | (() => void)): () => void {
   let cleanup: (() => void) | void;
   let deps = new Set<Signal<any>>();
   let disposed = false;
+  /** Slice refs taken by the LAST run — released once the next run has taken
+   *  its own, so a shared subscription never blinks out between them. */
+  let slices: (() => void)[] = [];
 
   const execute: Listener = () => {
     if (disposed) return;
@@ -376,15 +453,24 @@ export function effect(fn: () => void | (() => void)): () => void {
 
     const prevListener = currentListener;
     const prevDeps = currentDeps;
+    const prevSlices = currentSliceReleases;
     const nextDeps = new Set<Signal<any>>();
+    const nextSlices: (() => void)[] = [];
     currentListener = execute;
     currentDeps = nextDeps;
+    currentSliceReleases = nextSlices;
 
     try {
       cleanup = fn();
     } finally {
       currentListener = prevListener;
       currentDeps = prevDeps;
+      currentSliceReleases = prevSlices;
+      // Acquire-then-release: this run already holds what it needs, so the
+      // previous run's references can go without churning the subscription.
+      const stale = slices;
+      slices = nextSlices;
+      for (const release of stale) release();
       for (const dep of deps) {
         if (!nextDeps.has(dep)) dep.unsubscribe(execute);
       }
@@ -401,6 +487,8 @@ export function effect(fn: () => void | (() => void)): () => void {
     if (cleanup) cleanup();
     for (const dep of deps) dep.unsubscribe(execute);
     deps.clear();
+    for (const release of slices) release();   // the slices this run held
+    slices = [];
   };
 
   trackDispose(dispose);

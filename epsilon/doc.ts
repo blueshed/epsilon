@@ -205,6 +205,11 @@ export function createHost(opts?: {
   async function resolveEntry(name: string, userId?: number | string): Promise<Entry | undefined> {
     const existing = docs.get(name);
     if (existing) return existing;
+    // What was hosted before any factory ran — so everything the factory
+    // registers can be found afterwards, siblings included. Everything from
+    // the `await` below to the end of the loop body is synchronous, so a
+    // coalesced second opener cannot observe the half-checked state.
+    const before = new Set(docs.keys());
     // LONGEST prefix wins. Iterating the Map in insertion order made the
     // answer depend on registration order, so registering "board:" before
     // "board:archived:" silently shadowed the second — a bug that looks like
@@ -219,26 +224,36 @@ export function createHost(opts?: {
         pending.finally(() => pendingFactories.delete(name)).catch(() => {});
       }
       await pending;
-      const made = docs.get(name);
-      if (made) {
-        made.dynamic = true;   // re-hostable — evict when unwatched
-        // A factory refusal guards only the FIRST open — the doc outlives
-        // its opener. Relational docs stay safe because pgDoc's default
-        // gate asks doc_open(name, user) per open; an in-memory doc has no
-        // such default, so hosting one WITHOUT a gate on an auth-gated host
-        // would fail open for as long as anyone watches it. Refuse at
-        // hosting time — the one moment the mistake is cheap — and un-host,
-        // so the next open meets the factory (and this error) again.
-        if (opts?.requireAuth && !made.open) {
-          docs.delete(name);
+      // Everything the factory registered is dynamic — re-hostable, and
+      // evicted when unwatched. Siblings were missed here until 0.10.3,
+      // which also leaked them (dynamic=false lives for the process).
+      for (const n of docs.keys()) if (!before.has(n)) docs.get(n)!.dynamic = true;
+      // A factory refusal guards only the FIRST open — the doc outlives its
+      // opener. Relational docs stay safe because pgDoc's default gate asks
+      // doc_open(name, user) per open; an in-memory doc has no such default,
+      // so hosting one WITHOUT a gate on an auth-gated host would fail open
+      // for as long as anyone watches it. Refuse at hosting time — the one
+      // moment the mistake is cheap — and un-host, so the next open meets
+      // the factory (and this error) again.
+      //
+      // Every doc the factory registered is checked, not just the name that
+      // was asked for: a factory may host siblings (a "room:x" factory that
+      // also hosts "room:x:meta"), and those are reached later by the
+      // registered-entry fast path above, which never runs a factory and so
+      // never reaches this check. Missing them left exactly the hole this
+      // guard exists to close.
+      if (opts?.requireAuth) {
+        const gateless = [...docs.keys()].filter((n) => !before.has(n) && !docs.get(n)!.open);
+        if (gateless.length) {
+          for (const n of gateless) docs.delete(n);
           throw new Error(
-            `[epsilon/doc] ${name}: a dynamic doc on a requireAuth host needs an open gate — ` +
-              `the factory refusal guards only the first open. Pass { open } to host.doc() ` +
-              `(an intentionally public doc states it: open: () => sig.peek()).`,
+            `[epsilon/doc] ${gateless.join(", ")}: a dynamic doc on a requireAuth host needs an ` +
+              `open gate — the factory refusal guards only the first open. Pass { open } to ` +
+              `host.doc() (an intentionally public doc states it: open: () => sig.peek()).`,
           );
         }
       }
-      return made;
+      return docs.get(name);
     }
     return undefined;
   }

@@ -71,30 +71,6 @@ function hasDocKit(doc: string): Promise<boolean> {
   return docKit;
 }
 
-/**
- * A MOVE is a SWAP: two pos replaces in ONE batch — atomic on the wire, one
- * transaction relationally, echoed and undone together. Position is model
- * data (db/102); the row's flex `order` renders it, so nothing re-inserts
- * DOM. Rows without pos (in-memory mode before any move) fall back to their
- * id, matching the relational backfill.
- */
-function moveCard(
-  cards: OpSignal<Record<string, Card> | null>,
-  id: string,
-  dir: 1 | -1,
-): void {
-  const all = cards.peek() ?? {};
-  const posOf = ([k, c]: [string, Card]) => (c.pos ?? Number(k)) || 0;
-  const sorted = Object.entries(all).sort((a, b) => posOf(a) - posOf(b) || Number(a[0]) - Number(b[0]));
-  const i = sorted.findIndex(([k]) => k === id);
-  const j = i + dir;
-  if (i < 0 || j < 0 || j >= sorted.length) return;
-  cards.apply([
-    { op: "replace", path: `/${sorted[i]![0]}/pos`, value: posOf(sorted[j]!) },
-    { op: "replace", path: `/${sorted[j]![0]}/pos`, value: posOf(sorted[i]!) },
-  ]);
-}
-
 /** One line of board status — a refusal, mostly. Cleared by the next thing
  *  that succeeds; never a dialog, because a refusal is information. */
 function say(msg: string): void {
@@ -345,37 +321,14 @@ function openBoard(name: string): void {
           : `${editor}, ${ago(at)}`;
       });
       done.onchange = () => card.at("/done").set(done.checked);
-      // The row renders WHERE it sits from its own pos lens — a remote move
-      // lands as a pos op and the flexbox reorders; list() touches nothing.
-      const posL = card.at<number | null>("/pos");
-      const up = document.createElement("button");
-      up.textContent = "↑";
-      up.className = "move";
-      up.title = "move up";
-      up.onclick = () => moveCard(cards, id, -1);
-      const down = document.createElement("button");
-      down.textContent = "↓";
-      down.className = "move";
-      down.title = "move down";
-      down.onclick = () => moveCard(cards, id, 1);
-      effect(() => {
-        // In-memory mode is a shape preview: it never mints pos, rows keep
-        // arrival order (order 0), and the move buttons hide — like the rest
-        // of the tier-dependent UI.
-        const p = posL.get();
-        const n = p ?? Number(id);
-        li.style.order = String(Number.isFinite(n) ? Math.round(n) : 0);
-        up.hidden = down.hidden = p == null;
-      });
       const del = document.createElement("button");
       del.textContent = "✕";
-      del.className = "del";   // the move buttons share the row now — name the verb
       del.onclick = async () => {
         if (await confirmAction(`delete "${card.peek().text}"?`)) {
           cards.apply([{ op: "remove", path: `/${id}` }]);
         }
       };
-      li.append(done, " ", label, " ", byline, " ", up, down, " ", del);
+      li.append(done, " ", label, " ", byline, " ", del);
       return li;
     }),
   );
@@ -558,26 +511,35 @@ function boardView(params$: Signal<Record<string, string>>): Node {
 function cardDetail(doc: DocHandle<Board>, cid: string, boardId: string): Node[] {
   const card = doc.at<Card>(`/cards/${cid}`);
   const members = doc.at<Record<string, Member>>("/members");
+  // NARROW ONCE, OUTSIDE the effects that read them. `at()` inside an effect
+  // body mints a fresh lens on every run — the runtime shares the underlying
+  // subscription per path (signal.ts), so it is no longer the hang it was in
+  // 0.10.2, but it still allocates per run for nothing. Hoisting is the shape
+  // to copy.
+  const textL = card.at<string>("/text");
+  const createdByL = card.at<number | null>("/created_by");
+  const updatedByL = card.at<number | null>("/updated_by");
+  const updatedAtL = card.at<string | null>("/updated_at");
 
   const input = el("input", { id: "detail-text", "aria-label": "card text" }) as HTMLInputElement;
   effect(() => {
-    const v = card.at<string>("/text").get() ?? "";
+    const v = textL.get() ?? "";
     // The same rule the board title learned: never rewrite what someone is
     // typing in. A remote edit lands here too.
     if (document.activeElement !== input) input.value = v;
   });
   input.onblur = () => {
     const v = input.value.trim();
-    if (v && v !== card.peek()?.text) card.at<string>("/text").set(v);
+    if (v && v !== card.peek()?.text) textL.set(v);
   };
   input.onkeydown = (e) => { if (e.key === "Enter") input.blur(); };
 
   const provenance = el("p", { id: "detail-by", class: "byline" });
   effect(() => {
     const roster = members.get();
-    const author = stampName(card.at<number | null>("/created_by").get(), roster);
-    const editor = stampName(card.at<number | null>("/updated_by").get(), roster);
-    const at = card.at<string | null>("/updated_at").get();
+    const author = stampName(createdByL.get(), roster);
+    const editor = stampName(updatedByL.get(), roster);
+    const at = updatedAtL.get();
     provenance.textContent = [
       author ? `added by ${author}` : "",
       at ? (editor ? `last touched by ${editor}, ${ago(at)}` : `last touched ${ago(at)}`) : "",
@@ -588,8 +550,18 @@ function cardDetail(doc: DocHandle<Board>, cid: string, boardId: string): Node[]
   close.onclick = () => navigate(`/board/${boardId}`);
 
   // A card removed under us — by anyone — leaves nothing to detail.
+  //
+  // `null` means TWO things through a lens, and this guard has to tell them
+  // apart: "the doc has not opened yet" (every path reads null) and "this row
+  // is gone". Ask the DOC, not the lens — `doc.peek() != null` means a
+  // snapshot has landed, so a null row is a real absence. Without it a deep
+  // link to a card closes itself a beat before its own snapshot arrives, and
+  // the board-level version of this trick (`doc.v === 0`, in openBoard) reads
+  // as board-specific when the rule is general.
   effect(() => {
-    if (card.get() == null) queueMicrotask(() => navigate(`/board/${boardId}`));
+    if (card.get() == null && doc.peek() != null) {
+      queueMicrotask(() => navigate(`/board/${boardId}`));
+    }
   });
 
   return [el("div", { id: "detail-head" }, el("h3", {}, "card"), close), input, provenance];

@@ -2,7 +2,7 @@
 // contract, and wire — on in-process Postgres (PGlite), no server anywhere.
 // Same schema, two engines; this suite is the proof the seam holds.
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHost, connect, type Host, type Remote } from "./doc";
@@ -10,7 +10,7 @@ import { migrate, pgDoc, pgAuth, pgSync, pgUndo, pgView, type Sql } from "./pg";
 import { hasBoardFixture, NO_FIXTURE } from "./testdb";
 import { openPglite } from "./pglite";
 import { proveLaw } from "./law";
-import type { Card, Board } from "../types";
+import type { FixtureCard as Card, FixtureBoard as Board } from "./fixture";
 
 const DB_DIR = new URL("../db", import.meta.url).pathname;
 
@@ -291,46 +291,64 @@ describe("grain hardening — the kit refuses the cheap-but-wrong shapes", () =>
     const [after] = await sql`SELECT v FROM docs WHERE name = ${"board:1"}`;
     expect(Number(after.v)).toBe(Number(before.v));       // nothing committed
   });
-});
 
-describe("ordering — position is model data (102)", () => {
-  test("pos composes, a move is a SWAP batch, and the law holds — undo included", async () => {
-    const host = createHost();
-    const board = await pgDoc<Board>(host, sql, "board:1", null as unknown as Board, { apply: "board_apply" });
-    pgUndo(host, sql, (d) => (d.startsWith("board:") ? "board_apply" : undefined));
-    const url = serve(host);
-    const r = connect(url);
-    remotes.push(r);
-    const doc = r.doc<Board>("board:1");
-    await doc.ready;
+  test("007 without db/fn/doc-kit.sql is caught AT BOOT, not at the first doc open", async () => {
+    // `db/` is outside the upgrade whitelist, so apps copy these by hand —
+    // and 007 (which DROPs doc_open) commits in its own transaction before
+    // the vocabulary pass. Copying only the numbered half used to boot GREEN
+    // and fail later, far from the cause.
+    const d = mkdtempSync(join(tmpdir(), "epsilon-pair-"));
+    mkdirSync(join(d, "fn"), { recursive: true });
+    for (const f of ["001-epsilon.sql", "002-auth.sql", "003-doc-kit.sql",
+                     "004-housekeeping.sql", "005-gone.sql", "006-session-digest.sql",
+                     "007-doc-open-explicit.sql"]) {
+      writeFileSync(join(d, f), readFileSync(join(DB_DIR, f), "utf8"));
+    }
+    writeFileSync(join(d, "fn", "session.sql"), readFileSync(join(DB_DIR, "fn", "session.sql"), "utf8"));
+    // ...deliberately NOT db/fn/doc-kit.sql.
+    const dbDir = mkdtempSync(join(tmpdir(), "epsilon-pairdb-"));
+    const s2 = await openPglite(dbDir);
+    try {
+      let err = "";
+      try { await migrate(s2 as Sql, { dir: d, log: () => {} }); } catch (e) { err = String(e); }
+      expect(err).toContain("nothing recreated it");
+      expect(err).toContain("db/fn/doc-kit.sql");
+      expect(err).toContain("ONE change");
+    } finally {
+      await (s2 as any).end?.();
+      rmSync(d, { recursive: true, force: true });
+      rmSync(dbDir, { recursive: true, force: true });
+    }
+  });
 
-    // The card the earlier tests left behind was backfilled/minted a pos.
-    expect(Object.values(board.peek()!.cards).every((c) => c.pos != null)).toBe(true);
-
-    const byPos = (d: Board) =>
-      Object.keys(d.cards).sort((a, b) => (d.cards[a]!.pos ?? 0) - (d.cards[b]!.pos ?? 0));
-    await proveLaw<Board>({
-      handle: doc, name: "board:1", sql,
-      undo: (v?: number) => r.call("undo", { doc: "board:1", v }),
-      batches: [
-        // New cards land at the end — pos minted max+1.
-        () => [{ op: "add", path: "/cards/-", value: { text: "second" } }],
-        // A MOVE is a SWAP: two pos replaces in ONE batch — atomic, both
-        // stamped (echoes widen to the row), both undone together.
-        (d) => {
-          const [a, b] = byPos(d);
-          return [
-            { op: "replace", path: `/cards/${a}/pos`, value: d.cards[b!]!.pos },
-            { op: "replace", path: `/cards/${b!}/pos`, value: d.cards[a!]!.pos },
-          ];
-        },
-      ],
-    });
-    // proveLaw redid the swap, so the flip is the final state — visible in
-    // the same pos the client renders flex `order` from.
-    const order = byPos(doc.peek()!);
-    const texts = order.map((id) => doc.peek()!.cards[id]!.text);
-    expect(texts[0]).toBe("second");
+  test("the kit's own vocabulary survives an app that deleted the demo", async () => {
+    // The 0.10.2 hazard, pinned: db/fn is replayed and re-validated every
+    // boot, so a vocabulary file referencing demo tables broke the boot of
+    // any app that followed its own README and deleted them. Core db/fn
+    // touches core tables ONLY — this is that promise, executable.
+    const d = mkdtempSync(join(tmpdir(), "epsilon-nodemo-"));
+    mkdirSync(join(d, "fn"), { recursive: true });
+    for (const f of ["001-epsilon.sql", "002-auth.sql", "003-doc-kit.sql",
+                     "004-housekeeping.sql", "005-gone.sql", "006-session-digest.sql",
+                     "007-doc-open-explicit.sql"]) {
+      writeFileSync(join(d, f), readFileSync(join(DB_DIR, f), "utf8"));
+    }
+    for (const f of ["doc-kit.sql", "session.sql"]) {
+      writeFileSync(join(d, "fn", f), readFileSync(join(DB_DIR, "fn", f), "utf8"));
+    }
+    const dbDir = mkdtempSync(join(tmpdir(), "epsilon-nodemodb-"));
+    const s2 = await openPglite(dbDir);
+    try {
+      await migrate(s2 as Sql, { dir: d, log: () => {} });          // boots
+      const [ok] = await s2`SELECT to_regprocedure('doc_open(text,bigint)') IS NOT NULL AS ok`;
+      expect(ok.ok).toBe(true);
+      const [none] = await s2`SELECT to_regclass('cards') AS t`;
+      expect(none.t).toBeNull();                                    // no demo anywhere
+    } finally {
+      await (s2 as any).end?.();
+      rmSync(d, { recursive: true, force: true });
+      rmSync(dbDir, { recursive: true, force: true });
+    }
   });
 });
 

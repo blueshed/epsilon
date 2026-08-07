@@ -234,4 +234,38 @@ $$ LANGUAGE plpgsql;`,
     const ran = await migrate(sql, { dir: d, ...quiet });
     expect(ran.map((m) => m.name)).toEqual(["001-a.sql"]);
   });
+
+  // Both of these failed with a hint that named the WRONG repair until
+  // 0.10.3 — and both are what a hand-copied `db/` upgrade actually does,
+  // since db/ is outside the upgrade whitelist.
+  test("a db/fn file outliving its tables says SO — not 'cannot change return type'", async () => {
+    const d = fixture({
+      "001-a.sql": "CREATE TABLE m_a (id int, label text)",
+      "fn/greet.sql": "CREATE OR REPLACE FUNCTION m_greet(n text) RETURNS bigint AS $$ SELECT count(*) FROM m_a WHERE label = n $$ LANGUAGE sql;",
+    });
+    await migrate(sql, { dir: d, ...quiet });
+    // The app deletes the migration that owned the table (the documented
+    // "delete the demo" move) and keeps its vocabulary. Next boot:
+    await sql.unsafe("DROP TABLE m_a");
+    rmSync(join(d, "001-a.sql"));
+    let err = "";
+    try { await migrate(sql, { dir: d, ...quiet }); } catch (e) { err = String(e); }
+    expect(err).toContain("references a table or column that no migration creates");
+    expect(err).toContain("live and die together");
+    expect(err).not.toContain("cannot change return type");
+  });
+
+  test("a db/fn file whose numbered DROP was not copied says THAT", async () => {
+    const d = fixture({
+      "fn/greet.sql": "CREATE OR REPLACE FUNCTION m_def(a text, b int DEFAULT NULL) RETURNS text AS $$ SELECT a $$ LANGUAGE sql;",
+    });
+    await migrate(sql, { dir: d, ...quiet });
+    // The edit that removes the default, WITHOUT its numbered DROP.
+    writeFileSync(join(d, "fn", "greet.sql"),
+      "CREATE OR REPLACE FUNCTION m_def(a text, b int) RETURNS text AS $$ SELECT a $$ LANGUAGE sql;");
+    let err = "";
+    try { await migrate(sql, { dir: d, ...quiet }); } catch (e) { err = String(e); }
+    expect(err).toContain("parameter DEFAULT");
+    expect(err).toContain("DROP FUNCTION IF EXISTS");
+  });
 });

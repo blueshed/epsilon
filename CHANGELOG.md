@@ -7,6 +7,145 @@ will ship.
 
 ## [Unreleased]
 
+## [0.10.4] — 2026-08-06
+
+The first release driven by a FIELD REPORT rather than a review: a kanban
+(`kanban:<id>` + `kanbans:<uid>`, columns, cards, sharing, drag-drop, undo,
+history) built on 0.10.2 in one session by an agent that had not seen this
+repo before. Its verdict is the headline — *"the design held up: ~450 lines
+of SQL and ~950 of client, and I never once needed to diff, invent a verb,
+or reach for a fetch"* — and everything below is a trap it hit on the way,
+worst first. Three of them were silent, and two were taught by our own
+worked example.
+
+### Fixed
+
+- **A lens minted inside an `effect` could hang the tab** (`epsilon/signal.ts`).
+  Each `at()` in an effect body made a lens that took its own root
+  subscription; each subscription re-ran the effect; and a JS `Set` visits
+  entries appended *while it is being iterated* — so ONE echo could loop
+  until the process died. No error, no warning, no console output. Measured
+  before the fix: a single whole-row echo re-ran one effect **2001 times**
+  and registered 2000 handlers before a test guard stopped it. Two changes,
+  both needed: `notify()` now iterates a snapshot (a handler subscribed
+  during delivery hears the *next* op), and the per-path change tick is the
+  root's, shared and refcounted, so `at()` is idempotent for readers. An
+  effect owns the slices its body reads and releases the previous run's once
+  the next has taken its own — which also fixes a real leak, because an
+  effect's RE-runs happen outside any dispose scope. Minting a lens inside
+  an effect is now exactly as cheap as hoisting it. `signal.test.ts` pins
+  the runaway, the equivalence, the shared-subscription refcount, and the
+  Set-mutation hazard directly; `app.test.ts` drives ten whole-row round
+  trips through the demo's open card panel in a real browser.
+- **The demo taught the anti-pattern** (`index.ts`). `cardDetail()` minted
+  four lenses inside its effects; they are hoisted now, which is the shape
+  to copy.
+- **`null` means two things, and the demo only guarded one** (`index.ts`).
+  A lens over a doc that has not opened yet reads `null` exactly like a row
+  that was deleted, so a card-detail "it's gone, leave" effect fired on
+  every deep link, a beat before its own snapshot arrived. The guard now
+  asks the doc as well (`card.get() == null && doc.peek() != null`), and the
+  rule is documented as general — the board-level `doc.v === 0` trick read
+  as board-specific.
+
+### Changed
+
+- **The vendored suites declare their own fixture types** (`epsilon/fixture.ts`).
+  They imported `Board` and `Card` from the app's `types.ts`, which quietly
+  made two demo type names permanent furniture in every scaffolded app —
+  keeping them after deleting the demo, in the report's words, "reads like
+  an apology". Deleting the demo no longer leaves anything of it in YOUR
+  model file.
+
+### Documentation — the traps, written where they are met
+
+- **Ordering: renumber, never swap.** The rule 0.10.3 was missing. Writing
+  shared order means writing the whole affected sequence; a swap can tie two
+  rows at one position and then can never separate them. The field proved
+  both halves in one app: its card drag-drop renumbers (no example existed,
+  so it was thought through) and its column reorder swapped — copied
+  verbatim from 0.10.2's example, wedge included. DESIGN.md now says it
+  plainly: **whatever the worked example does, an app will do**, so a bad
+  example is more expensive than no example.
+- **Drag-to-reorder eats the click that selects** — a `draggable` element
+  whose mousedown wanders two pixels fires `dragstart`/`dragend` and never
+  `click`, so "open this card" fails intermittently with nothing wrong in
+  the DOM or the op stream. The distance-based fallback, making the whole
+  row the target, and geometry-based drop indices (flex `order` means DOM
+  order is not visual order) are all in REFERENCE.md.
+- **Delete the demo and nothing raises your sign-in UI.** The dialog appears
+  only because a cold load is refused the seeded public board — an accident
+  an app inherits and then loses. Both the skill and the scaffold README now
+  say to show it from "no token" instead.
+- **`Bun.WebView` traps**: `evaluate()` takes an expression, not a script;
+  `click()` on an element below the fold never resolves. Each hangs a test
+  rather than failing it.
+- **The CLI can send a batch** — `apply <doc> '<ops-json>'` has existed
+  since 0.10.1 and was missing from REFERENCE's command list, so the report
+  concluded it did not exist and worked around it. A feature nobody can find
+  is a feature nobody has.
+- **A NULL user reads as the host and writes as nobody** — `_open(doc, NULL)`
+  composes, `_may(id, NULL)` refuses, and the resulting `not found` from
+  `doc_begin` reads like a missing doc when it means a missing permit. Now
+  in the kit's own header.
+
+## [0.10.3] — 2026-08-06
+
+An independent multi-agent review of 0.10.2, and the withdrawal it earned.
+0.10.2's three security/grain fixes survived four adversarial lenses intact;
+its **ordering pattern did not**, and its upgrade instructions broke a boot.
+This release removes a mechanism and adds a distinction — see UPGRADING.md,
+whose 0.10.2 section is superseded rather than amended, because following it
+fails.
+
+### Removed
+
+- **The `pos` ordering mechanism is withdrawn whole** — `db/102-card-pos.sql`,
+  `db/fn/board.sql`, the move buttons, the swap arithmetic, `Card.pos`. Two
+  reviewers independently found the wedge: a MOVE expressed as a swap of two
+  values preserves the multiset, so two moves computed from stale copies
+  could tie two rows at one position — and a swap between tied rows writes
+  each the value it already has, so the pair could never be separated again.
+  A third found the same tie reachable through undo.
+  **The bug is not the lesson.** A MECHANISM was invented where a
+  DISTINCTION was needed, and inventing mechanisms is the failure mode this
+  project exists to avoid. DESIGN.md now carries the distinction:
+  - *Display order is a client concern* — nothing shared, nothing in the
+    document; sort what the doc already gave you.
+  - *Shared order is ordinary model data* — a number on the row, written
+    with a `replace` op like `done`. There is nothing for the kit to add.
+  - *Concurrent reordering is LWW*, like every other field; convergent
+    reordering is the OT/CRDT this stack declines by design.
+  SKILL.md and REFERENCE.md say it in those terms, and say plainly: do not
+  invent a move protocol.
+
+### Fixed
+
+- **The 0.10.2 upgrade instructions bricked a boot** (UPGRADING.md,
+  CHANGELOG). They said to copy 007 plus "the `db/fn/` files" — but
+  `db/fn/board.sql` read `cards.pos`, which only `db/102-card-pos.sql`
+  creates, and that file was never mentioned. Since 007 commits in its own
+  transaction before the vocabulary pass, the failure left `doc_open`
+  dropped and the app down, behind an error naming the wrong repair. With
+  `db/fn/board.sql` withdrawn, core vocabulary touches core tables only —
+  pinned by a test that boots an app which deleted the demo entirely.
+- **`migrate()` names the real cause of a `db/fn` failure** (`epsilon/migrate.ts`).
+  A vocabulary file referencing a table no migration creates now says so —
+  and says that a `db/fn` file lives and dies with its numbered file —
+  instead of offering the signature/`DROP FUNCTION` hint, which is the wrong
+  repair. A missing-`DROP` default change gets its own message too.
+- **`migrate()` refuses to finish with 007 applied and `doc_open` missing.**
+  Copying the numbered half without `db/fn/doc-kit.sql` used to boot green
+  and fail at the first doc open, far from the cause.
+- **Sibling docs a factory hosts are gate-checked too** (`epsilon/doc.ts`).
+  0.10.2's gateless-doc refusal inspected only the name that was asked for,
+  so a factory hosting a second doc left that one ungated *and* permanently
+  hosted (never marked dynamic, so never evicted). Both closed.
+- Stale prose corrected where it now contradicted the schema: `DESIGN.md`'s
+  NULL-user rule and law description, `epsilon/law.ts`'s header, the
+  scaffold's core-file range (`db/001`–`007` plus the two core `db/fn`
+  files).
+
 ## [0.10.2] — 2026-08-06
 
 Grain hardening: the 2026-08 architecture review found three places where

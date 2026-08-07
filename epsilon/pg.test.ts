@@ -31,7 +31,7 @@ async function ensureTestDb(): Promise<void> {
   await admin.end();
 }
 
-import type { Board, Card } from "../types";
+import type { FixtureBoard as Board, FixtureCard as Card } from "./fixture";
 
 let sql: SQL;
 const servers: ReturnType<typeof Bun.serve>[] = [];

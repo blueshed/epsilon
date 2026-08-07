@@ -56,6 +56,20 @@ Any line not paying one of these taxes is deletable.
 - **A lens read in an `effect` is the precise scalar path** (0.9.0). `Lens.get()` tracks its own slice: sibling writes never reach it; ancestor replaces and snapshots fall through like `list()`'s reconcile. O(change) for field content, with no second primitive.
 - `text(sig)` is the state-channel binding — the always-correct fallback, one effect per node, and the only choice for computed/`map()` values (they carry no ops).
 - `mount(target, render)` (0.8.0) is the **app root**: it brackets a dispose scope, so the scope rules hold all the way down, and returns the disposer. A top-level `list()` or lens read warns because it has no owner; this is the answer.
+- **The slice tick is the ROOT's, shared per path and refcounted** (0.10.4).
+  A lens minted its own tick and its own root subscription on first read,
+  which is correct exactly once — and a lens minted INSIDE an effect is
+  minted on every run. Each new subscription re-ran the effect, and a JS Set
+  visits entries appended while it is being iterated, so ONE echo looped
+  until the tab died: no error, no warning, nothing in the console. It cost a
+  real app most of a session, and the demo taught the shape. Two changes, and
+  the pair is the point: `notify()` iterates a SNAPSHOT (a handler subscribed
+  during delivery hears the next op, not this one), and ticks are shared per
+  path so `at()` is idempotent for readers. An effect owns the slices its
+  body reads and releases the previous run's once the next has taken its own
+  — the lifetime tax, paid where the subscription is actually created. The
+  cheap path is now merely wasteful instead of fatal, which is the standard
+  this project holds itself to.
 - **Fixed in 0.9.0** (was "known v0 looseness"): lens `get()` used to track the ROOT, so effects over-fired on unrelated changes — correct, never minimal. `bind()` existed to buy that precision back, and the only production app answered with 116 effects and zero binds, because the imprecise path was the cheap one. The lens now tracks its own slice, so the cheap path IS the precise one and `bind()` was deleted. **Do not restate a rule the grain fights — change the grain.**
 
 ## Routing (route.ts, 0.8.0)
@@ -89,7 +103,9 @@ Three properties make it safe rather than merely convenient:
 
 The numbered pass runs first, so a function may reference a table the same boot just created. The one thing that still needs a number is a **signature change**: `CREATE OR REPLACE` cannot alter a return type or an argument name, so `DROP FUNCTION IF EXISTS foo(old args)` goes in the next numbered file. The failure says so.
 
-Not done here: epsilon's own `001`–`005` and `100`/`101` keep their function bodies where they are. Moving them would change those files' hashes and every deployed ledger would refuse to boot. New core behaviour goes to `db/fn/`; existing bodies stay put, harmlessly.
+Not done here: epsilon's own `001`–`005` and `100`/`101` keep their function bodies where they are. Moving them would change those files' hashes and every deployed ledger would refuse to boot. New core behaviour goes to `db/fn/`; existing bodies stay put, harmlessly. Where a frozen body must CHANGE, `db/fn/` supersedes it — `db/fn/doc-kit.sql` redefines 001's `doc_open` and 003's `doc_commit`, and the numbered files stay exactly as they were applied.
+
+One rule the split imposes, learned the expensive way in 0.10.2: **a `db/fn/` file may only reference tables that outlive every migration.** The vocabulary is replayed and re-validated on every boot, so a function reading a table whose numbered file was deleted fails the BOOT, not the call — and the error names a missing relation, not the deleted migration. The kit's own vocabulary touches core tables only; a doc type's vocabulary lives and dies with its tables.
 
 ## Storage tiers — where stored functions live (Peter, 2026-07-28)
 
@@ -284,9 +300,12 @@ Driven by a field report — a real app (a shared journey planner, eight
 users, deployed on the embedded tier) built on the template in one sitting.
 Its §1 was a live security defect; all three rules below are its asks.
 
-- **NULL user = the host.** `doc_open(name)` with no user composes the
+- **NULL user = the host.** `doc_open(name, NULL)` composes the
   doc's own full copy; composition functions refuse only a NON-NULL user
-  who may not see it. `openAs` is deleted — nothing about identity is
+  who may not see it. (The NULL is written OUT LOUD since 0.10.2: the
+  parameter carried a DEFAULT until then, which made the permit-free read
+  the zero-argument call — so a method that merely FORGOT the user got it.
+  Same rule, no longer reachable by omission. See db/007.) `openAs` is deleted — nothing about identity is
   captured at hosting time. (The old shape failed OPEN: a factory that
   computed its guard from a row read at hosting time kept serving a doc
   that was *claimed* while hosted, and gap catch-up — which composes with
@@ -474,7 +493,7 @@ extracts rel.test.ts's drive into the harness a new type pins itself with:
 - `proveLaw({ handle, name, sql, batches, mirrors?, undo? })` — batches
   drive the REAL wire, one per dispatch branch (functions of current data,
   closing over test state where a restore needs its remove's row); after
-  every echo the client copy must deep-equal `doc_open(name)` recomposed
+  every echo the client copy must deep-equal `doc_open(name, NULL)` recomposed
   from the tables. With `undo` wired, each batch is undone, checked,
   redone, checked — the recorded inverse is the half a plain drive never
   exercises (types that record no undo skip gracefully). `mirrors` must
@@ -536,6 +555,46 @@ and only the SQL part wanted machinery — which existed:
   wasn't to railroad. Wants a field report, not a guess.
 - (`epsilon_prune` runs at boot and daily since 0.5.0; an external cron
   remains fine.)
+
+## Ordering — two things, and only one of them is the doc's (2026-08-06)
+
+0.10.2 shipped a "worked ordering pattern": a `pos` column, server-minted
+positions, and a MOVE expressed as a swap of two values. 0.10.3 deleted it
+whole. The bug was real — swapping two values preserves the multiset, so two
+concurrent moves computed from stale copies could tie two rows at the same
+position, and a swap between tied rows writes each the value it already has,
+so the pair is wedged forever. But the bug is not the lesson. The lesson is
+that a MECHANISM was invented where a DISTINCTION was needed:
+
+- **Display order is a client concern.** How rows are arranged on my screen
+  is not shared state, so it has nothing to do with the document. Sort what
+  the doc already gave you. No schema, no ops, no dispatch.
+- **Shared order is model data — an ordinary field.** If everyone must see
+  one manually arranged list, a number on the row does it, written with a
+  `replace` op like any other field. There is nothing for the kit to add,
+  because a doc already carries arbitrary fields.
+- **Concurrent reordering is LWW**, like every other field: the log says who
+  moved what, and undo reverts it. Reordering that CONVERGES under
+  simultaneous edits is OT/CRDT, which is a non-goal below. Inventing a
+  bespoke convergence scheme for one field, in a stack that declines
+  convergence everywhere else, is how you get a wedge.
+
+The general form, and the reason this section exists at all: **adding a
+mechanism where a sentence would do is the failure mode this project is
+supposed to be immune to.** It is what killed the stacks epsilon replaces.
+The four taxes are the test — a move protocol paid none of them.
+
+One rule survives the withdrawal, because writing shared order is a real
+thing apps do: **write the whole affected SEQUENCE, never swap two values.**
+A renumber assigns distinct values, so concurrent writers at worst lose an
+update and the next write heals the tie; a swap preserves the multiset, and
+a swap between tied rows writes each the value it already has. The field
+proved both halves in one app on the same day: its card drag-drop renumbers
+(no example existed, so it was thought through) and its column reorder
+swapped (an example existed — ours — so it was copied verbatim, wedge
+included). **Whatever the worked example does, an app will do.** That is the
+grain argument turned on its author, and it is why a bad example is more
+expensive than no example.
 
 ## Non-goals
 
